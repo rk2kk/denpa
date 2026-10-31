@@ -95,7 +95,7 @@ export const config = {
 
   ffmpeg: str("FFMPEG", "/usr/local/bin/ffmpeg"),
   /**
-   * ブラウザで MPEG-2 と AAC をデコードする WebAssembly の置き場 (ライブを放送そのままで送る経路。docs/stream.md#放送そのままmpeg-2を送る)。
+   * ブラウザで MPEG-2・AAC・Opus をデコードする WebAssembly の置き場 (変換せずに観るライブと録画・互換モードの音。docs/stream.md#放送そのままmpeg-2を送る)。
    * Dockerfile の `mpeg2wasm` 段が置く。**アプリの外にあるのは、開発の compose がソースを
    * /app に被せるため** (中に置くと隠れる)。無ければ放送そのままの経路は使えず、画面はエンコードしたものに戻る
    */
@@ -128,6 +128,18 @@ export const config = {
    * 渡していなければ1つも無いのが普通
    */
   hwDevices: str("HW_DEVICES", "/dev/dri/renderD*"),
+  /**
+   * Rockchip MPP (RK3588 / RK3588S のハードウェアエンコーダ) のデバイス。在れば h264_rkmpp を試す
+   * (server/hwenc.ts)。BSP カーネルでないと無い。ffmpeg (MPP) は決まった場所を自分で開くので、
+   * ここを変えても ffmpeg の見る場所は変わらない — 変えるのはテスト (偽のデバイス) だけ
+   */
+  rkmppDevice: str("RKMPP_DEVICE", "/dev/mpp_service"),
+  /**
+   * NVIDIA の GPU のデバイスファイル (`nvidia0`・`nvidia1` …) を探すフォルダ。在れば NVENC を試す
+   * (server/hwenc.ts)。ffmpeg は GPU をデバイスファイルではなく番号 (`-gpu N`) で受けるので、
+   * ここを変えても ffmpeg の使う GPU は変わらない — 変えるのはテスト (偽のデバイス) だけ
+   */
+  nvidiaDir: str("NVIDIA_DIR", "/dev"),
   /** GPU の試しのエンコード1本に待つ上限 (ms)。ドライバが固まっても起動が止まらないように */
   hwProbeTimeout: num("HW_PROBE_TIMEOUT", 20000),
 

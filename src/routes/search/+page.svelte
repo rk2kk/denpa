@@ -7,6 +7,7 @@
 
   import { submitting } from "#lib/actions.js";
   import { arming } from "#lib/arming.svelte.js";
+  import { clipVersionQuery } from "#lib/clips.js";
   import ActionButton from "#lib/components/ActionButton.svelte";
   import ArmedDelete from "#lib/components/ArmedDelete.svelte";
   import ProgramDetail from "#lib/components/ProgramDetail.svelte";
@@ -94,7 +95,8 @@
     data.programs.total +
       data.recordings.total +
       data.reservations.total +
-      data.rules.total,
+      data.rules.total +
+      data.clips.total,
   );
 
   /** いま放送中かの判定に使う時計。分で刻む (番組表と同じ) */
@@ -104,6 +106,8 @@
     return () => clearInterval(timer);
   });
   const watchable = $derived(new Set(data.watchable));
+  /** 切り抜きの節の行き先。同じ言葉のまま切り抜きの画面へ */
+  const clipsHref = $derived(resolve(`clips?${new URLSearchParams({ q })}`));
 
   /**
    * 番組の詳細。押すもの (視聴・予約・取消・ルールを作る) を出すのに、開いた行を覚えておく。
@@ -450,6 +454,46 @@
             data.recordings.rows.length,
             data.recordings.total,
           )}
+        {/if}
+      </section>
+
+      <!-- 切り抜き (番組名・局名・字幕)。頭の数枚だけ並べ、続きは切り抜きの画面で同じ言葉のまま -->
+      <section
+        class="hits-section"
+        aria-labelledby="clips-head"
+        data-testid="search-clips"
+      >
+        <div class="hits-head">
+          <h2 id="clips-head">
+            切り抜き <span class="count">{data.clips.total}</span>
+          </h2>
+          {#if data.clips.total > 0}
+            <a class="small" href={clipsHref} data-testid="search-clips-all"
+              >切り抜きの画面で見る</a
+            >
+          {/if}
+        </div>
+        {#if data.clips.total === 0}
+          <p class="none small muted">一致する切り抜きはありません</p>
+        {:else}
+          <ul class="clip-strip">
+            {#each data.clips.rows as clip (clip.id)}
+              <li>
+                <a href={clipsHref} data-testid="search-clip">
+                  <img
+                    src="{resolve(
+                      `api/clips/${clip.id}/small`,
+                    )}{clipVersionQuery(clip)}"
+                    alt={clip.programName || clip.serviceName}
+                    width={clip.width}
+                    height={clip.height}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </a>
+              </li>
+            {/each}
+          </ul>
         {/if}
       </section>
 
@@ -825,6 +869,31 @@
     display: flex;
     flex-direction: column;
     gap: var(--dp-space-2);
+  }
+  /* 切り抜きの節は件の面に乗せず、小さな画像を横に並べる (切り抜きの画面のグリッドと同じく平らに) */
+  .clip-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .clip-strip > li {
+    margin: 0;
+    list-style: none;
+  }
+  .clip-strip a {
+    display: block;
+  }
+  .clip-strip img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    border-radius: var(--dp-radius);
+    background: var(--dp-video);
+    object-fit: cover;
   }
   .hits-head {
     display: flex;

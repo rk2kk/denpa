@@ -13,7 +13,7 @@ export type IconShape = Component<SvelteHTMLElements["svg"]>;
 export { default as DATA } from "~icons/denpa/data";
 /** 音声を選ぶ (主・副・二か国語) */
 export { default as AUDIO } from "~icons/lucide/audio-lines";
-/** 切り抜き (いまの1コマを PNG に) */
+/** 切り抜き (いまの1コマをサーバに保存する) */
 export { default as CAMERA } from "~icons/lucide/camera";
 export { default as CAPTION } from "~icons/lucide/captions";
 /** 聞き返しの2回目 (レ点)。**文字を出さずに「これでいいか」を言う** */
@@ -23,6 +23,8 @@ export { default as BACK } from "~icons/lucide/chevron-left";
 export { default as FORWARD } from "~icons/lucide/chevron-right";
 /** 録画 (ライブの右上)。押すといま流れている番組の録画が始まる。丸に点 (録画の印) */
 export { default as RECORD } from "~icons/lucide/circle-dot";
+/** 端末に保存 (切り抜きの画面で1枚を開いたとき) */
+export { default as DOWNLOAD } from "~icons/lucide/download";
 /** Hybridcast。別のタブへ出ていくので、denpa の中で開くデータ放送の `d` とは違う形にする */
 export { default as OPEN_OUT } from "~icons/lucide/external-link";
 /** コーデック (再生の設定の行) */
@@ -35,10 +37,16 @@ export { default as BACKGROUND } from "~icons/lucide/headphones";
 export { default as INFO } from "~icons/lucide/info";
 /** 全画面にする / 戻す */
 export { default as EXPAND } from "~icons/lucide/maximize";
+/** 実況のコメント (再生の設定の行) */
+export { default as JIKKYO } from "~icons/lucide/message-square-text";
 export { default as SHRINK } from "~icons/lucide/minimize";
 /** 互換モード (再生の設定の行。動画が止まる端末向けに canvas に描く。`canvas-video.ts`) */
 export { default as COMPAT } from "~icons/lucide/monitor-play";
 export { default as PAUSE } from "~icons/lucide/pause";
+/** 実況に書き込む (ライブの右端の列) */
+export { default as PENCIL } from "~icons/lucide/pencil";
+/** 実況に書き込むものの色・位置・大きさ */
+export { default as PALETTE } from "~icons/lucide/palette";
 /** ピクチャーインピクチャー (小窓) */
 export { default as PIP } from "~icons/lucide/picture-in-picture-2";
 export { default as PLAY } from "~icons/lucide/play";

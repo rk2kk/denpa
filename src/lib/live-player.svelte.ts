@@ -78,6 +78,8 @@ import {
   STEADY,
   type Steering,
 } from "#lib/ts/pacing.js";
+import { retryWait } from "#lib/ts/playback.js";
+import { MAX_LEVEL } from "#lib/volume.js";
 
 type LiveState = "idle" | "connecting" | "playing" | "error";
 
@@ -132,15 +134,6 @@ const GRACE = 3_000;
  * 画面が残る。壊れているのに動いて見えるのがいちばん悪い
  */
 const HOLD_MOST = 6_000;
-/**
- * 接続が切れたときに待つ時間 (ms)。**倍々に伸ばして、この上限で頭打ち。**
- *
- * いちばん多いのは**サーバの入れ替え** (デプロイ)。コンテナごと作り直すので数十秒
- * 帰ってこないが、帰ってくることは分かっている。切れた時点で諦めていた頃は、
- * 観ている最中に「選んでください」に戻って**自分で選び直す**ことになっていた
- */
-const RETRY_FIRST = 1_000;
-const RETRY_MOST = 10_000;
 /** 番組が替わって作り直す (`restart`) のが、これより短い間に続いたら待つ (ms) */
 const RESTART_CALM = 30_000;
 /** 追っかけで作り直したあと、手元がこれ (秒) を切ったらリクエストし直す (`resumeChase`) */
@@ -430,6 +423,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * (画面が決める。`background.svelte.ts`)
    */
   let playback = false;
+  /** 音量 (%。`#lib/volume.ts`)。canvas で描くときに RawEngine へ渡す。`<video>` のぶんは画面が持つ (`volume.svelte.ts`) */
+  let volume = MAX_LEVEL;
   /** canvas で描く経路の刻み。貯まり・貯める量の決め直しを回す (`rawPace`) */
   let rawTimer: ReturnType<typeof setInterval> | null = null;
   /** canvas で描くとき、1コマデコードするのに掛かっている時間 (ms、95パーセンタイル)。**画面に出す** */
@@ -464,7 +459,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   let dropped = $state(0);
   /** `droppedVideoFrames` を最後に読んだ値 (`countDropped`)。Safari は飛ぶたびに 0 に戻すので差を足し上げる */
   let droppedSeen = 0;
-  /** 途中から入った流れの、最初のキーフレームまでを渡さない係 (`ts/key-gate.ts`)。**始める位置もここで決まる** */
+  /** 途中から入ったストリームの、最初のキーフレームまでを渡さない係 (`ts/key-gate.ts`)。**始める位置もここで決まる** */
   const keyGate = new KeyGate();
   /** 映した1枚が再生位置からどれだけ遅れているか (秒)。音と字幕は再生位置に乗るので、口の動きだけずれる (`unslip`) */
   let slip = $state(0);
@@ -1381,8 +1376,9 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   }
 
   /**
-   * 待ってから繋ぎ直す (いちばん多いのはサーバの入れ替え)。待ちは倍々で `RETRY_MOST` まで。回数の上限は
-   * 置かない — 点けっぱなしで戻ってきたときに映っていてほしい
+   * 待ってから繋ぎ直す (いちばん多いのはサーバの入れ替え)。待ちは倍々で 10 秒まで (`retryWait`)。回数の上限は
+   * 置かない — 点けっぱなしで戻ってきたときに映っていてほしい。切れた時点で諦めていた頃は、
+   * 観ている最中に「選んでください」に戻って自分で選び直すことになっていた
    */
   function reconnect(): void {
     if (
@@ -1394,7 +1390,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       return;
     state = "connecting";
     message = "";
-    const wait = Math.min(RETRY_MOST, RETRY_FIRST * 2 ** attempts);
+    const wait = retryWait(attempts);
     attempts++;
     retry = setTimeout(() => {
       retry = null;
@@ -2158,6 +2154,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       video.style.opacity = "0";
       // 音を消していたなら、canvas で描くときも消したまま始める
       if (silenced) engine.mute();
+      engine.volume = volume;
     } else {
       engine.reset();
     }
@@ -2314,6 +2311,11 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       playback = on;
       if (engine !== null) engine.background = on;
     },
+    /** 音量 (%)。canvas で描くときの音に掛ける。`<video>` の音は画面が Web Audio に通して掛ける (`volume.svelte.ts`) */
+    set volume(level: number) {
+      volume = level;
+      if (engine !== null) engine.volume = level;
+    },
     /** canvas で描くとき、1コマデコードするのに掛かっている時間 (ms、95パーセンタイル)。canvas で描いていなければ 0 */
     get decodeMs() {
       return decodeMs;
@@ -2389,6 +2391,17 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     get rateChanges() {
       return rateChanges;
     },
+    /**
+     * **いま映しているコマの放送時刻** (unix ms、サーバの時計)。`clock` の通知と再生位置から出す
+     * (実況のコメントを合わせる。`JikkyoLayer`)。`clock` がまだ届いていなければ null
+     */
+    airTime(): number | null {
+      if (broadcast === null) return null;
+      const at =
+        engine !== null ? engine.position : (element?.currentTime ?? null);
+      if (at === null) return null;
+      return broadcast.unixMs + (at - broadcast.at) * 1000;
+    },
     /** 押して止めているか */
     get paused() {
       return paused;
@@ -2454,6 +2467,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     /** 字幕を出しているか */
     get captions() {
       return captions;
+    },
+    /** いま描いている字幕の1枚 (切り抜きに文字を添える)。出していなければ null */
+    get shownCaption(): CaptionPage | null {
+      return shown;
     },
     /** 放送が字幕を持っているか。**1枚も届いていなくても分かる** */
     get hasCaptions() {

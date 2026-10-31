@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { MediaQuery } from "svelte/reactivity";
 
   import {
     canvasVideo,
@@ -20,29 +21,34 @@
     CUT,
     DATA,
     EXPAND,
+    JIKKYO,
     PIP,
     SHRINK,
   } from "./icons";
   import type { Pip } from "./pip.svelte.js";
   import type { SettingChoice, SettingRow, SettingToggle } from "./settings";
   import SettingsMenu from "./SettingsMenu.svelte";
+  import { POINTER } from "./SoundButton.svelte";
+  import type { Volume } from "./volume.svelte.js";
 
   /**
    * 操作バーの右端 (3画面で同じ)。再生の設定 (⚙ `SettingsMenu`。並びと中身は docs/player.md)・小窓 (出せる端末だけ)・
-   * 全画面。狭い枠 (`stage.fold`) では毎回は使わないものを ⚙ の頭に入れる (`fold`。小窓もここで足す)。
+   * 全画面。畳むとき (`stage.fold`。狭い枠か、一段に収まらないとき) は毎回は使わないものを ⚙ の頭に入れる (`fold`。小窓もここで足す)。
    * 互換モードは切り替えたらページを読み直す — `<video>` か canvas かはプレイヤーを組むときに決まる
    */
   interface Props {
     /** testid の頭 (`watch` / `chase` / `live`) */
     prefix: string;
     background: Background;
+    /** 音量 (`volume.svelte.ts`)。音のボタンがつまみを出せないときだけ、⚙ の上の並びにつまみを置く */
+    volume: Volume;
     ambient: Ambient;
     pip: Pip;
     fullscreen: StageFullscreen;
     /** 舞台 (`PlayerStage`) が渡す畳み方 */
     stage: { fold: boolean };
     /**
-     * 狭い枠で操作バーから畳むもの (`settings.ts` の `SettingRow`)。操作バーと同じ順に。畳まないときは使わない。
+     * 操作バーから畳むもの (`settings.ts` の `SettingRow`)。操作バーと同じ順に。畳まないときは使わない。
      * 小窓はここで足す
      */
     fold?: SettingRow[];
@@ -64,10 +70,18 @@
     receive?: { on: boolean; toggle: () => void } | undefined;
     /** 字幕 (`settings.ts` の `subtitles`)。字幕を持っているときだけ */
     subtitle?: SettingChoice | undefined;
+    /**
+     * 実況のコメント (3画面で同じ。端末ごと。`#lib/jikkyo/switch.svelte.ts`)。世帯の設定 (連携の「実況」) がオンのときだけ渡す。
+     * 実況の無い局・録画は `missing` で押せなくし、読めないときは `down` で「(いまは読めません)」を添える (押せるまま)
+     */
+    jikkyo?:
+      | { on: boolean; toggle: () => void; missing: boolean; down: boolean }
+      | undefined;
   }
   let {
     prefix,
     background,
+    volume,
     ambient,
     pip,
     fullscreen,
@@ -78,10 +92,11 @@
     data,
     receive,
     subtitle,
+    jikkyo,
     fold = [],
   }: Props = $props();
 
-  /** 狭い枠で ⚙ の頭に入れるもの。小窓は出せる端末だけ */
+  /** 畳むときに ⚙ の頭に入れるもの。小窓は出せる端末だけ */
   const head = $derived<SettingRow[]>(
     stage.fold
       ? [
@@ -101,6 +116,13 @@
         ]
       : [],
   );
+
+  /**
+   * ⚙ に音量のつまみを置くか。**つまみは画面に1つだけ** — マウスの端末では音のボタンに乗せると浮かぶので
+   * (`SoundButton`) ⚙ には置かない。置くのは指の端末 (浮かばない) と、畳んで音のボタンごと ⚙ に入ったときだけ
+   */
+  const pointer = new MediaQuery(POINTER);
+  const showVolume = $derived(stage.fold || !pointer.current);
 
   /** 互換モードか。端末で決まるので、開いてから読む */
   let compat = $state(false);
@@ -163,6 +185,23 @@
             toggle: receive.toggle,
           },
         ]),
+    ...(jikkyo === undefined
+      ? []
+      : [
+          {
+            id: "jikkyo",
+            label: "実況",
+            icon: JIKKYO,
+            on: jikkyo.on && !jikkyo.missing,
+            toggle: jikkyo.toggle,
+            disabled: jikkyo.missing,
+            note: jikkyo.missing
+              ? "この局にはありません"
+              : jikkyo.on && jikkyo.down
+                ? "いまは読めません"
+                : undefined,
+          },
+        ]),
     {
       id: "ambient",
       label: "アンビエントモード",
@@ -192,7 +231,13 @@
   );
 </script>
 
-<SettingsMenu {prefix} {head} {toggles} {choices} />
+<SettingsMenu
+  {prefix}
+  {head}
+  {toggles}
+  {choices}
+  volume={showVolume ? volume : undefined}
+/>
 <!-- 出すときだけ置く。ライブは再生の前に出す注意を自分でも持っているので、いつも置くと2つになる -->
 {#if confirming}
   <DriveNotice

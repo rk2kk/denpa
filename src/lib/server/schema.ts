@@ -242,6 +242,23 @@ export const programs = sqliteTable(
     copy_never: flag("copy_never")
       .notNull()
       .default(sql`0`),
+    /*
+     * **シリーズ** (EIT のシリーズ記述子)。載せる局のぶんだけ入り、載っていない番組は全部 NULL。
+     * docs/data.md「シリーズ」
+     */
+    /** シリーズの番号。**局の中でだけ決まる** — 比べるときは局 (`service_id`) と組にする */
+    series_id: integer("series_id"),
+    /**
+     * 再放送の印 (repeat_label)。0 はオリジナル、それ以外はオリジナルと期間の重なる再放送。
+     * **0 でも初回とは言えない** (重ならない再放送は 0 で来ることがある)
+     */
+    series_repeat: integer("series_repeat"),
+    /** 何話目か。放送が言っていなければ NULL */
+    series_episode: integer("series_episode"),
+    /** 全何話か。分からなければ NULL。`series_episode` と同じなら最終回 */
+    series_last_episode: integer("series_last_episode"),
+    /** シリーズ名。空なら空文字 */
+    series_name: text("series_name"),
     updated_at: integer("updated_at").notNull(),
   },
   (t) => [
@@ -455,6 +472,13 @@ export const recordings = sqliteTable(
      * エンコードしたものの音声トラックに**番組表と同じ名前**を入れるのに使う (`arib.audioTitles`)
      */
     audios: json("audios", objects<Audio>()),
+    /**
+     * 番組表から写したシリーズの話数と再放送の印 (`programs` の同じ名前の列)。番組詳細の
+     * 「第N話 (全M話)」「最終回」「再放送」と、同じ回の見分け (`episode.episodeOf`) に使う
+     */
+    series_episode: integer("series_episode"),
+    series_last_episode: integer("series_last_episode"),
+    series_repeat: integer("series_repeat"),
     /** 実際に録れた長さ。番組表の尺 (end_at - start_at) は予定でしかない。取れていなければ NULL (古い行) */
     duration_ms: integer("duration_ms"),
     /** エンコードしたもののコマ数 (30/60)。実測 (fpsDetect) か既定の60。未エンコード・fps記録前の古い行は NULL */
@@ -581,6 +605,71 @@ export const encodeJobs = sqliteTable(
     index("encode_jobs_state").on(t.state, t.id),
     // 録画一覧は1行ごとに「この録画の最新のジョブ」を2回引く (状態と失敗の理由)
     index("encode_jobs_recording").on(t.recording_id, t.id),
+  ],
+);
+
+/** 切り抜きをどこで撮ったか。ライブ・追っかけ・観る画面 */
+export const CLIP_PLACES = ["live", "chase", "watch"] as const;
+
+/**
+ * **切り抜き** (観ている1コマを字幕・コメントごと写した静止画。`clips.ts`)。画像は置き場 (`clips.clipsDir`) に AVIF で置き (字幕・コメントを分けて受けたものは元の画像も)、
+ * ここには探すための情報を持つ。世帯で共有し、誰が撮ったかは持たない。
+ *
+ * 番組の情報は**撮ったときの値を写して持つ** (番組表は流れて消え、録画も消える。切り抜きは残す)
+ */
+export const clips = sqliteTable(
+  "clips",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** 撮った時刻 (サーバが受け取った時刻。ms)。並びと日付の絞り込みに使う */
+    taken_at: integer("taken_at").notNull(),
+    place: text("place", { enum: CLIP_PLACES }).notNull(),
+    /** 撮った録画。ライブは同じ番組を録っていればそれ。**録画を消したら NULL** (`files.deleteRecordingFiles`) */
+    recording_id: integer("recording_id"),
+    /** 局の内部ID (`tuner.serviceKey`) */
+    service_id: integer("service_id").notNull(),
+    /** 番組。引けなかった (番組表に無い時刻) なら NULL */
+    event_id: integer("event_id"),
+    program_start_at: integer("program_start_at"),
+    program_name: text("program_name").notNull().default(""),
+    service_name: text("service_name").notNull().default(""),
+    /** 番組の始めからの位置 (ms)。「この場面から観る」の行き先。番組が引けなければ NULL */
+    offset_ms: integer("offset_ms"),
+    /** 出していた字幕の文字。出していなければ空 */
+    captions: text("captions").notNull().default(""),
+    /**
+     * 探すための文字 (番組名・局名・字幕を `title.searchable` で揃えてつないだもの)。
+     * 撮ったときに作るので、探すときは SQL だけで当たる (キーセットのページがそのまま使える)
+     */
+    search_text: text("search_text").notNull().default(""),
+    /** 画像。置き場からの相対 (`2026-10/12.avif`)。一覧用の小さいものは `-small` を足した名前 */
+    file: text("file").notNull().default(""),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    /** 置き場で使っている大きさ (画像・一覧用・元の画像の合計) */
+    bytes: integer("bytes").notNull(),
+    /**
+     * 字幕・実況のコメントを分けて受けたか (元の画像を `<ID>.src/` に持っている)。撮ったときに出していたものだけ。
+     * 分けて受けていないもの (字幕を焼き込んだ古い切り抜き) は両方 0 で、出し入れできない
+     */
+    has_captions: flag("has_captions")
+      .notNull()
+      .default(sql`0`),
+    has_comments: flag("has_comments")
+      .notNull()
+      .default(sql`0`),
+    /** いま画像に重ねているか (`has_*` のものだけ意味を持つ)。撮ったときは出していたものが入っている */
+    show_captions: flag("show_captions")
+      .notNull()
+      .default(sql`0`),
+    show_comments: flag("show_comments")
+      .notNull()
+      .default(sql`0`),
+  },
+  (t) => [
+    index("clips_taken").on(t.taken_at),
+    index("clips_recording").on(t.recording_id),
+    index("clips_service").on(t.service_id),
   ],
 );
 

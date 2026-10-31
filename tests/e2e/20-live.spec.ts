@@ -15,6 +15,7 @@ import {
   expectSideAligned,
   expectSideFrame,
   fakeDataBroadcast,
+  fakeFrame,
   feedCaption,
   feedData,
   flipSetting,
@@ -26,6 +27,7 @@ import {
   overlayTroubles,
   pickCodec,
   syncEpg,
+  takeClip,
   test,
   upcoming,
   wakeControls,
@@ -1275,6 +1277,25 @@ test.describe("ライブ視聴", () => {
     expect(await page.getByTestId("live-full").locator("svg").count()).toBe(1);
   });
 
+  /**
+   * **ライブの切り抜きもサーバに保存する。** 送るのは局と映していたコマの放送時刻だけで、
+   * 番組名と局名はサーバが番組表から引いて写しておく
+   */
+  test("切り抜きはサーバに保存し、番組名はサーバが番組表から引く", async ({
+    page,
+  }) => {
+    await goto(page, "/live");
+    await page.getByTestId("live-channel").first().click();
+    await expect(page.getByTestId("live-title")).toBeVisible();
+    await fakeFrame(page, "live-video");
+    await wakeControls(page, "live-frame");
+    const clip = await takeClip(page, "live-shot");
+    expect(clip.place).toBe("live");
+    expect(clip.serviceName).not.toBe("");
+    expect(clip.programName).not.toBe("");
+    expect(clip.offsetMs).toBeGreaterThanOrEqual(0);
+  });
+
   /*
    * **しばらく触らなければ消える。** 映像の上に居座るものなので、見ている間は
    * 引っ込んでいるほうがいい。**止めていても消えます** — 一時停止するのは
@@ -1853,8 +1874,9 @@ test.describe("ライブ視聴", () => {
     await expect(menu).toBeVisible();
     await expect(menu).toHaveAttribute("role", "menu");
 
-    // 先頭はデータ放送を常に受信 (ライブに CMスキップは無い。データ放送を開くのは右端の列の d)。
-    // Enter で切り替わり、閉じない
+    // マウスの端末の広い枠では音量のつまみは音のボタンにだけあり (`58-volume`)、先頭はデータ放送を常に受信
+    // (ライブに CMスキップは無い。データ放送を開くのは右端の列の d)。Enter で切り替わり、閉じない
+    await expect(page.getByTestId("live-volume")).toHaveCount(0);
     const first = page.getByTestId("live-data-receive");
     await expect(first).toBeFocused();
     await expect(first).toHaveAttribute("role", "menuitemcheckbox");

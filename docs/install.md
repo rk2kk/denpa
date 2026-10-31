@@ -1,6 +1,6 @@
 # 立てる
 
-README の手順の細かいところ。用意するもの、入れ方 (1行・Compose・1コンテナ・Helm)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
+README の手順の細かいところ。用意するもの、入れ方 (1行・Compose・1コンテナ・Helm・Talos Linux)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
 Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [install-windows.md](install-windows.md) に。使う前に [使ってよい範囲](../README.md#使ってよい範囲) を読んでください。
 
 ## 用意するもの
@@ -8,9 +8,13 @@ Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [i
 チューナー・カードリーダー・OS の一覧と機材ごとのページは [tuners.md](tuners.md#要るもの) に。
 
 - イメージは amd64 と arm64 を同じタグにまとめてあり、自分のアーキテクチャのものが降ってきます
-- **Intel の GPU** — `/dev/dri` が見えれば起動時に見つけて GPU でエンコードします。compose.prod.yml では渡す行をコメントにしてあるので、
-  `compose.override.yml` で渡します (Helm は既定で渡す)。GPU を使えるのは amd64 だけです
-  ([encode.md](encode.md#gpu-でエンコードする-intel-qsv--va-api))
+- **Intel・AMD の GPU** — `/dev/dri` が見えれば起動時に見つけて GPU でエンコードします。compose.prod.yml では渡す行をコメントにしてあるので、
+  `compose.override.yml` で渡します (Helm は既定で渡す)。Intel・AMD の GPU を使えるのは amd64 だけです
+  ([encode.md](encode.md#gpu-でエンコードする-qsv--va-api))
+- **NVIDIA の GPU** — ホストにドライバ (530 以降) と NVIDIA Container Toolkit を入れ、GPU を予約して渡せば、H.264 と AV1 (RTX 40 以降) を
+  NVENC でエンコードします (amd64。[encode.md](encode.md#nvidia-でエンコードする))
+- **Rockchip (RK3588 / RK3588S)** — BSP カーネルの上で `/dev/mpp_service` と `/dev/dma_heap` を渡せば、H.264 を
+  ハードウェアでエンコードします (arm64。[encode.md](encode.md#rockchip-rk3588-でエンコードする))
 
 ## 1行で入れる
 
@@ -91,6 +95,15 @@ helm install denpa oci://ghcr.io/danything/charts/denpa \
 `oci://ghcr.io/danything/charts/denpa-agent` を使い、本体側は `TUNER_AGENT_URL` でそこを指します
 ([agent.md](agent.md#エージェントは別イメージ別プロセス))。値の一覧と意味は
 [charts/denpa/values.yaml](../charts/denpa/values.yaml) のコメントにあります。
+
+### Talos Linux に OS ごと
+
+PT3 を挿した機械を Talos Linux の 1 台のクラスタにして、OS の設定から denpa まで 1 行で立てます
+(Talos の alpha で、実機では確かめていない)。手順は [install-talos.md](install-talos.md)。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/danything/denpa/main/talos/install.sh | sh -s -- --node <IP>
+```
 
 ### イメージのタグ
 

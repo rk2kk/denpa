@@ -80,7 +80,7 @@ import { orm } from "./db";
 import { deinterlace } from "./encoder";
 import { followOnAir } from "./epg";
 import { emit, type Yielded } from "./events";
-import { type LiveHw, liveHw, liveHwArgs } from "./hwenc";
+import { type LiveHw, liveHw, liveHwArgs, nvencBusy } from "./hwenc";
 import { tunerOf, yieldedTo } from "./live-yield";
 import { programs, recordings, services } from "./schema";
 import { settings } from "./settings";
@@ -600,7 +600,7 @@ export function whyNotTuned(why: string, until: number | null): string {
 }
 
 interface Viewer {
-  /** 送り先。WebSocket の視聴者は Connection、HTTP の視聴者 (liveStream) は映像だけを流すエンドポイント */
+  /** 送り先。WebSocket の視聴者は Connection、HTTP の視聴者は映像か字幕だけを流すエンドポイント (`sessionStream`・`liveCaptions`) */
   connection: Pick<Connection, "send">;
   /** init を渡したか。渡す前に中身を送っても MSE は捨てる */
   ready: boolean;
@@ -649,6 +649,9 @@ let liveTurn = 0;
 /** GPU からソフトウェアに降りたときに画面へ出す一行 */
 const GPU_GAVE_UP =
   "GPU でエンコードできないため、ソフトウェアでエンコードしています";
+/** NVENC の同時に開ける数を超えて降りたとき (`hwenc.nvencBusy`)。覚えないので、次の選局はまた GPU から試す */
+const GPU_BUSY =
+  "GPU が同時にエンコードできる数を超えたため、ソフトウェアでエンコードしています";
 
 function hwKey(codec: StreamCodec, hw: LiveHw): string {
   return `${codec}:${hw.way.device}:${hw.way.kind}:${hw.full}`;
@@ -663,12 +666,29 @@ export function pickLiveHw(codec: LiveCodec, interlaced = true): LiveHw | null {
   const found = liveHw(codec, settings().hwAllow, liveTurn++);
   if (found === null) return null;
   const hw = interlaced ? found : { ...found, full: false };
-  return remembered(gpuFailed, hwKey(codec, hw)) ? null : hw;
+  return liveHwFailed(codec, hw) ? null : hw;
 }
 
-/** GPU でエンコードできなかった経路を覚える。しばらくは `pickLiveHw` がソフトウェアを返す */
-export function blameLiveHw(codec: StreamCodec, hw: LiveHw): void {
+/** しばらくソフトウェアにしている (`blameLiveHw` で覚えた) 経路か */
+export function liveHwFailed(codec: StreamCodec, hw: LiveHw): boolean {
+  return remembered(gpuFailed, hwKey(codec, hw));
+}
+
+/**
+ * GPU でエンコードできなかった経路を覚える。しばらくは `pickLiveHw` がソフトウェアを返す。
+ *
+ * **同時に開ける数を超えて降りただけ (`busy`。`hwenc.nvencBusy`) なら覚えない。** GPU は壊れておらず、
+ * 空けば通る — 覚えると、ほかの選局まで15分ソフトウェアになる。降りた1本だけがソフトウェアで続く。
+ * 覚えたら true
+ */
+export function blameLiveHw(
+  codec: StreamCodec,
+  hw: LiveHw,
+  busy: boolean,
+): boolean {
+  if (busy) return false;
   gpuFailed.set(hwKey(codec, hw), Date.now());
+  return true;
 }
 
 /** 放送の実時刻を配り直す間隔 (ms)。配り続ける理由は `Session.tellClock` */
@@ -793,10 +813,12 @@ class Session {
    */
   private note: Notice | null = null;
   /**
-   * ソフトウェアで再エンコードしている GPU の経路 (`hwKey`)。**ソフトウェアで映像が出たら**
-   * GPU のせいだったと決めて覚え、断り書きを出す (`blameGpu`)
+   * ソフトウェアで再エンコードしている GPU の経路と、同時に開ける数を超えて降りたか (`busy`)。
+   * **ソフトウェアで映像が出たら** GPU のせいだったと決めて覚え、断り書きを出す (`blameGpu`)
    */
-  private blame: string | null = null;
+  private blame: { hw: LiveHw; busy: boolean } | null = null;
+  /** いまの ffmpeg が、NVENC の同時に開ける数を超えたと言ったか (`hwenc.nvencBusy`) */
+  private busy = false;
   /** 選べる字幕 (ffmpeg の入口の見出しから)。放送そのままの経路で字幕の ffmpeg を起こし直したら作り直す (`captions`) */
   private list: TrackList;
   private readonly aborter = new AbortController();
@@ -1114,6 +1136,7 @@ class Session {
           (this.source === undefined ? undefined : chunks(this.source()));
         if (stream === undefined) return;
         this.produced = false;
+        this.busy = false;
         const proc = Bun.spawn(
           [
             config.ffmpeg,
@@ -1220,9 +1243,9 @@ class Session {
           !(wanted !== null && this.noSubtitle)
         ) {
           console.warn(
-            `[live] ${label}: GPU (${hw.way.device} の ${hw.way.kind}${hw.full ? "・復号から" : ""}) でエンコードできなかったので、ソフトウェアで再エンコードします`,
+            `[live] ${label}: GPU (${hw.way.device} の ${hw.way.kind}${hw.full ? "・復号から" : ""}) でエンコードできなかったので、ソフトウェアで再エンコードします${this.busy ? " (同時に開ける数を超えた。方式は覚えない)" : ""}`,
           );
-          this.blame = hwKey(this.codec, hw);
+          this.blame = { hw, busy: this.busy };
           hw = null;
           continue;
         }
@@ -1499,13 +1522,14 @@ class Session {
    * GPU のせいだったと決める。**ソフトウェアに替えて映像が出たときだけ** — 選局直後で
    * 映像がまだ来ていない・入力が途切れた、のように GPU と関係なく降りたのなら、
    * ソフトウェアでも出ずに「映像を出せませんでした」になる。そのとき GPU を15分
-   * 外したり「GPU でエンコードできなかった」と言ったりすると嘘になる
+   * 外したり「GPU でエンコードできなかった」と言ったりすると嘘になる。
+   * 同時に開ける数を超えただけなら覚えず (`blameLiveHw`)、断り書きもそう言う
    */
   private blameGpu(): void {
     if (this.blame === null) return;
-    gpuFailed.set(this.blame, Date.now());
+    const kept = blameLiveHw(this.codec, this.blame.hw, this.blame.busy);
     this.blame = null;
-    this.note = { type: "notice", message: GPU_GAVE_UP };
+    this.note = { type: "notice", message: kept ? GPU_GAVE_UP : GPU_BUSY };
     this.tell(this.note);
   }
 
@@ -1772,6 +1796,8 @@ class Session {
       }
       // 字幕が無い放送。**映像ごと落ちる**ので、字幕なしで再エンコードする (`run`)
       if (NO_SUBTITLE.test(line)) this.noSubtitle = true;
+      // NVENC の同時に開ける数を超えた。GPU から降りても方式は覚えない (`run`・`blameGpu`)
+      if (nvencBusy(line)) this.busy = true;
       if (worthLogging(line)) {
         console.warn(
           `[live] ${this.channelType}:${this.channel} ffmpeg: ${line.trim()}`,
@@ -2133,7 +2159,7 @@ export function chaseStream(
   }
   const release = holdTranscode();
   if (release === null) return "busy";
-  return sessionStream((viewer, held) =>
+  return sessionStream((viewer, hold) =>
     openChase(
       {
         type: "chase",
@@ -2145,7 +2171,7 @@ export function chaseStream(
         language: undefined,
       },
       viewer,
-      held,
+      hold,
       release,
     ),
   );
@@ -2387,10 +2413,10 @@ function spawnRecordingCaptioner(
  * 流すのは映像のコンテナ (init + 中身) と元のTSだけで、字幕・データ放送・通知は捨てる。
  * エンコードできなくなったら・読み切ったら・チューナーから外されたら・番組が替わって作り直すなら (`error` / `ended` / `lost` / `restart`) 応答を閉じる。読むのが追いつかない
  * 相手も閉じる (溜め続けるとメモリが増え続け、fMP4 は途中を捨てると壊れる)。
- * `held` は溜まりすぎて送り込みを止めたいか (追っかけだけが使う。`CHASE_STREAM_HOLD`)
+ * `hold` は溜まりすぎて送り込みを止めたいか (追っかけだけが使う。`CHASE_STREAM_HOLD`)
  */
 export function sessionStream(
-  open: (viewer: Viewer, held: () => boolean) => Session | null,
+  open: (viewer: Viewer, hold: () => boolean) => Session | null,
 ): ReadableStream<Uint8Array> {
   let session: Session | null = null;
   /** もう閉じたか。加えている最中 (watch の中) に閉じることがあるので、戻ってから見る */
@@ -2522,7 +2548,7 @@ export function warm(
 
   /*
    * **誰も来なければ自分で畳む。** 見ている人がいなくなったら畳む仕掛け
-   * (`attend` の `leave`) は、**1人も来なかった場合には動かない**
+   * (`depart`) は、**1人も来なかった場合には動かない**
    */
   const timer = setTimeout(() => {
     if (session.empty) session.stop();

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { resolve } from "$app/paths";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
+  import { MediaQuery } from "svelte/reactivity";
 
   import DriveNotice from "#lib/components/DriveNotice.svelte";
   import { ambientMode } from "#lib/components/player/ambient.svelte.js";
@@ -19,18 +20,23 @@
     AUDIO,
     CAMERA,
     CAPTION,
+    CHECK,
     CODEC,
+    JIKKYO,
     PAUSE,
     PLAY,
     SOUND_OFF,
-    SOUND_ON,
     SPEED,
   } from "#lib/components/player/icons.js";
   import InfoBlock from "#lib/components/player/InfoBlock.svelte";
+  import JikkyoLayer from "#lib/components/player/JikkyoLayer.svelte";
+  import JikkyoList from "#lib/components/player/JikkyoList.svelte";
   import { playerKeys } from "#lib/components/player/keys.js";
   import MediaStack from "#lib/components/player/MediaStack.svelte";
   import { pictureInPicture } from "#lib/components/player/pip.svelte.js";
-  import PlayerLayout from "#lib/components/player/PlayerLayout.svelte";
+  import PlayerLayout, {
+    PHONE_LANDSCAPE,
+  } from "#lib/components/player/PlayerLayout.svelte";
   import PlayerStage from "#lib/components/player/PlayerStage.svelte";
   import PlayerVeil from "#lib/components/player/PlayerVeil.svelte";
   import SeekBar from "#lib/components/player/SeekBar.svelte";
@@ -42,7 +48,12 @@
     speedRow,
   } from "#lib/components/player/settings.js";
   import { snapshotter } from "#lib/components/player/shot.svelte.js";
-  import { grabbedFrame, videoFrame } from "#lib/components/player/snapshot.js";
+  import {
+    captionWords,
+    grabbedFrame,
+    videoFrame,
+  } from "#lib/components/player/snapshot.js";
+  import SoundButton from "#lib/components/player/SoundButton.svelte";
   import SpeedMenu, {
     SPEED_KEY,
     storedSpeed,
@@ -50,11 +61,15 @@
   import { stageTap } from "#lib/components/player/stage-tap.js";
   import StageNote from "#lib/components/player/StageNote.svelte";
   import StageTail from "#lib/components/player/StageTail.svelte";
+  import { playerVolume } from "#lib/components/player/volume.svelte.js";
   import ProgramFacts from "#lib/components/ProgramFacts.svelte";
   import Toasts, { type Notice } from "#lib/components/Toasts.svelte";
   import { programDetail, recordingFacts } from "#lib/detail.svelte.js";
   import { driveGate } from "#lib/drive-gate.svelte.js";
   import { clock as clockLabel } from "#lib/format.js";
+  import { JikkyoFeed } from "#lib/jikkyo/feed.svelte.js";
+  import { KAKOLOG_LAG } from "#lib/jikkyo/kakolog.js";
+  import { JIKKYO_LIST_KEY, jikkyoSwitch } from "#lib/jikkyo/switch.svelte.js";
   import { write as remind } from "#lib/keep.js";
   import { livePlayer } from "#lib/live-player.svelte.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
@@ -140,6 +155,47 @@
   );
   const pos = $derived(player.chasePosition);
 
+  /**
+   * 実況のコメント (docs/watch.md の「実況のコメント」)。古いところ (10 分より前) は過去ログ API から
+   * 開いたときに 1 回、その後は 5 分おきに取り足し、新しいところは NX-Jikkyo の WebSocket から受ける
+   */
+  const jikkyoOn = jikkyoSwitch();
+  const jikkyo = new JikkyoFeed(true);
+  $effect(() => jikkyo.setNg(data.jikkyoNg));
+  const jikkyoActive = $derived(data.jikkyoAllowed && jikkyoOn.on);
+  $effect(() => {
+    const target = data.jikkyo;
+    jikkyo.set(target?.channel ?? null, jikkyoActive);
+    if (target !== null && jikkyoActive)
+      untrack(() =>
+        jikkyo.kakolog(target.head, () => Date.now() - KAKOLOG_LAG, 5 * 60_000),
+      );
+  });
+  onMount(() => () => jikkyo.close());
+
+  /**
+   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
+   * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない
+   */
+  const jikkyoList = jikkyoSwitch(JIKKYO_LIST_KEY);
+  const phoneLandscape = new MediaQuery(PHONE_LANDSCAPE);
+  const canList = $derived(
+    jikkyoActive &&
+      data.jikkyo !== null &&
+      !phoneLandscape.current &&
+      !fullscreen.active,
+  );
+  /** いま観ている場面の放送時刻 (元の TS の頭の放送時刻 + 追っかけの再生位置) */
+  function airTime(): number | null {
+    const target = data.jikkyo;
+    return target === null ? null : target.head + player.chasePosition * 1000;
+  }
+  // 過去ログにまだ入っていない新しいところ (10 分以内) を観ているなら、NX-Jikkyo で 1 回だけ遡る
+  $effect(() => {
+    const w = airTime();
+    if (w !== null && jikkyoActive) untrack(() => jikkyo.backfill(w));
+  });
+
   /** シーク。**録れているところより先へは行かせない** (まだ無い) */
   function seekTo(value: number): void {
     player.chaseSeek(Math.max(0, Math.min(value, Math.max(0, recorded - 5))));
@@ -195,6 +251,7 @@
 
   /** バックグラウンド再生 (`background.svelte.ts`)。既定はオフで、裏に回ったら止め、戻ったら止めた所から */
   const background = backgroundPlayback({
+    nativeVideo: () => (player.canvas ? null : video),
     pip: () => pip.active,
     paused: () => player.paused,
     pause: () => player.toggle(),
@@ -225,7 +282,19 @@
     player.playback = background.on || pip.active;
   });
 
-  /** キーでも動かせるようにする。割り当ては観る画面と共通 (`player/keys.ts`) */
+  /** 音量 (`volume.svelte.ts`)。canvas はエンジンの中で、`<video>` は Web Audio に通して掛ける (ライブと同じ) */
+  const volume = playerVolume({
+    video: () => (player.canvas ? null : video),
+    through: () => background.on || pip.active,
+    remote: (paused) => {
+      if (paused !== player.paused) player.toggle();
+    },
+  });
+  $effect(() => {
+    player.volume = volume.level;
+  });
+
+  /** キーでも動かせるようにする。割り当てはライブ・観る画面と共通 (`player/keys.ts`) */
   const keys = playerKeys({
     togglePlay: () => player.toggle(),
     seekBy,
@@ -234,9 +303,10 @@
     toggleFull: fullscreen.toggle,
     stepSpeed: (by) => setSpeed(stepSpeed(want, by)),
     toggleMute: player.toggleMute,
+    stepVolume: volume.step,
   });
 
-  /** いまの1コマを字幕ごと切り抜いて PNG に (ライブ・観る画面と同じ。`snapshot.ts`) */
+  /** いまの1コマを字幕・コメントごと切り抜いてサーバに保存する (ライブ・観る画面と同じ。`shot.svelte.ts`) */
   const shooter = snapshotter(controls);
   const notices = $derived<Notice[]>([...shooter.notices, ...pip.notices]);
   function snapshot(): void {
@@ -244,6 +314,14 @@
       () => (player.canvas ? grabbedFrame(player.grab()) : videoFrame(video)),
       player.captions && player.hasCaptions ? overlay : null,
       data.rec.name,
+      () => ({
+        place: "chase",
+        recording: data.rec.id,
+        at: pos,
+        // 追っかけは元の TS を流す
+        source: "ts",
+      }),
+      player.captions ? captionWords(player.shownCaption) : "",
     );
   }
 </script>
@@ -272,16 +350,40 @@
         bind:video
         bind:still
         bind:overlay
-      />
+      >
+        {#snippet under()}
+          <!-- 映像 → 実況 → 字幕。世帯の設定がオンのときだけ置く (ライブと同じ) -->
+          {#if data.jikkyoAllowed}
+            <JikkyoLayer
+              feed={jikkyo}
+              air={airTime}
+              show={jikkyoActive && data.jikkyo !== null}
+              paused={player.paused}
+              rate={player.rate}
+            />
+          {/if}
+        {/snippet}
+      </MediaStack>
 
       <!-- 右端の縦の列。**観る画面と同じ並び** (上から閉じる・切り抜き) -->
       <ControlBar side shown={controls.shown}>
         <CloseLink />
         <ControlButton
-          icon={CAMERA}
+          icon={shooter.saved ? CHECK : CAMERA}
           label="この場面を切り抜く"
+          testid="chase-shot"
           onclick={() => void snapshot()}
         />
+        <!-- 右の列の頭に「コメントの一覧」を出す・しまう (`canList`) -->
+        {#if canList}
+          <ControlButton
+            icon={JIKKYO}
+            label="コメントの一覧"
+            on={jikkyoList.on}
+            testid="chase-jikkyo-list"
+            onclick={jikkyoList.toggle}
+          />
+        {/if}
       </ControlBar>
 
       <ControlBar shown={controls.shown} testid="chase-controls">
@@ -304,11 +406,11 @@
           />
           <!-- 畳むときは音と速さを ⚙ の頭に入れる (`Extras`・`StageTail` の `fold`。字幕は ⚙ の「字幕」) -->
           <Extras>
-            <ControlButton
-              icon={player.silenced ? SOUND_OFF : SOUND_ON}
-              label={player.silenced ? "音を出す" : "音を消す"}
+            <SoundButton
+              silenced={player.silenced}
               testid="chase-sound"
               onclick={player.toggleMute}
+              {volume}
             />
             {#if player.hasCaptions}
               <ControlButton
@@ -369,6 +471,7 @@
           <!-- コーデックは選び直すと再生していた位置から再エンコード (ライブと同じ) -->
           <StageTail
             prefix="chase"
+            {volume}
             fold={[
               muteRow(SOUND_OFF, player.silenced, player.toggleMute),
               ...(player.canvas
@@ -395,6 +498,14 @@
             })}
             audio={liveAudio(AUDIO, player)}
             subtitle={liveSubtitle(CAPTION, player)}
+            jikkyo={data.jikkyoAllowed
+              ? {
+                  on: jikkyoOn.on,
+                  toggle: jikkyoOn.toggle,
+                  missing: data.jikkyo === null,
+                  down: jikkyo.down,
+                }
+              : undefined}
           />
         </ControlRow>
       </ControlBar>
@@ -448,6 +559,9 @@
           <!-- リクエストどおりにできなかった断り書き (GPU でエンコードできずにソフトウェアへ降りた、など) -->
           <StageNote>{player.warning}</StageNote>
         {/if}
+        {#if volume.noted}
+          <StageNote testid="chase-volume-note">音量 {volume.level}%</StageNote>
+        {/if}
       {/if}
     {/snippet}
   </PlayerStage>
@@ -455,6 +569,12 @@
   <!-- 右は番組の中身。枠は観る画面と同じ部品 (FactsAside)、中身も同じ (ProgramFacts) -->
   {#snippet aside()}
     <FactsAside testid="chase-facts">
+      {#snippet top()}
+        <!-- 実況のコメントの一覧は、出している間だけ列の頭に (観る画面と同じ) -->
+        {#if canList && jikkyoList.on}
+          <JikkyoList feed={jikkyo} air={airTime} />
+        {/if}
+      {/snippet}
       <ProgramFacts program={detail.current ?? facts} />
     </FactsAside>
   {/snippet}

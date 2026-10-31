@@ -211,6 +211,95 @@ describe("DsmccLogoCollector", () => {
     ]);
   });
 
+  /*
+   * **読み切ったかは、DII が知らせたモジュールが全部揃ったかで決める。** BS と CS のモジュールが
+   * 別々の時刻に来ると、片方だけ揃った時点ではまだ読み切っていない
+   */
+  test("知らせたロゴのモジュールが全部揃うまでは、読み切ったことにしない", () => {
+    const collector = new DsmccLogoCollector();
+    const bs = logoModule(0x05, [
+      { logoId: 0x0011, services: [[4, 211]], data: PNG },
+    ]);
+    const cs = logoModule(0x05, [
+      { logoId: 0x0012, services: [[7, 330]], data: PNG },
+    ]);
+    const CS_MODULE_ID = MODULE_ID + 1;
+    const head = stream(
+      packetize(0x0000, patSection([[ESS, PMT_PID]])),
+      packetize(PMT_PID, pmtSection(ESS, ES_PID, 0x79)),
+      packetize(
+        ES_PID,
+        diiSection(DOWNLOAD_ID, 4066, [
+          {
+            moduleId: MODULE_ID,
+            moduleSize: bs.length,
+            moduleVersion: 1,
+            name: "LOGO-05",
+          },
+          {
+            moduleId: CS_MODULE_ID,
+            moduleSize: cs.length,
+            moduleVersion: 1,
+            name: "CS_LOGO-05",
+          },
+        ]),
+      ),
+    );
+    for (const packet of packets(head)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(false);
+
+    const first = packetize(
+      ES_PID,
+      ddbSection(DOWNLOAD_ID, CS_MODULE_ID, 1, 0, cs),
+    );
+    for (const packet of packets(first)) collector.feed(packet);
+    expect(collector.collected()).toHaveLength(1);
+    expect(collector.carouselRead).toBe(false);
+
+    const second = packetize(
+      ES_PID,
+      ddbSection(DOWNLOAD_ID, MODULE_ID, 1, 0, bs),
+    );
+    for (const packet of packets(second)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(true);
+  });
+
+  test("BS と CS が別々の DII で来るとき、片方の名前しか知らされていないうちは読み切ったことにしない", () => {
+    const collector = new DsmccLogoCollector();
+    const bs = logoModule(0x05, [
+      { logoId: 0x0011, services: [[4, 211]], data: PNG },
+    ]);
+    const cs = logoModule(0x05, [
+      { logoId: 0x0012, services: [[7, 330]], data: PNG },
+    ]);
+    const dii = (downloadId: number, size: number, name: string) =>
+      packetize(
+        ES_PID,
+        diiSection(downloadId, 4066, {
+          moduleId: MODULE_ID,
+          moduleSize: size,
+          moduleVersion: 1,
+          name,
+        }),
+      );
+    const bsPart = stream(
+      packetize(0x0000, patSection([[ESS, PMT_PID]])),
+      packetize(PMT_PID, pmtSection(ESS, ES_PID, 0x79)),
+      dii(DOWNLOAD_ID, bs.length, "LOGO-05"),
+      packetize(ES_PID, ddbSection(DOWNLOAD_ID, MODULE_ID, 1, 0, bs)),
+    );
+    for (const packet of packets(bsPart)) collector.feed(packet);
+    expect(collector.collected()).toHaveLength(1);
+    expect(collector.carouselRead).toBe(false);
+
+    const csPart = stream(
+      dii(DOWNLOAD_ID + 1, cs.length, "CS_LOGO-05"),
+      packetize(ES_PID, ddbSection(DOWNLOAD_ID + 1, MODULE_ID, 1, 0, cs)),
+    );
+    for (const packet of packets(csPart)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(true);
+  });
+
   /**
    * **放送の中身は外から作れる。** downloadId を変えた DII を次々に送られても、
    * 組み立て中のものは一定の数までしか溜めない (古いものから捨てる)

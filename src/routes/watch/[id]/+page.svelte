@@ -9,6 +9,7 @@
     type CaptionPages,
   } from "@danything/arib/caption-text";
   import { onMount, untrack } from "svelte";
+  import { MediaQuery } from "svelte/reactivity";
 
   import { submitting } from "#lib/actions.js";
   import { arming } from "#lib/arming.svelte.js";
@@ -47,20 +48,24 @@
     CAPTION,
     CHECK,
     CODEC,
+    JIKKYO,
     NEXT,
     PAUSE,
     PLAY,
     PREV,
     SOUND_OFF,
-    SOUND_ON,
     SPEED,
     TRASH,
   } from "#lib/components/player/icons.js";
   import InfoBlock from "#lib/components/player/InfoBlock.svelte";
+  import JikkyoLayer from "#lib/components/player/JikkyoLayer.svelte";
+  import JikkyoList from "#lib/components/player/JikkyoList.svelte";
   import { playerKeys } from "#lib/components/player/keys.js";
   import { fitRect } from "#lib/components/player/paint.js";
   import { pictureInPicture } from "#lib/components/player/pip.svelte.js";
-  import PlayerLayout from "#lib/components/player/PlayerLayout.svelte";
+  import PlayerLayout, {
+    PHONE_LANDSCAPE,
+  } from "#lib/components/player/PlayerLayout.svelte";
   import PlayerStage from "#lib/components/player/PlayerStage.svelte";
   import Remote from "#lib/components/player/Remote.svelte";
   import SeekBar from "#lib/components/player/SeekBar.svelte";
@@ -72,7 +77,12 @@
     subtitles,
   } from "#lib/components/player/settings.js";
   import { snapshotter } from "#lib/components/player/shot.svelte.js";
-  import { grabbedFrame, videoFrame } from "#lib/components/player/snapshot.js";
+  import {
+    captionWords,
+    grabbedFrame,
+    videoFrame,
+  } from "#lib/components/player/snapshot.js";
+  import SoundButton from "#lib/components/player/SoundButton.svelte";
   import SpeedMenu, {
     SPEED_KEY,
     storedSpeed,
@@ -80,6 +90,7 @@
   import { stageTap } from "#lib/components/player/stage-tap.js";
   import StageNote from "#lib/components/player/StageNote.svelte";
   import StageTail from "#lib/components/player/StageTail.svelte";
+  import { playerVolume } from "#lib/components/player/volume.svelte.js";
   import ProgramFacts from "#lib/components/ProgramFacts.svelte";
   import Toasts, {
     errorNotice,
@@ -95,6 +106,8 @@
     size,
   } from "#lib/format.js";
   import { CODEC_LABEL } from "#lib/hw.js";
+  import { JikkyoFeed } from "#lib/jikkyo/feed.svelte.js";
+  import { JIKKYO_LIST_KEY, jikkyoSwitch } from "#lib/jikkyo/switch.svelte.js";
   import { read as stored, write as remind } from "#lib/keep.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
   import { type MkvSource, openMkv } from "#lib/mkv-source.js";
@@ -136,6 +149,7 @@
     type Chapter,
     chapterAt,
     cmSpans,
+    fromTsTime,
     isCm,
     nextChapterAt,
     plainMarks,
@@ -143,6 +157,7 @@
     resumePoint,
     skipCmAtStart,
     skipTarget,
+    toTsTime,
   } from "#lib/ts/watch.js";
 
   let { data, form } = $props();
@@ -158,7 +173,7 @@
   let localSrc = $state<string | null>(null);
   let localChecked = $state(false);
   let localCopy: OfflineVideo | null = null;
-  /** 端末に保存したものを探している最中の約束。字幕・チャプターも探し終えてから読む */
+  /** 端末に保存したものを探している最中の Promise。字幕・チャプターも探し終えてから読む */
   let localLookup: Promise<OfflineVideo | null> = Promise.resolve(null);
   /**
    * 何で観られるか (`api/recordings/<id>/playback`)。聞けなかった (オフライン) ときは null。
@@ -176,6 +191,12 @@
   let remux: RemuxPlayer | null = null;
   /** 選び直したときに続ける位置 (秒)。プレイヤーの開始位置に使う */
   let switchAt: number | null = null;
+  /**
+   * 「この場面から観る」(切り抜きの画面から `?at=`) で始める位置 (秒)。続きの位置より先に使い、1度使ったら忘れる。
+   * 続きからではないので「続きから」とは言わない
+   */
+  // svelte-ignore state_referenced_locally
+  let sceneAt: number | null = data.scene;
 
   /*
    * ---- 互換モード (`canvas-video.ts`。docs/player.md) ----
@@ -268,13 +289,13 @@
   function startCanvas(codec: CanvasCodec): void {
     const local = localMkv;
     const duration = canvasLength();
-    const fresh = switchAt === null;
+    const fresh = switchAt === null && sceneAt === null;
     const from = startFrom(duration);
     let made: CanvasPlayer;
     try {
       made = canvasPlayer({
         host: mediaBox as HTMLElement,
-        before: overlay,
+        before: jikkyoSlot ?? overlay,
         input: local !== null ? "mkv" : codec === "mpeg2" ? "ts-mpeg2" : "fmp4",
         request: (at, audio, signal) =>
           local !== null
@@ -311,6 +332,7 @@
     canvas = made;
     drawing = true;
     if (muted) made.mute(true);
+    made.volume(volume.level);
     drawingLocal = local !== null;
     length = duration;
     at = from ?? 0;
@@ -543,16 +565,18 @@
   }
 
   /**
-   * プレイヤーを作るときに始める位置 (秒)。コーデックを切り替えた所か、続きの位置。頭からなら null。
+   * プレイヤーを作るときに始める位置 (秒)。コーデックを切り替えた所か、この場面から観る位置か、続きの位置。頭からなら null。
    * **切り替えた所は1度読んだら忘れる**
    */
   function startFrom(duration: number): number | null {
     const from =
       switchAt ??
+      sceneAt ??
       (rec.resume_ms === null
         ? null
         : resumePoint(rec.resume_ms / 1000, duration));
     switchAt = null;
+    sceneAt = null;
     return from;
   }
 
@@ -786,12 +810,12 @@
     dataChannel = `${rec.id}`;
   }
 
-  /** 変化ログを取得している最中の約束 (`startData`) */
+  /** 変化ログを取得している最中の Promise (`startData`) */
   let dataLoading: Promise<void> | null = null;
 
   /**
    * 変化ログを取得する。**端末に保存したものを探し終えてから** — 常に受信する端末は開いた直後に呼ぶので、
-   * 探し終える前に見るとオフラインでもサーバへ取りに行って空になる。取れなければ空 (次に押したら取り直す)
+   * 探し終える前に見るとオフラインでもサーバから取得しようとして空になる。取れなければ空 (次に押したら取り直す)
    */
   async function loadTimeline(): Promise<void> {
     const copy = await localLookup;
@@ -900,6 +924,62 @@
   });
   /** 字幕を重ねる先 */
   let overlay = $state<HTMLCanvasElement | null>(null);
+  /** 実況の層の置き場。canvas で描くときの映像はこの手前に差し込む (映像 → 実況 → 字幕) */
+  let jikkyoSlot = $state<HTMLElement | null>(null);
+
+  /**
+   * 実況のコメント (docs/watch.md の「実況のコメント」)。世帯の設定と端末の ⚙ の両方がオンなら、
+   * 録画の区間のコメントを過去ログ API から開いたときに 1 回で取り、再生位置の放送時刻に合わせて流す
+   */
+  const jikkyoOn = jikkyoSwitch();
+  const jikkyo = new JikkyoFeed(false);
+  $effect(() => jikkyo.setNg(data.jikkyoNg));
+  const jikkyoActive = $derived(data.jikkyoAllowed && jikkyoOn.on);
+  $effect(() => {
+    const target = data.jikkyo;
+    jikkyo.set(target?.channel ?? null, jikkyoActive);
+    // 録画の終わりは予定なので、少し後ろまで訊く (今より後は fetchKakolog が切る)
+    if (target !== null && jikkyoActive)
+      untrack(() => jikkyo.kakolog(target.head, () => target.end + 60_000));
+  });
+  onMount(() => () => jikkyo.close());
+
+  /**
+   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
+   * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない。行を押すとその時刻へ飛ぶ
+   */
+  const jikkyoList = jikkyoSwitch(JIKKYO_LIST_KEY);
+  const phoneLandscape = new MediaQuery(PHONE_LANDSCAPE);
+  const canList = $derived(
+    jikkyoActive &&
+      data.jikkyo !== null &&
+      !phoneLandscape.current &&
+      !fullscreen.active,
+  );
+  /** 放送時刻 `at` の場面へ飛ぶ (`airTime` の逆。切った CM の中なら、その後の本編の頭へ) */
+  function seekAir(at: number): void {
+    const target = data.jikkyo;
+    if (target === null || info === null) return;
+    const ruler =
+      info.axis === "encoded"
+        ? { kept: rec.cm_kept, skip: rec.encode_skip ?? 0 }
+        : null;
+    seekTo(fromTsTime(Math.max(0, at - target.head) / 1000, ruler));
+  }
+
+  /**
+   * いま観ている場面の放送時刻。再生位置を元の TS の秒に直して (CM を切ったものは切った区間を戻して) 頭の放送時刻に足す。
+   * **切った CM の区間は飛び越すので、そこに書かれたコメントは流れない**
+   */
+  function airTime(): number | null {
+    const target = data.jikkyo;
+    if (target === null || info === null) return null;
+    const ruler =
+      info.axis === "encoded"
+        ? { kept: rec.cm_kept, skip: rec.encode_skip ?? 0 }
+        : null;
+    return target.head + toTsTime(mediaTime(), ruler) * 1000;
+  }
   /** 貼り直しを追わせている映像。二重に回さないための目印 (`follow`) */
   let following: HTMLVideoElement | null = null;
   /** 読めなかったとき。黙って黒いままにしない */
@@ -953,8 +1033,20 @@
     if (drawing) canvas?.background(on);
   });
 
+  /** 音量 (`volume.svelte.ts`)。canvas はプレイヤーの中で、`<video>` は Web Audio に通して掛ける (ライブ・追っかけと同じ) */
+  const volume = playerVolume({
+    video: () => (drawing ? null : video),
+    through: () => background.on || pip.active,
+    remote: (stop) => (stop ? pauseMedia() : playMedia()),
+  });
+  $effect(() => {
+    const level = volume.level;
+    if (drawing) canvas?.volume(level);
+  });
+
   /** バックグラウンド再生 ([background.svelte.ts](../../../lib/components/player/background.svelte.ts)) */
   const background = backgroundPlayback({
+    nativeVideo: () => (drawing ? null : video),
     pip: () => pip.active,
     paused: mediaPaused,
     pause: pauseMedia,
@@ -1029,7 +1121,7 @@
   /** 続きから出したか。画面にも言う */
   let continued = $state(false);
 
-  /** 押し間違い防止に2回押させる (3画面共通) */
+  /** 押し間違い防止に2回押させる (どの画面とも同じ。`arming.svelte.ts`) */
   const deleting = arming('[data-testid^="watch-delete"]');
 
   const detail = programDetail();
@@ -1139,6 +1231,11 @@
     }
     if (resumed || video === null) return;
     resumed = true;
+    if (sceneAt !== null) {
+      video.currentTime = sceneAt;
+      sceneAt = null;
+      return;
+    }
     const at = rec.resume_ms === null ? null : rec.resume_ms / 1000;
     if (at !== null && resumePoint(at, video.duration) !== null) {
       video.currentTime = at;
@@ -1456,9 +1553,9 @@
     paint();
   }
 
-  /** 字幕を取りに行ったか。取るのは1回だけ */
+  /** 字幕を取得したか。取得は1回だけ */
   let captionsAsked = false;
-  /** 取りに行って繋がらなかったか。字幕を入れ直したときだけ取り直す */
+  /** 取得しようとして繋がらなかったか。字幕を入れ直したときだけ取り直す */
   let captionsFailed = false;
   /** 映像が出ないまま待つ上限の時計 (`CAPTION_WAIT`) */
   let captionWait: ReturnType<typeof setTimeout> | null = null;
@@ -1647,7 +1744,7 @@
   /**
    * シークバーをつまんで動かしている間の下見 (`SeekBar` の `preview`)。`<video>` だけ。
    * 粗くてよいので、持っていれば `fastSeek` (近くのキーフレーム) を使う。飛び終わり (`seeked`) で
-   * 約束を終え、シークバーはそれから次を頼む。離したときは `seekTo` でちゃんと飛ぶ。
+   * Promise を終え、シークバーはそれから次をリクエストする。離したときは `seekTo` でちゃんと飛ぶ。
    * **canvas のプレイヤーには渡さない** — 飛ぶたびに持っているものを捨てて取り直すので、離したときだけにする
    */
   function previewSeek(to: number): Promise<void> {
@@ -1676,7 +1773,7 @@
 
   /**
    * キーでも動かせるようにする。全画面のときはこれがいちばん早い。
-   * **割り当ては追っかけと共通** (`player/keys.ts`。修飾キーの扱いもあちら)。
+   * **割り当てはライブ・追っかけと共通** (`player/keys.ts`。修飾キーの扱いもあちら)。
    * データ放送を出している間の十字キーはあちらのカーソル (`DataBroadcast`) なので、送りには使わない
    */
   const playerKey = playerKeys({
@@ -1687,6 +1784,7 @@
     toggleFull: fullscreen.toggle,
     stepSpeed: (by) => setSpeed(stepSpeed(speed, by)),
     toggleMute,
+    stepVolume: volume.step,
   });
   function keys(event: KeyboardEvent): void {
     if (showData && event.key.startsWith("Arrow")) return;
@@ -1708,7 +1806,7 @@
   /** 右に出す中身。録画の行が持っているぶん (追っかけと同じ)。番組表から引けたら `detail` が差し替える */
   const facts = $derived(recordingFacts(rec));
 
-  /** 切り抜きの結果。貼れたかどうかは言う */
+  /** 切り抜き。保存できたか・端末に保存したかを言う */
   const shooter = snapshotter(controls);
 
   /**
@@ -1734,7 +1832,7 @@
   ]);
 
   /**
-   * いまの1コマを字幕ごと切り抜いて PNG に (3画面共通。[snapshot.ts](../../../lib/components/player/snapshot.ts))。
+   * いまの1コマを字幕・コメントごと切り抜いてサーバに保存する (3画面共通。[shot.svelte.ts](../../../lib/components/player/shot.svelte.ts))。
    * canvas に描いているときはプレイヤーから1枚もらう (`<video>` は空)
    */
   function snapshot(): void {
@@ -1743,6 +1841,13 @@
       () => (canvas !== null ? grabbedFrame(canvas.grab()) : videoFrame(video)),
       drawn ? overlay : null,
       rec.name,
+      () => ({
+        place: "watch",
+        recording: rec.id,
+        at: mediaTime(),
+        source: info?.axis,
+      }),
+      drawn ? captionWords(shownPage) : "",
     );
   }
 </script>
@@ -1820,6 +1925,17 @@
             data-testid="watch-video"
           >
           </video>
+          <div bind:this={jikkyoSlot} style="display:contents">
+            {#if data.jikkyoAllowed}
+              <JikkyoLayer
+                feed={jikkyo}
+                air={airTime}
+                show={jikkyoActive && data.jikkyo !== null && !showData}
+                paused={!playing}
+                rate={speed}
+              />
+            {/if}
+          </div>
           <!--
                     字幕は `<track>` ではなく canvas に放送の置き場所のまま描く (左右の位置・背景の箱・外字が落ちるため)。
                     映像と同じ箱に入れて、データ放送の小窓へ一緒に縮ませる (ライブの `MediaStack` と同じ)。
@@ -1919,11 +2035,21 @@
         <ControlBar side shown={controls.shown} testid="watch-side">
           <CloseLink testid="watch-close" />
           <ControlButton
-            icon={CAMERA}
+            icon={shooter.saved ? CHECK : CAMERA}
             label="この場面を切り抜く"
             testid="watch-shot"
             onclick={() => void snapshot()}
           />
+          <!-- 右の列の頭に「コメントの一覧」を出す・しまう (`canList`) -->
+          {#if canList}
+            <ControlButton
+              icon={JIKKYO}
+              label="コメントの一覧"
+              on={jikkyoList.on}
+              testid="watch-jikkyo-list"
+              onclick={jikkyoList.toggle}
+            />
+          {/if}
           <!-- 観終わったその場で消せるように。2回目も同じ大きさの丸 (`icons.ts` の `OVERLAY_DANGER`) -->
           <form method="POST" action="?/delete" use:submitting>
             <input type="hidden" name="id" value={rec.id} />
@@ -1981,11 +2107,11 @@
             />
             <!-- 畳むときは音と速さを ⚙ の頭に入れる (`Extras`・`StageTail` の `fold`。字幕は ⚙ の「字幕」) -->
             <Extras>
-              <ControlButton
-                icon={muted ? SOUND_OFF : SOUND_ON}
-                label={muted ? "音を出す" : "音を消す"}
+              <SoundButton
+                silenced={muted}
                 testid="watch-sound"
                 onclick={toggleMute}
+                {volume}
               />
 
               <!-- 字幕を持っている録画でだけ出す。押しても何も起きない操作を並べない (`/live` と同じ) -->
@@ -2061,6 +2187,7 @@
                         -->
             <StageTail
               prefix="watch"
+              {volume}
               fold={[
                 muteRow(SOUND_OFF, muted, toggleMute),
                 ...(compat
@@ -2089,6 +2216,14 @@
                 : undefined}
               receive={data.hasData
                 ? { on: receiveData, toggle: toggleReceiveData }
+                : undefined}
+              jikkyo={data.jikkyoAllowed
+                ? {
+                    on: jikkyoOn.on,
+                    toggle: jikkyoOn.toggle,
+                    missing: data.jikkyo === null,
+                    down: jikkyo.down,
+                  }
                 : undefined}
               subtitle={hasCaptions
                 ? subtitles({
@@ -2138,12 +2273,15 @@
           <!-- 互換モードの断り書き (切り替えた理由)。ライブと同じ出し方 -->
           <StageNote>{warning}</StageNote>
         {/if}
+        {#if volume.noted}
+          <StageNote testid="watch-volume-note">音量 {volume.level}%</StageNote>
+        {/if}
       {/snippet}
     </PlayerStage>
   {/if}
 
   <!--
-        右は番組の中身。観ながら読めるよう、映像に被せず全部ここに出す。押すものは置かない
+        右は番組の中身。観ながら読めるよう、映像に被せず全部ここに出す。押すものはこの録画の切り抜きへのリンクだけ
         (閉じる・削除は映像の上の列。全画面のタブレットで映像から出ずに押す)
     -->
   {#snippet aside()}
@@ -2152,6 +2290,10 @@
         <!-- データ放送のリモコンは、出している間だけ右の列の頭に出す (ライブと同じ) -->
         {#if dataPress !== null}
           <Remote press={dataPress} />
+        {/if}
+        <!-- 実況のコメントの一覧も、出している間は列の頭 (リモコンの下) -->
+        {#if canList && jikkyoList.on}
+          <JikkyoList feed={jikkyo} air={airTime} seek={seekAir} />
         {/if}
       {/snippet}
 
@@ -2165,6 +2307,14 @@
       <div class="small muted meta num" data-testid="watch-meta">
         {recordedDuration(rec)} ・ {size(rec.ts_size)}
       </div>
+      {#if data.clips > 0}
+        <a
+          class="small clips-link"
+          href={resolve(`clips?recording=${rec.id}`)}
+          data-testid="watch-clips"
+          >この録画の切り抜き <span class="num">({data.clips})</span></a
+        >
+      {/if}
     </FactsAside>
   {/snippet}
 </PlayerLayout>
@@ -2225,5 +2375,13 @@
   }
   .meta {
     margin-top: 0.75rem;
+  }
+  /* この録画の切り抜きへ。押せる高さは一覧の行の操作と同じ 40px */
+  .clips-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 2.5rem;
+    margin-top: 0.25rem;
   }
 </style>

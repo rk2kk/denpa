@@ -26,7 +26,13 @@ import { config } from "./config";
 import { affected, now, orm } from "./db";
 import { pruneEmptyDirs, removeIfExists } from "./fsx";
 import { removeSidecars, SIDECAR_SUFFIXES } from "./metadata";
-import { cmMaterials, encodeJobs, recordings, reservations } from "./schema";
+import {
+  clips,
+  cmMaterials,
+  encodeJobs,
+  recordings,
+  reservations,
+} from "./schema";
 
 const SIDECAR_ORPHAN = new RegExp(
   `^(.+?)(?:${SIDECAR_SUFFIXES.map((suffix) => suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`,
@@ -66,6 +72,12 @@ export function deleteRecordingFiles(
       updated_at: now(),
     })
     .where(eq(recordings.id, recording.id))
+    .run();
+  // 切り抜きは残す (撮ったときの番組名を持っている)。録画への行き先だけ外す
+  orm()
+    .update(clips)
+    .set({ recording_id: null })
+    .where(eq(clips.recording_id, recording.id))
     .run();
 }
 
@@ -222,7 +234,7 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
     const videos = new Set(files.filter((path) => VIDEO.test(path)));
     for (const path of videos) {
       // 動画は消さない。手で置いたものかもしれないので、数えるだけ。
-      // エンコードしている途中の切り出し (`<入力>.cut.m2ts`) を数に入れないよう、書きたては飛ばす
+      // エンコードの途中で作る復号したTS (`<入力>.decoded.m2ts`) を数に入れないよう、書きたては飛ばす
       if (!known.has(path) && !settling(path, at)) strays++;
     }
     for (const path of files) {

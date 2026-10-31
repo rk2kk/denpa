@@ -15,6 +15,25 @@ for arg in "$@"; do
     prev="$arg"
 done
 
+# 切り抜きの AVIF (`server/clips.ts` の `avifArgs`)。本物は2枚 (そのままと一覧用) を書く。ここでは
+# 受けた映像 (最初の `-i`。字幕・コメントの重ねは後ろの `-i`) をそのまま両方へ写す (中身は WebP などのままだが、
+# ブラウザは中身で読むので映る)。重ねは写さない (出し入れしても画像は替わらない)。
+# エンコードの引数の控えには残さない (エンコードを見るテストに混ざらないように)
+if printf '%s\n' "$@" | grep -qx -- 'avif'; then
+    prev=""
+    frame=""
+    for arg in "$@"; do
+        if [ "$prev" = "-i" ] && [ -z "$frame" ]; then frame="$arg"; fi
+        prev="$arg"
+    done
+    prev=""
+    for arg in "$@"; do
+        if [ "$prev" = "avif" ]; then cp "$frame" "$arg" || exit 1; fi
+        prev="$arg"
+    done
+    exit 0
+fi
+
 # **何を渡されたかを残す** (ライブの FAKE_FFMPEG_ARGS_FILE と同じ形式)。エンコードするときに
 # GPU の方式 (`h264_qsv` など) を選べているか、落ちたらソフトウェアへ倒れているかを
 # テストから見るため。**どの方式でも、落ちる前に**残す。1回ぶんずつ足す
@@ -45,6 +64,38 @@ for arg in "$@"; do
     fi
     prev="$arg"
 done
+
+# Rockchip MPP (`h264_rkmpp`)。本物は引数でデバイスを受けず、MPP が /dev/mpp_service を自分で開く。
+# ここでは denpa と同じ `RKMPP_DEVICE` を見て、**在れば上の GPU と同じく通し、無ければ初期化で落ちる**
+if printf '%s\n' "$@" | grep -qx -- 'h264_rkmpp'; then
+    if [ ! -e "${RKMPP_DEVICE:-/dev/mpp_service}" ]; then
+        echo "mpp_open failed: no such device" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$@" | grep -qx -- 'lavfi'; then
+        exit 0
+    fi
+fi
+
+# NVIDIA の NVENC (`h264_nvenc` / `av1_nvenc`)。本物はデバイスファイルを受けず、GPU を番号 (`-gpu N`) で受ける。
+# ここでは denpa と同じく `NVIDIA_DIR` の nvidia<番号> を番号の順に並べ、**N 番目が在れば上の GPU と同じく通し、
+# 無ければ初期化で落ちる** (本物も、コンテナから見える GPU の数を超えた番号では降りる)
+if printf '%s\n' "$@" | grep -qE -- '^(h264|av1)_nvenc$'; then
+    gpu=0
+    prev=""
+    for arg in "$@"; do
+        if [ "$prev" = "-gpu" ]; then gpu="$arg"; fi
+        prev="$arg"
+    done
+    found=$(ls "${NVIDIA_DIR:-/dev}" 2>/dev/null | grep -E '^nvidia[0-9]+$' | sed 's/^nvidia//' | sort -n | sed -n "$((gpu + 1))p")
+    if [ -z "$found" ]; then
+        echo "Requested GPU $gpu, but no such GPU is available!" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$@" | grep -qx -- 'lavfi'; then
+        exit 0
+    fi
+fi
 
 # CM検出 (silencedetect)。300秒と360秒に境界が来るので、300-360 の 60 秒がCMブロックとして検出される。
 # エンコードする出口 (`-f matroska`) があればエンコードと一緒に行っている (encoder.ts) ので、材料を出してから

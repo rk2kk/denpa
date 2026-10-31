@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * 映像に重ねる操作列 (3画面で同じ)。端から濃くなる影の上に置き、しばらく触らなければ消える (`shown`。消えている
-   * 間は押せない)。下端 (既定) は観ながら使うもの、右端 (`side`) は観る流れの外のもの (閉じる・録画・データ放送・切り抜き・削除)。
+   * 間は押せない)。下端 (既定) は観ながら使うもの、右端 (`side`) は観る流れの外のもの (閉じる・録画・データ放送・切り抜き・実況に書く・削除)。
    *
    * - 右端は縦に積み、丸は 48px (狭い枠では下の列と同じ 40px) — 車のタブレットで映像の右の縁をなぞる指がいちばん届き、全画面から出ずに
    *   押せる (横一行・40px にしたら窮屈で押しにくく、戻した)
@@ -48,11 +48,20 @@
   .side {
     top: 0;
     right: 0;
-    bottom: 0;
+    /*
+     * 下の操作バーの中身の上で止める (`PlayerStage` の `--stage-bar`)。全画面のボタンと再生位置のバーに重ねない。
+     * 下の余白 (8px) は操作バーとの間に要らないので、そのぶん下げる
+     */
+    bottom: max(0px, var(--stage-bar, 0px) - 0.5rem);
     pointer-events: none;
     display: flex;
-    /* 縦に積む (車のタブレットで指が届く右の縁。上の説明)。横一行に直さない */
+    /*
+     * 縦に積む (車のタブレットで指が届く右の縁。上の説明)。横一行に直さない。
+     * 入りきらない低い枠 (スマホの縦) では、残りを左へもう1列に並べる (丸は縮めない)
+     */
     flex-direction: column;
+    flex-wrap: wrap-reverse;
+    align-content: flex-start;
     align-items: center;
     /* 丸どうしは 8px 空ける (指で隣を押さない) */
     gap: 0.5rem;
@@ -72,7 +81,8 @@
   .side::before {
     content: "";
     position: absolute;
-    inset: 0 0 0 auto;
+    /* 列は操作バーの上で止まるが、影は舞台の下の端まで流す */
+    inset: 0 0 calc(-1 * var(--stage-bar, 0px)) auto;
     z-index: -1;
     width: 7.5rem;
     background: linear-gradient(

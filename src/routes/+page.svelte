@@ -539,7 +539,7 @@
    * ---- 開いたときの位置 ----
    *
    * **観終えていない録画があれば、いちばん古いものを映す** — 溜まったぶんを古い順に片付けられるように。
-   * 無ければ「いま」の線。描いていない所 (60 件より先) にあれば、そこまで描いてから送る。
+   * 無ければ「いま」の線。まだ描いていない所にあれば、そこまで描いてから送る。
    * 並べ替えや絞り込みのたびには動かさない (開いたときの1回だけ)
    */
   let listBox: HTMLElement | undefined = $state();
@@ -929,6 +929,16 @@
     >
       ルールを作る
     </a>
+    {#if (data.clipCounts[rec.id] ?? 0) > 0}
+      <!-- この録画で撮った切り抜き。録画で絞った切り抜きの画面へ -->
+      <a
+        class="button secondary outline"
+        href={resolve(`clips?recording=${rec.id}`)}
+        data-testid="detail-clips"
+      >
+        この録画の切り抜き <span class="num">({data.clipCounts[rec.id]})</span>
+      </a>
+    {/if}
     {#if hasFile(rec)}
       <!--
                 **めったに押さないものの置き場。** 上に開く (フッターは画面の下端にある)。中身は上から

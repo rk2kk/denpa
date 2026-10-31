@@ -9,8 +9,8 @@ import type { IconShape } from "./icons";
  * 再生の設定 (⚙ `SettingsMenu`) に並べるもの。**3画面 (ライブ・追っかけ・観る画面) で同じ形。**
  *
  * - 選ぶもの (`SettingChoice`) … 行にいまの値を出し、押すと選択肢の並びに入る (字幕・音声・コーデック)
- * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CMスキップ・データ放送・アンビエントモード・
- *   バックグラウンド再生・互換モード。並べるのは `StageTail`)
+ * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CMスキップ・データ放送・データ放送を常に受信・実況・
+ *   アンビエントモード・バックグラウンド再生・互換モード。並べるのは `StageTail`)
  *
  * 何を覚えるか (端末ごと) は各画面と `ambient.svelte.ts`・`background.svelte.ts` が持つ。ここは並べ方だけ
  */
@@ -45,6 +45,10 @@ export interface SettingToggle {
    * 窓のボタンを押した1回目がメニューの外を押したことになって、閉じるだけで終わる
    */
   closes?: boolean;
+  /** 名前の後ろに添える注記 (「この局にはありません」など。括弧は付けて出す) */
+  note?: string | undefined;
+  /** 並べるが押せない */
+  disabled?: boolean;
 }
 
 /** 押せない形式に添える注記 (docs/writing.md「同じことは同じ文言で」) */

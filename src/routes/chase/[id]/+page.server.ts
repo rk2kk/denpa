@@ -2,8 +2,10 @@ import { error, redirect } from "@sveltejs/kit";
 import { eq } from "drizzle-orm";
 
 import { orm } from "#lib/server/db.js";
+import { recordingJikkyo } from "#lib/server/jikkyo.js";
 import { relative } from "#lib/server/paths.js";
 import { recordings } from "#lib/server/schema.js";
+import { settings } from "#lib/server/settings.js";
 
 import type { PageServerLoad } from "./$types";
 
@@ -48,6 +50,15 @@ export const load: PageServerLoad = ({ params, url }) => {
       genre_detail: rec.genre_detail,
       audios: rec.audios,
       extended: rec.extended,
+      series_episode: rec.series_episode,
+      series_last_episode: rec.series_last_episode,
+      series_repeat: rec.series_repeat,
     },
+    /** 実況を流せるか (世帯の設定)。オンのときだけ ⚙ に「実況」の行を出す */
+    jikkyoAllowed: settings().jikkyo,
+    /** 実況の NG ワード (世帯の設定)。含むコメントは流さない */
+    jikkyoNg: settings().jikkyoNg,
+    /** 実況のチャンネルと頭の放送時刻。古いところは過去ログ API、新しいところは NX-Jikkyo から取る */
+    jikkyo: recordingJikkyo(rec),
   };
 };
