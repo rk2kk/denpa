@@ -76,7 +76,7 @@ export function worthLogging(line: string): boolean {
 export function captionOutput(from: string, track: number): string[] {
   return [
     "-map",
-    `${from}:s:${track}`,
+    `${from}:s:${track}?`,
     "-c:s",
     "copy",
     "-cluster_time_limit",
