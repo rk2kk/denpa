@@ -255,6 +255,10 @@ export function encodeArgs(
     "-nostats",
     // `-fflags nobuffer` は付けない。解析の間に読んだ I フレームを捨てて次の GOP を待つ (上の説明)
     // 1局に絞ってあるが、字幕まで見つけさせるぶん要る (上の説明)
+    "-err_detect",
+    "ignore_err",
+    "-fflags",
+    "+discardcorrupt",
     "-probesize",
     "100000",
     // GPU デバイスを開く。復号から GPU なら `-hwaccel` もここ (入力より前でないと効かない)
