@@ -1253,8 +1253,8 @@ class Session {
           hw = null;
           continue;
         }
-        if (wanted === null || !this.noSubtitle) {
-          // ここまで来たのは ffmpeg が自分で降りたとき
+        if (wanted === null) {
+          // 字幕なしでも降りた → 致命的
           this.died(
             label,
             trouble === null
@@ -1264,10 +1264,12 @@ class Session {
           );
           return;
         }
+        // 字幕付きで降りた → 字幕なしで再試行
         console.warn(
           `[live] ${label}: 字幕が無いので字幕なしで再エンコードします`,
         );
         captionless.set(this.serviceId, Date.now());
+        this.noSubtitle = true;
         wanted = null;
       }
     } catch (error) {
