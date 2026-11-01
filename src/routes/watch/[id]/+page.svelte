@@ -98,7 +98,6 @@
   } from "#lib/components/Toasts.svelte";
   import { programDetail, recordingFacts } from "#lib/detail.svelte.js";
   import { driveGate } from "#lib/drive-gate.svelte.js";
-  import { denpaFontUrl } from "#lib/font.js";
   import {
     clock,
     cmNoteWorthShowing,
@@ -140,6 +139,7 @@
     type Picked,
     pickOffer,
     type PlaybackInfo,
+    type PlayCodec,
     retryWait,
     STREAM_RETRIES,
     streamForAudio,
@@ -149,10 +149,10 @@
     type Chapter,
     chapterAt,
     cmSpans,
-    fromTsTime,
     isCm,
     nextChapterAt,
     plainMarks,
+    playbackAt,
     prevChapterAt,
     resumePoint,
     skipCmAtStart,
@@ -229,7 +229,7 @@
   const drive = driveGate();
 
   /** 形式の名前 (メニュー・混んでいるときの勧め) */
-  function codecLabel(codec: CanvasCodec): string {
+  function codecLabel(codec: PlayCodec): string {
     return codec === "mpeg2" ? "MPEG-2" : CODEC_LABEL[codec];
   }
 
@@ -493,7 +493,12 @@
     localLookup = loadOffline(rec.id).catch(() => null);
     const asked = stored(CODEC_KEY);
     choice =
-      asked === "h264" || asked === "av1" || asked === "mpeg2" ? asked : "auto";
+      asked === "h264" ||
+      asked === "hevc" ||
+      asked === "av1" ||
+      asked === "mpeg2"
+        ? asked
+        : "auto";
     void (async () => {
       const [held, got] = await Promise.all([
         localLookup,
@@ -558,7 +563,7 @@
   );
 
   /** その場で流すもの (`/stream`) のリクエスト先。`at` 秒から、`audio` (`streamAudio`) の音声で */
-  function streamUrl(codec: CanvasCodec, at: number, audio: string): string {
+  function streamUrl(codec: PlayCodec, at: number, audio: string): string {
     return resolve(
       `api/recordings/${rec.id}/stream?codec=${codec}&from=${at.toFixed(3)}&audio=${encodeURIComponent(audio)}`,
     );
@@ -710,7 +715,7 @@
   );
 
   /** 混んでいて断られたとき、サーバに変換させずに観られるもの (エンコード済み・詰め替え) */
-  const lighter = $derived.by((): CanvasCodec[] => {
+  const lighter = $derived.by((): PlayCodec[] => {
     if (info === null || !busy) return [];
     // 互換モードは描ける形式のうち、変換させないもの (詰め替え・元の TS)
     if (compat) {
@@ -915,7 +920,7 @@
   let shownPage: CaptionPage | null = null;
   $effect(() => {
     if (overlay === null) return;
-    const made = new CaptionPainter(overlay, denpaFontUrl());
+    const made = new CaptionPainter(overlay);
     painter = made;
     return () => {
       made.close();
@@ -946,7 +951,7 @@
 
   /**
    * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
-   * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない。行を押すとその時刻へ飛ぶ
+   * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない。時刻は録画の中の再生位置で出し、押すとそこへ飛ぶ
    */
   const jikkyoList = jikkyoSwitch(JIKKYO_LIST_KEY);
   const phoneLandscape = new MediaQuery(PHONE_LANDSCAPE);
@@ -956,15 +961,18 @@
       !phoneLandscape.current &&
       !fullscreen.active,
   );
-  /** 放送時刻 `at` の場面へ飛ぶ (`airTime` の逆。切った CM の中なら、その後の本編の頭へ) */
-  function seekAir(at: number): void {
+  /**
+   * 放送時刻 `at` が、観ているもの (エンコードしたもの・元の TS) のどこか (`airTime` の逆)。
+   * 録画の頭より前は「開始前」、切った CM の中は「CM」で、飛べない
+   */
+  function placeAir(at: number): number | "before" | "cut" {
     const target = data.jikkyo;
-    if (target === null || info === null) return;
+    if (target === null || info === null) return "before";
     const ruler =
       info.axis === "encoded"
         ? { kept: rec.cm_kept, skip: rec.encode_skip ?? 0 }
         : null;
-    seekTo(fromTsTime(Math.max(0, at - target.head) / 1000, ruler));
+    return playbackAt((at - target.head) / 1000, ruler);
   }
 
   /**
@@ -1933,17 +1941,18 @@
                 show={jikkyoActive && data.jikkyo !== null && !showData}
                 paused={!playing}
                 rate={speed}
+                ahead
               />
             {/if}
           </div>
           <!--
                     字幕は `<track>` ではなく canvas に放送の置き場所のまま描く (左右の位置・背景の箱・外字が落ちるため)。
                     映像と同じ箱に入れて、データ放送の小窓へ一緒に縮ませる (ライブの `MediaStack` と同じ)。
-                    位置と大きさは `place` が書く
+                    位置と大きさは `place` が書く。段は実況 (8) より上、操作列のボタン (10) より下 (`ControlBar`)
                 -->
           <canvas
             bind:this={overlay}
-            style="position:absolute; pointer-events:none;"
+            style="position:absolute; z-index:9; pointer-events:none;"
             data-testid="watch-captions-canvas"
             data-on={captions && hasCaptions}
             aria-hidden="true"
@@ -1954,7 +1963,7 @@
                 -->
           <canvas
             bind:this={cover}
-            style="position:absolute; pointer-events:none;"
+            style="position:absolute; z-index:9; pointer-events:none;"
             hidden={!hopping}
             aria-hidden="true"
           ></canvas>
@@ -2293,7 +2302,13 @@
         {/if}
         <!-- 実況のコメントの一覧も、出している間は列の頭 (リモコンの下) -->
         {#if canList && jikkyoList.on}
-          <JikkyoList feed={jikkyo} air={airTime} seek={seekAir} />
+          <JikkyoList
+            feed={jikkyo}
+            air={airTime}
+            place={placeAir}
+            seek={seekTo}
+            edge={() => data.jikkyo?.end ?? null}
+          />
         {/if}
       {/snippet}
 
@@ -2355,9 +2370,11 @@
     color: var(--dp-on-video);
     --pico-color: var(--dp-on-video);
   }
+  /* 段は字幕と同じ 9 (実況のコメントを上に流さない。`ControlBar`) */
   .broken {
     position: absolute;
     inset: 0;
+    z-index: 9;
     display: flex;
     flex-direction: column;
     align-items: center;

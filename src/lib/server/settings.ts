@@ -17,18 +17,18 @@ import { settings as settingsTable } from "./schema";
  * 全体で1つに寄せてある。初期値は config.ts が持ち、DBに値があればそちらが勝つ。
  */
 
-export interface Settings {
+interface Settings {
   /**
    * 録画のエンコードに使う映像コーデック。`none` ならエンコードしない。
-   * **主のほう** — 両方エンコードするときは AV1 (小さいので既定の再生に向く)
+   * **主のほう** — いくつもエンコードするときは AV1 → H.265 → H.264 の先頭 (小さいので既定の再生に向く)
    */
   codec: VideoCodec;
   /**
-   * エンコードするコーデックの一覧。**両方選べる** (`['av1', 'h264']`)。
+   * エンコードするコーデックの一覧。**いくつでも選べる** (`["av1", "hevc", "h264"]`)。H.265 は GPU でだけエンコードする
    *
    * 古いテレビは AV1 をデコードできないので、H.264 も一緒にエンコードしておくと同じ録画を
    * どちらの端末でも観られる (`server/encoder.ts`)。`none` (エンコードしない)
-   * のときは空。AV1 を先頭に寄せる — 主 (`library_path`) はそちらにする
+   * のときは空。並びは AV1 → H.265 → H.264 — 主 (`library_path`) は先頭にする
    */
   codecs: HwCodec[];
   /**
@@ -134,7 +134,7 @@ export function stored(key: string): string | undefined {
  * コーデックの選択を読む。**カンマ区切りで、1つだけの古い値も読める。**
  *
  * `av1,h264` → `['av1', 'h264']`、`av1` → `['av1']`、`none` や空 → `[]`。
- * **AV1 を先頭に寄せる** — 主 (`library_path`) をそちらにするので、順序を固定する
+ * **並びは AV1 → H.265 → H.264 に揃える** — 主 (`library_path`) を先頭にするので、順序を固定する
  */
 export function parseCodecs(value: string | undefined): HwCodec[] {
   const raw = (value ?? config.encodeCodec).split(",").map((s) => s.trim());
@@ -142,8 +142,8 @@ export function parseCodecs(value: string | undefined): HwCodec[] {
 }
 
 /**
- * `hwAllow` を読む。壊れていれば空 (= 全部よい)。デバイスごとに `{ qsv: [...], vaapi: [...], rkmpp: [...], nvenc: [...] }`。
- * 書かれていない方式は空 — 方式はデバイスごとに決まっていて (`/dev/dri/*` は QSV・VA-API、
+ * `hwAllow` を読む。壊れていれば空 (= 全部よい)。デバイスごとに `{ vaapi: [...], rkmpp: [...], nvenc: [...] }`。
+ * 書かれていない方式は空 — 方式はデバイスごとに決まっていて (`/dev/dri/*` は VA-API、
  * `/dev/mpp_service` は Rockchip MPP、`/dev/nvidia0` などは NVENC)、そのデバイスで使えない方式の印は何にも効かない
  */
 function parseHwAllow(value: string | undefined): HwAllow {
@@ -159,7 +159,6 @@ function parseHwAllow(value: string | undefined): HwAllow {
       const pick = (raw: unknown): HwCodec[] =>
         HW_CODECS.filter((codec) => Array.isArray(raw) && raw.includes(codec));
       out[device] = {
-        qsv: pick(entry.qsv),
         vaapi: pick(entry.vaapi),
         rkmpp: pick(entry.rkmpp),
         nvenc: pick(entry.nvenc),
@@ -178,7 +177,7 @@ export function settings(): Settings {
     return value === undefined ? fallback : value === "true";
   };
   const codecs = parseCodecs(stored("codec"));
-  // 主は先頭 (parseCodecs が AV1 を先頭に寄せている)
+  // 主は先頭 (parseCodecs が AV1 → H.265 → H.264 に揃えている)
   const primary: VideoCodec = codecs[0] ?? "none";
   return {
     codec: primary,

@@ -2,18 +2,61 @@
  * オフライン視聴の置き場 (IndexedDB)。**ページとサービスワーカーの両方から使う**ので、
  * Svelte に依存しないただの層にしてある ([docs/offline.md](../../docs/offline.md))。
  *
- * - `videos` … 落とした録画。動画の blob と、観るのに要る付き添い
+ * - `videos` … 落とした録画。動画の blob と、観るのに要る付属のデータ
  *   (字幕・チャプター・データ放送・ポスター) を1行にまとめて持つ
  * - `outbox` … オンラインに戻ったときにサーバへ伝えること (いまは削除だけ)
  * - `resume` … オフライン中に進んだ視聴位置。復帰時にまとめて送る
  */
 
-import type { PlayAxis } from "./ts/playback";
+import { encodedCodec } from "./encoded-codec";
+import { CODEC_LABEL } from "./hw";
+import {
+  ENCODED_ORDER,
+  type EncodedSource,
+  type PlayAxis,
+} from "./ts/playback";
+
+/**
+ * **どれを落とすか。** エンコード済みのファイルのうち、AV1 → H.265 → H.264 の順で `playable` (この端末で
+ * 観られるか) が通る最初のもの (観る画面と同じ順。`ts/playback.ts` の `ENCODED_ORDER`)。コーデックは
+ * 置き場の名前で見分ける (`encodedCodec`。H.264 だけでエンコードした録画は主がもう `… [H264].mkv`)。
+ * どれも観られなければ投げる (保存できても観られないため)
+ */
+export async function offlineSource(
+  rec: {
+    library_path: string | null;
+    hevc_path: string | null;
+    alt_path: string | null;
+  },
+  playable: (codec: (typeof ENCODED_ORDER)[number]) => Promise<boolean>,
+): Promise<EncodedSource> {
+  const files = (
+    [
+      ["encoded", rec.library_path],
+      ["hevc", rec.hevc_path],
+      ["alt", rec.alt_path],
+    ] as const
+  ).flatMap(([source, path]) => {
+    const codec = path === null ? "mpeg2" : encodedCodec(path);
+    return codec === "mpeg2" ? [] : [{ source, codec }];
+  });
+  files.sort(
+    (a, b) => ENCODED_ORDER.indexOf(a.codec) - ENCODED_ORDER.indexOf(b.codec),
+  );
+  for (const file of files) {
+    if (await playable(file.codec)) return file.source;
+  }
+  throw new Error(
+    files.length === 0
+      ? "エンコード済みのファイルがありません"
+      : `この端末では再生できません (${files.map((file) => CODEC_LABEL[file.codec]).join("・")} をデコードできません)`,
+  );
+}
 
 const DB = "denpa-offline";
 const VERSION = 1;
 
-/** 落とした録画1本。付き添いは取れなかったら無いまま (観るときに諦める) */
+/** 落とした録画1本。付属のデータは取れなかったら無いまま (観るときに諦める) */
 export interface OfflineVideo {
   id: number;
   name: string;
@@ -22,8 +65,8 @@ export interface OfflineVideo {
   startAt: number;
   /** 実際に録れた長さ (ms)。無ければ null */
   durationMs: number | null;
-  /** どちらを落としたか。端末が AV1 をデコードできなければ alt (H.264) */
-  source: "encoded" | "alt";
+  /** どれを落としたか (`saveOffline`)。主が端末でデコードできなければ hevc (H.265) か alt (H.264) */
+  source: EncodedSource;
   /**
    * 何回目の試みか (でたらめな文字列)。**やり直しと前回の残骸を見分ける印。**
    * 前回の失敗を中止してからやり直すとき、その中止の通知が遅れて届いても、
@@ -78,7 +121,7 @@ interface ResumeItem {
  */
 export function fetchId(
   id: number,
-  source: "encoded" | "alt",
+  source: EncodedSource,
   attempt: string,
 ): string {
   return `rec-${id}-${source}-${attempt}`;
@@ -92,27 +135,24 @@ export function fetchIdPrefix(id: number): string {
 /** 登録IDを読み戻す。Background Fetch の成否イベントは ID しか持っていない */
 export function parseFetchId(
   value: string,
-): { id: number; source: "encoded" | "alt"; attempt: string } | null {
+): { id: number; source: EncodedSource; attempt: string } | null {
   // 印の無い古い形式 (rec-42-encoded) も読める。付ける前に預けたぶんが残っていることがある
-  const m = /^rec-(\d+)-(encoded|alt)(?:-([a-z0-9]+))?$/.exec(value);
+  const m = /^rec-(\d+)-(encoded|hevc|alt)(?:-([a-z0-9]+))?$/.exec(value);
   if (m === null) return null;
   return {
     id: Number(m[1]),
-    source: m[2] as "encoded" | "alt",
+    source: m[2] as EncodedSource,
     attempt: m[3] ?? "",
   };
 }
 
 /**
- * 落とすものの一覧。動画 + 観るのに要る付き添い。
+ * 落とすものの一覧。動画 + 観るのに要る付属のデータ。
  *
  * **頭 (前段の接頭辞。server/paths.ts) は呼ぶ側 (offline.svelte.ts) が付ける。** ここは
- * Service Worker からも読まれ、パスの形で付き添いを見分ける (`kindOf`) ので、ルートからのパスのまま持つ
+ * Service Worker からも読まれ、パスの形でどのデータかを見分ける (`kindOf`) ので、ルートからのパスのまま持つ
  */
-export function downloadRequests(
-  id: number,
-  source: "encoded" | "alt",
-): string[] {
+export function downloadRequests(id: number, source: EncodedSource): string[] {
   return [
     `/api/recordings/${id}/file?source=${source}`,
     `/api/recordings/${id}/captions.json`,
@@ -122,7 +162,7 @@ export function downloadRequests(
   ];
 }
 
-/** URL がどの付き添いか。Background Fetch の結果を仕分けるのに使う */
+/** URL がどのデータか。Background Fetch の結果を仕分けるのに使う */
 export function kindOf(
   url: string,
 ): "video" | "captionText" | "chapters" | "databroadcast" | "poster" | null {
@@ -137,7 +177,7 @@ export function kindOf(
 
 /**
  * 落としたものを控えの正しい置き場に仕舞う。**SW の受け取りとページ主導の
- * フォールバックで同じ仕分け** (どちらか片方だけ直すと形が食い違う)。
+ * フォールバックで同じ仕分け** (どちらか片方だけ直すと形式が食い違う)。
  * 動画だけは読み方を差し替えられる (ページ主導は進み具合を数えながら読む)
  */
 export async function storeResponse(

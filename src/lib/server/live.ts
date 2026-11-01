@@ -60,6 +60,8 @@ import {
   type CaptionShown,
   CaptionText,
   NO_SUBTITLE,
+  peekCaptions,
+  PMT_WAIT,
   programSpec,
   rawCaptionArgs,
   textFrame,
@@ -474,7 +476,7 @@ function softwareArgs(codec: LiveCodec): string[] {
  *
  * 設計 (stream.md#前提) が狙っていた組み合わせで、**録画と同じ扱い**でもある
  * (`encoder.ts` は前から `libopus -b:a 256k`)。同じ音質なら AAC より小さく、
- * ブラウザは MSE で受け取れる (Chromium で `av01…,opus` を確かめ済み)。
+ * ブラウザは MSE で受け取れる (Chromium で `av01…,Opus` を確かめ済み。codecs の書き方は `codecsFor`)。
  *
  * **256k は放送に合わせた値。** 元の放送が AAC 256kbps なので、録画側は
  * そこへ揃えてある。ライブだけ 192k で低かったのを、こちらへ寄せる。
@@ -499,6 +501,8 @@ export function audioArgs(codec: StreamCodec): string[] {
  *
  * - `avc1.640029` … High profile / Level 4.1。1080p60 まで
  * - `av01.0.08M.08` … Main profile / Level 4.0 / 8bit。同じく 1080p60 まで
+ * - `Opus` … MP4 での Opus の名前 (中の箱の名前と同じく大文字の O)。Safari は小文字の `opus` を断る
+ *   (Chromium は両方受け取る)。入れ物が WebM なら小文字が正しいので、エンコード済みのファイルは `opus` のまま
  *
  * **音声も組で決まる** (`audioArgs`)。AV1 は Opus、H.264 は AAC
  *
@@ -511,7 +515,7 @@ export function audioArgs(codec: StreamCodec): string[] {
  */
 export function codecsFor(codec: LiveCodec): string {
   return codec === "av1"
-    ? 'video/mp4; codecs="av01.0.08M.08,opus"'
+    ? 'video/mp4; codecs="av01.0.08M.08,Opus"'
     : 'video/mp4; codecs="avc1.640029,mp4a.40.2"';
 }
 
@@ -920,7 +924,7 @@ class Session {
     /**
      * 入力の差し替え。無ければチューナーから (ライブ)。
      * 追っかけ再生はこれで録画中のファイルを渡す (`openChase`)。
-     * 呼ぶたびに読み直したストリームを返すこと — 字幕なしでの再エンコードに使う
+     * 呼ぶたびに読み直したストリームを返すこと — 起こし直す (字幕なし・ソフトウェア) たびに頭から読む
      */
     private readonly source?: () => ReadableStream<Uint8Array>,
     /**
@@ -1103,7 +1107,9 @@ class Session {
        *
        * 字幕を持たない放送に `[0:p:X:s:0]` を指定すると、ffmpeg は組み立ての
        * 時点で降りる — **映像も出ない**。そうと分かったら字幕を外して
-       * もう一度起こす。TS は流れ続けているので、取り直しは要らない
+       * もう一度起こす。TS は流れ続けているので、取り直しは要らない。
+       * ふだんは起こす前に PMT で字幕の有無を見るので (下の `peekCaptions`)、ここへ来るのは
+       * 読めなかったときと、ffmpeg が字幕とみなさなかったとき
        */
       // 音声だけなら字幕はエンコードしない
       let wanted =
@@ -1132,13 +1138,45 @@ class Session {
        * だが、書き込みは返ってこないこともある (下の「終わりは ffmpeg の終了で見る」)。
        * 使い回せば前の流し込みは何も握っていない。追っかけは読み直すので毎回作る
        */
-      const feed = tuned === null ? null : chunks(tuned);
+      let feed = tuned === null ? null : chunks(tuned);
+      /** PMT を読んで字幕の本数を見たか (`peekCaptions`)。見るのは最初の1回だけ */
+      let peeked = false;
       for (;;) {
         // ライブは同じ TS が流れ続けている。追っかけは再エンコードのたびに読み直す
-        const stream =
+        let stream =
           feed ??
           (this.source === undefined ? undefined : chunks(this.source()));
         if (stream === undefined) return;
+        /*
+         * **字幕があるかは起こす前に PMT で見る。** 無い放送に字幕の出口を頼むと、ffmpeg が入口を
+         * 探り終えてから降りて、起こし直すぶん映像が 1.5秒ほど遅れる。読めなければ今までどおり頼んで、
+         * 降りたら字幕なしで起こし直す (下)
+         */
+        if (wanted !== null && !peeked && this.program > 0) {
+          peeked = true;
+          const head = await peekCaptions(
+            stream,
+            this.program,
+            PMT_WAIT,
+            feed === null
+              ? undefined
+              : () => {
+                  this.opening.firstByte ??= this.since();
+                },
+          );
+          stream = head.stream;
+          // 読んだぶんは返ってきたストリームの頭にある。ライブは起こし直してもこちらを使う
+          if (feed !== null) feed = head.stream;
+          /*
+           * 頼んだ本数目が無ければ頼まない。`captionless` には覚えない — 毎回 PMT を読むので、
+           * 番組が替わって字幕が付けばすぐ出せる
+           */
+          if (head.count !== null && head.count <= wanted) wanted = null;
+          if (this.stopped) {
+            if (feed === null) await stream.return(undefined);
+            return;
+          }
+        }
         this.produced = false;
         this.busy = false;
         const proc = Bun.spawn(
@@ -1622,10 +1660,7 @@ class Session {
     }
   }
 
-  /**
-   * 選べる字幕を1人に知らせる。**言語はその人に出しているもの** (`Viewer.language`) なので、全員に同じものは送れない。
-   * 言語がまだ分からない (字幕管理データが届いていない) ときは `languages` を省く
-   */
+  /** 選べる字幕を1人に知らせる (`captionsNotice`。言語はその人の `Viewer.language`) */
   private tellCaptions(viewer: Viewer, tracks: CaptionTrack[]): void {
     this.tellOne(
       viewer,

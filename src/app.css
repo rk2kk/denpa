@@ -59,7 +59,7 @@
      * 字幕・データ放送と同じ丸ゴシックで、ARIB の外字 (🈑 Ⓗ など) を持っているので
      * テレビと同じ白黒の字で出る。`@font-face` はバージョン付きの URL が要るので
      * `+layout.svelte` が置く (`#lib/font.ts`)。手元の開発では 404 なので画面の字に落ちる。
-     * こちらで書いた文言 (ボタン・見出し・設定) は画面の字のまま。`.broadcast` で付ける
+     * こちらで書いた文言 (ボタン・見出し・設定) と実況のコメント (見る人が書いた字。絵文字をカラーで出す) は画面の字のまま。`.broadcast` で付ける
      * (全角英数字を詰める palt も一緒に付く)
      */
   --broadcast-font: "Denpa Font", var(--pico-font-family-sans-serif);
@@ -148,16 +148,16 @@
   --dp-shine: 1.8s;
   --pico-transition: var(--dp-duration) var(--dp-ease);
   /*
-	 * 色は**主の色ひとつ**と、状態の色 4 つだけ。主の色は Blades (Pico) の既定の azure を
-	 * そのまま使う (上書きしない。アイコンの水色とも揃う)。
-	 * 状態の色も Pico の色見本の段から選ぶ (録画中 red・成功 jade・注意 amber・通知 cyan)。
-	 * 「通知」は azure と並ぶと見分けが付かないので、緑寄りの cyan にしてある
-	 *
-	 * **状態の色は状態にだけ使い、ふつうの状態には付けない。**
-	 * 以前は予約済み(青)・視聴可能(緑)・取消(赤枠)が行ごとに並んでいて、
-	 * 一覧を開くと色の列が3本立ち、どこを見ればよいのか分からなくなっていた。
-	 * ふつうの状態は地の色に混ぜた淡いバッジにして、目は録画中の赤だけに行くようにする
-	 */
+     * 色は**主の色ひとつ**と、状態の色 4 つだけ。主の色は Blades (Pico) の既定の azure を
+     * そのまま使う (上書きしない。アイコンの水色とも揃う)。
+     * 状態の色も Pico の色見本の段から選ぶ (録画中 red・成功 jade・注意 amber・通知 cyan)。
+     * 「通知」は azure と並ぶと見分けが付かないので、緑寄りの cyan にしてある
+     *
+     * **状態の色は状態にだけ使い、ふつうの状態には付けない。**
+     * 以前は予約済み(青)・視聴可能(緑)・取消(赤枠)が行ごとに並んでいて、
+     * 一覧を開くと色の列が3本立ち、どこを見ればよいのか分からなくなっていた。
+     * ふつうの状態は地の色に混ぜた淡いバッジにして、目は録画中の赤だけに行くようにする
+     */
   --dp-rec: #d93526; /* red-500 */
   --dp-ok: #00895a; /* jade-500 */
   --dp-warn: #c79400; /* amber-350 */
@@ -176,6 +176,14 @@
   --dp-on-video-danger: #ff8a7a;
   --dp-video-panel: #17191e;
   --dp-video-menu: color-mix(in srgb, var(--dp-video-panel) 75%, transparent);
+  /*
+     * つまみ (再生位置のバー・音量) の入れたぶん。**ほかの所と同じ主の色 (azure-550 `#0172ad`) を 80% に透かす**
+     * (色はそろえ、太いカプセルで広く塗っても映像が透けて重くならないように)。
+     * 白い字は黒い舞台の上で 7:1、白い映像の上で 3.8:1 (アイコンと字には小さな影を付けている)。
+     * 透かすぶん、下に面を敷くと面の色しか透けないので、面は空の所にだけ敷く (`VolumeSlider`)。
+     * 値は固定で書く。`var(--pico-primary)` はテーマで変わるが、映像の上はテーマで変えない
+     */
+  --dp-video-fill: rgb(1 114 173 / 0.8);
   --dp-video-veil: rgb(0 0 0 / 0.6);
   --dp-video-veil-strong: rgb(0 0 0 / 0.8);
 }
@@ -357,6 +365,21 @@
   background: var(--pico-primary-background);
 }
 
+/*
+ * ---- 自分の書き込みの点 (`.mine-dot`)。字と同じ色の小さな丸を字の前に ----
+ * 実況の流れるコメントと一覧。形は `.fresh-dot` と同じで、色を字に合わせて「まだ見ていない」(主の色) と分ける
+ */
+.mine-dot::before {
+  content: "";
+  display: inline-block;
+  width: 0.4em;
+  height: 0.4em;
+  margin-inline-end: 0.3em;
+  vertical-align: middle;
+  border-radius: var(--dp-radius-full);
+  background: currentColor;
+}
+
 /* ---- 読み込めたらふわっと出る画像 (`#lib/motion.svelte.ts` の `fadeIn`。録画のポスターは `Poster.svelte` の `{@attach}` から) ---- */
 img[data-fade] {
   transition: opacity var(--dp-duration-enter) var(--dp-ease);
@@ -421,28 +444,6 @@ html:active-view-transition-type(theme)::view-transition-group(*) {
 /* Pico は送信ボタンを横幅いっぱいにする。ボタンは中身の幅に */
 button[type="submit"] {
   width: auto;
-}
-/*
- * 押せる入れ物 (行やカードを丸ごと押すもの。`<div role="button">`)。Pico は [role=button] をボタンの見た目にするので、
- * 入れ物には当てない(色も枠も余白も親のまま。見た目は各画面の <style>)
- */
-div[role="button"] {
-  --pico-background-color: transparent;
-  --pico-border-color: transparent;
-  --pico-color: inherit;
-  --pico-box-shadow: none;
-  display: block;
-  width: auto;
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font-weight: inherit;
-  font-size: inherit;
-  line-height: inherit;
-  text-align: inherit;
-  box-shadow: none;
 }
 /*
  * **画面の高さは、単位ではなく `html` から採る。**
@@ -1339,7 +1340,7 @@ a.button {
   flex: 0 0 auto;
 }
 
-/* ---- タブ (`<div role="group" class="segmented">`。番組表とライブの種別) ---- */
+/* ---- タブ (`<div role="group" class="segmented">`。番組表とライブの種別・実況に書く色・位置・大きさ) ---- */
 /*
  * **溝 (枠と地) は付けず、選んでいるものは主の色の下線と字・太字で示す** (ヘッダーのナビと同じ。塗りは使わない)。
  * 溝を淡い面で塗っていた頃は、アンビエントモードの色がタブの所だけ届かず浮いて見えた。外の端は中のボタンの端なので、
@@ -1399,9 +1400,9 @@ a.button {
   pointer-events: none;
 }
 /*
- * ---- 滑る印 (タブの下線・ヘッダーのナビの下線・下のタブの印) ----
- * **印は並び (`.segmented`・`ul.links`・`.tabbar`) の疑似要素 1 本で、選んでいる項目に CSS のアンカーで付ける。**
- * 選び直すとアンカーが移り、`left`・`right` の transition で前の場所から滑る (ばね。`--dp-duration-move`)。
+ * ---- 滑る印 (タブの下線・ヘッダーのナビの下線・下のタブの印・サイドバーの左の縦線) ----
+ * **印は並び (`.segmented`・`ul.links`・`.tabbar`・`.side-list`) の疑似要素 1 本で、選んでいる項目に CSS のアンカーで付ける。**
+ * 選び直すとアンカーが移り、`left`・`right` (縦の並びは `top`・`bottom`) の transition で前の場所から滑る (ばね。`--dp-duration-move`)。
  * 開いた直後は前の値が無いので、その場に出る (ほかの画面から来たときは滑らない)。
  * 並びごとに `anchor-scope` で閉じ、別の並びの印と混ざらないようにする
  */
@@ -2205,7 +2206,7 @@ dialog[open] > article {
 
 /*
  * **小さな切り替え (チップ)。** チェックボックスを字と一緒に丸い形に入れ、横に並べる。枠も地も付けない
- * (ルールの書く欄の当てる範囲・種別・曜日、ログの絞り込み)。
+ * (ルールの書く欄の当てる範囲・種別・曜日、チューナーの受信できる種別、ログの絞り込み)。
  * 入っているものは、ほかの選んでいるものと同じく主の色の太字と字の幅いっぱいの下線 (色だけにしない)
  */
 .chips {
@@ -2257,7 +2258,7 @@ dialog[open] > article {
 
 /*
  * ---- サイドバー (`.side-panel`・`.side-label`・`.side-list`・`.side-item`・`.side-foot`) ----
- * **録画・ルール・設定のサイドバーは同じ部品。** ライブの局の一覧と検索の「ルールとして保存」の行も、行の形だけ使う。
+ * **録画・切り抜き・ルール・設定のサイドバーは同じ部品。** ライブの局の一覧と検索の「ルールとして保存」の行も、行の形だけ使う。
  * 幅と左右どちらに置くか (グリッドの列) は使う側で。
  *
  * - 窓の端とヘッダーに付ける。地・枠・影は付けない
@@ -2384,6 +2385,56 @@ dialog[open] > article {
 .side-item:has(> [aria-current]:not([aria-current="false"]))
   > [aria-current]:not([aria-current="false"]) {
   color: var(--dp-primary-text);
+}
+/*
+ * **選び直すと、左の縦線が前の場所から縦に滑る** (タブの下線と同じ「滑る印」。上の `.segmented` の説明)。
+ * 並び (`.side-list`) の疑似要素 1 本を、選んでいる行に CSS のアンカーで付ける。行ごとに線を描くと、選び直したときに
+ * 前の線が消えて次の線が出るだけで、滑らなかった (ライブの局を替えたとき)。並びをまたぐ (設定の別の節の束) ときはその場に出る。
+ * 並びの外の行 (並びに入れずに使う `.side-item`) とアンカーを知らないブラウザは、上の行ごとの線のまま
+ */
+@supports (anchor-name: --a) {
+  .side-list {
+    position: relative;
+    anchor-scope: --side;
+  }
+  .side-list
+    .side-item:is(
+      [aria-current]:not([aria-current="false"]),
+      [aria-pressed="true"],
+      :has(> [aria-current]:not([aria-current="false"]))
+    ) {
+    anchor-name: --side;
+  }
+  .side-list
+    .side-item:is(
+      [aria-current]:not([aria-current="false"]),
+      [aria-pressed="true"],
+      :has(> [aria-current]:not([aria-current="false"]))
+    )::before {
+    content: none;
+  }
+  /* `:has` の中に `:has` は書けないので、行の中の選んでいるボタン (ライブの局) は子の側から見る */
+  .side-list:has(
+      .side-item:is(
+        [aria-current]:not([aria-current="false"]),
+        [aria-pressed="true"]
+      ),
+      .side-item > [aria-current]:not([aria-current="false"])
+    )::after {
+    content: "";
+    position: absolute;
+    position-anchor: --side;
+    top: calc(anchor(top) + 0.625rem);
+    bottom: calc(anchor(bottom) + 0.625rem);
+    left: anchor(left);
+    width: 2px;
+    border-radius: 1px;
+    background: var(--pico-primary);
+    pointer-events: none;
+    transition:
+      top var(--dp-duration-move) var(--dp-ease-spring),
+      bottom var(--dp-duration-move) var(--dp-ease-spring);
+  }
 }
 /* 見せるだけの行 (集計・状態)。指を乗せても塗らない */
 .side-item.static:hover {

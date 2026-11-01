@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+
 namespace Denpa.Agent;
 
 /*
@@ -46,7 +49,7 @@ public sealed class Dib8096
     public const byte TunerAddress = 0xC0;
 
     /// <summary>LED のピン (DiB8000 の GPIO 1。出力 High = 赤、Low か入力 = 緑)</summary>
-    public const int LedPin = 1;
+    private const int LedPin = 1;
 
     private readonly II2c _i2c;
     private readonly IDibTime _time;
@@ -69,7 +72,7 @@ public sealed class Dib8096
     /// 温度の較正を使い回す長さ (ms)。測った温度は WBD の目標に使うだけで、選局の合間 (数秒〜数分) にチューナーの温度は
     /// ほとんど変わらないとみて 1 分にした (根拠は上)
     /// </summary>
-    public const double TemperatureReuseMs = 60_000;
+    private const double TemperatureReuseMs = 60_000;
 
     /// <summary>
     /// 探索で、シンボルの数の時間切れに関わらない段を見る間隔 (ms)。1 回の I2C の読み (bulk の塊の往復) より少し長い間隔 (根拠は上)
@@ -527,7 +530,7 @@ public sealed class Dib8096
         Uhf,
     }
 
-    /// <summary>7.1 帯の分け方 (kHz)</summary>
+    /// <summary>7.1 バンドの分け方 (kHz)</summary>
     private static Band BandOf(uint khz) => khz <= 170000 ? Band.Cband : khz <= 250000 ? Band.Vhf : Band.Uhf;
 
     private uint _khz;
@@ -535,7 +538,7 @@ public sealed class Dib8096
 
     /// <summary>
     /// チャンネルの中心周波数 (Hz) に合わせる (7.1)。ロックしなかったのは失敗ではなく結果
-    /// (<see cref="DibLock.Failed"/>)。範囲外と、探索が 5 秒で終わらないときは投げる
+    /// (<see cref="DibLock.Failed"/>)。範囲外と、探索が 5 秒で終わらないとき (探索し直すとそこからもう 5 秒) は投げる
     /// </summary>
     public DibLock Tune(uint hz)
     {
@@ -593,7 +596,7 @@ public sealed class Dib8096
 
     /// <summary>
     /// 最後の選局の要約の1行。常駐のときも記録に出し (Zd1jTuner)、3 つの数字 (60 秒・3ms・許容値 50) を本番の記録で見直すのに使う。
-    /// 形: <c>選局 &lt;Hz&gt; Hz: &lt;経路&gt;、ロックまで &lt;ms&gt;ms、キャパシタ: &lt;…&gt;、温度: &lt;…&gt;、&lt;同期した / 同期しなかった&gt;</c>
+    /// 形: <c>選局 &lt;Hz&gt; Hz: &lt;経路&gt;、ロックまで &lt;ms&gt;ms、キャパシタ: &lt;…&gt;、温度: &lt;…&gt;、&lt;同期した / ロックしたがデータはまだ / 同期しなかった&gt;</c>
     /// </summary>
     public string LastSummary { get; private set; } = "";
 
@@ -940,7 +943,7 @@ public sealed class Dib8096
         }
     }
 
-    // 7.3.11 PLL の表 (上限 kHz・VCO の帯・分周の符号・分周・前置分周)
+    // 7.3.11 PLL の表 (上限 kHz・VCO のバンド・分周の符号・分周・前置分周)
     private static readonly (uint Upper, int VcoBand, int Code, int Divider, int Prediv)[] PllNormal =
     [
         (56000, 0, 9, 48, 6), (70000, 1, 9, 48, 6), (87000, 0, 8, 32, 4), (105000, 1, 8, 32, 4),
@@ -1014,7 +1017,7 @@ public sealed class Dib8096
     private TuneRow _tuneRow;
     private int _rest;
 
-    /// <summary>DiB0090 が決めた帯 (VHF を CBAND で受けるときは CBAND)</summary>
+    /// <summary>DiB0090 が決めたバンド (VHF を CBAND で受けるときは CBAND)</summary>
     private Band _tunerBand;
 
     /// <summary>7.3.4 本体の「始め」(周波数を決めて PLL を書く)</summary>
@@ -1516,7 +1519,7 @@ public sealed class Dib8096
         T(0x04, 1);
     }
 
-    /// <summary>7.4.1 AGC の設定 (CBAND 用と、それ以外の帯用)。前回と同じ帯なら何もしない</summary>
+    /// <summary>7.4.1 AGC の設定 (CBAND 用と、それ以外のバンド用)。前回と同じバンドなら何もしない</summary>
     private void AgcSettings()
     {
         var cband = _band == Band.Cband;
@@ -1684,7 +1687,8 @@ public sealed class Dib8096
         _programmed = null;
         Snapshot? known = null;
         if (_memory is not null) _memory.Channels.TryGetValue(_khz, out known);
-        // 入り方は 覚えた値 → 既定 (8K) でガードだけ探す (DiB8000 0x8002 から) → FFT から探す の順で固定 (合わなければ次へ)
+        // 入り方は、覚えた値があればそれで合わせ、無ければ既定 (8K) でガードだけ探す (DiB8000 0x8002 から)。
+        // どちらも合わなければ FFT から探し直す (この順は固定)
         if (known is not null)
         {
             Restore(known);
@@ -1704,6 +1708,7 @@ public sealed class Dib8096
         }
 
         var started = _time.NowMs;
+        var searchStarted = started;
         var step = Step.Start;
         var readBack = false;
         for (; ; )
@@ -1742,7 +1747,13 @@ public sealed class Dib8096
             }
             if (step == Step.Stop && _demodState is DemodState.Failed or DemodState.Locked or DemodState.DataLocked) break;
             if (step == Step.Stop) throw new IOException("DiB8000 の探索が途中で止まりました");
-            if (_time.NowMs - started > SearchLimitMs) throw new IOException("DiB8000 の探索が 5 秒で終わりませんでした");
+            if (_time.NowMs - started > SearchLimitMs)
+            {
+                // 覚えた値・既定で合わずに探索し直したときは、上限がそこから数え直しになる (合わせて最大およそ 10 秒)
+                throw new IOException(started == searchStarted
+                    ? "DiB8000 の探索が 5 秒で終わりませんでした"
+                    : $"DiB8000 の探索し直しが 5 秒で終わりませんでした (合わせて {(_time.NowMs - searchStarted) / 1000:F1} 秒)");
+            }
             var floor = Floor(step);
             if (floor == FastPollMs) _fastSteps[step] = _fastSteps.GetValueOrDefault(step) + 1;
             Wait(Math.Max(floor, (int)Math.Ceiling(wait * Symbol)));
@@ -2096,14 +2107,7 @@ public sealed class Dib8096
                 Modulation.Qam16 => 2,
                 _ => 3,
             };
-            var fec = layer.Fec switch
-            {
-                1 => 1,
-                2 => 2,
-                3 => 3,
-                5 => 5,
-                _ => 7,
-            };
+            var fec = Fec(layer.Fec);
             var ti = layer.Interleave == 0 ? 0 : 32 - int.LeadingZeroCount(layer.Interleave);
             if (ti > 3) ti = 0;
             D(2 + i, (modulation << 10) | ((layer.Segments & 0xF) << 6) | (fec << 3) | ti);
@@ -2255,14 +2259,7 @@ public sealed class Dib8096
             {
                 Segments = D(493 + i) & 0xF,
                 Interleave = interleave == 3 ? 4 : interleave,
-                Fec = (D(481 + i) & 7) switch
-                {
-                    1 => 1,
-                    2 => 2,
-                    3 => 3,
-                    5 => 5,
-                    _ => 7,
-                },
+                Fec = Fec(D(481 + i) & 7),
                 Modulation = (D(487 + i) & 3) switch
                 {
                     0 => Modulation.Dqpsk,
@@ -2323,10 +2320,13 @@ public sealed class Dib8096
     {
         var status = D(568);
         var strength = Strength(65535 - D(390));
-        double? cn = null;
-        if (IsLocked(status)) cn = CarrierToNoise(D(542), D(543));
-        return new DibSignal(IsLocked(status), strength, cn, status);
+        var locked = IsLocked(status);
+        double? cn = locked ? CarrierToNoise(D(542), D(543)) : null;
+        return new DibSignal(locked, strength, cn, status);
     }
+
+    /// <summary>符号化率の値。1・2・3・5 以外は 7 にそろえる</summary>
+    private static int Fec(int raw) => raw is 1 or 2 or 3 or 5 ? raw : 7;
 
     private static readonly (uint S, uint Y)[] StrengthTable =
     [
@@ -2415,19 +2415,19 @@ public sealed class DibMemory
         && a.Layers.SequenceEqual(b.Layers);
 
     /// <summary>ファイルに書く形: <c>{ "&lt;kHz&gt;": { fft, guard, inversion, partial, diff, layers: [[変調, 符号化率, インターリーブ, セグメント数] × 3] } }</c></summary>
-    public System.Text.Json.Nodes.JsonObject ToJson()
+    public JsonObject ToJson()
     {
-        var json = new System.Text.Json.Nodes.JsonObject();
+        var json = new JsonObject();
         lock (Channels)
         {
             foreach (var (khz, s) in Channels.OrderBy(pair => pair.Key))
             {
-                var layers = new System.Text.Json.Nodes.JsonArray();
+                var layers = new JsonArray();
                 foreach (var (modulation, fec, interleave, segments) in s.Layers)
                 {
-                    layers.Add((System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonArray(modulation, fec, interleave, segments));
+                    layers.Add((JsonNode)new JsonArray(modulation, fec, interleave, segments));
                 }
-                json[khz.ToString(System.Globalization.CultureInfo.InvariantCulture)] = new System.Text.Json.Nodes.JsonObject
+                json[khz.ToString(CultureInfo.InvariantCulture)] = new JsonObject
                 {
                     ["fft"] = s.Fft, ["guard"] = s.Guard, ["inversion"] = s.Inversion, ["partial"] = s.Partial, ["diff"] = s.Diff, ["layers"] = layers,
                 };
@@ -2437,12 +2437,12 @@ public sealed class DibMemory
     }
 
     /// <summary>ファイルの中身から。**どれか1つでも形が違えば投げる** (呼ぶ側が全部捨てて探索から)</summary>
-    public static DibMemory FromJson(System.Text.Json.Nodes.JsonObject json)
+    public static DibMemory FromJson(JsonObject json)
     {
         var memory = new DibMemory();
         foreach (var (key, node) in json)
         {
-            if (!uint.TryParse(key, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var khz) || node is not System.Text.Json.Nodes.JsonObject value)
+            if (!uint.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var khz) || node is not JsonObject value)
             {
                 throw new FormatException($"周波数「{key}」が読めません");
             }
@@ -2451,8 +2451,8 @@ public sealed class DibMemory
                 var number = value[name]?.GetValue<int>() ?? throw new FormatException($"{key} の {name} がありません");
                 return number >= min && number <= max ? number : throw new FormatException($"{key} の {name} ({number}) が範囲の外です");
             }
-            if (value["layers"] is not System.Text.Json.Nodes.JsonArray { Count: 3 } layers) throw new FormatException($"{key} の layers が 3 つではありません");
-            var parsed = layers.Select(layer => layer is System.Text.Json.Nodes.JsonArray { Count: 4 } item
+            if (value["layers"] is not JsonArray { Count: 3 } layers) throw new FormatException($"{key} の layers が 3 つではありません");
+            var parsed = layers.Select(layer => layer is JsonArray { Count: 4 } item
                 ? (item[0]!.GetValue<int>(), item[1]!.GetValue<int>(), item[2]!.GetValue<int>(), item[3]!.GetValue<int>())
                 : throw new FormatException($"{key} の階層が 4 つの数ではありません")).ToArray();
             if (parsed.Any(layer => layer.Item1 is < 0 or > 4 || layer.Item2 is < 0 or > 7 || layer.Item3 is < 0 or > 4 || layer.Item4 is < 0 or > 13))

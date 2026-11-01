@@ -9,7 +9,7 @@ namespace Denpa.Agent;
  * 節の番号 (「4.2」など) はその仕様書のもの。仕様書が「こちらで決めてよい」とした所 (コア 1 への指示の形など) は
  * Mb86h47Programs.cs に書いた形で決めた。
  *
- * ホストはベンダー要求 0xBC (メモリ要求) でブリッジのレジスタを読み書きする。メモリ要求は全部この錠で1つずつ通す
+ * ホストはベンダー要求 0xBC (メモリ要求) でブリッジのレジスタを読み書きする。メモリ要求は全部このロックで1つずつ通す
  * (カードの UART もメモリ要求なので、チューナーとカードが別のスレッドから呼んでも混ざらない)。
  * TS の EP 0x81 の読みはこの外 (IUsbInStream) で並べる。
  *
@@ -43,15 +43,15 @@ public sealed class Mb86h47 : II2c
     private const byte MemoryRequest = 0xBC;
 
     /// <summary>起動の段の名前 (<see cref="Start"/>。失敗の記録に「…ところで」と続けて出す)</summary>
-    public const string StageStart = "ブリッジを起動する";
+    private const string StageStart = "ブリッジを起動する";
 
     /// <summary>コア 1 との bulk の経路 (5.5) を用意する段</summary>
-    public const string StageCommands = "コア 1 との bulk の経路を用意する";
+    private const string StageCommands = "コア 1 との bulk の経路を用意する";
 
     /// <summary>メモリ要求と bulk の命令の時間切れ (仕様書 3 章「タイムアウトは 1 秒で動いている」)</summary>
     private const int TimeoutMs = 1000;
 
-    /// <summary>1回のメモリ要求の上限 (4.2 で広げたあと。仕様書 3 章の「最大 64 バイト」)</summary>
+    /// <summary>1回のメモリ要求の上限 (仕様書 3 章の「最大 64 バイト」)。書き込みで使えるのは 4.2 で広げたあとだけ</summary>
     private const int MaxWords = 16;
 
     private const uint Core0 = 0x1600000;
@@ -429,7 +429,7 @@ public sealed class Mb86h47 : II2c
     }
 
     // ---------------------------------------------------------------------
-    // I2C (5)。書き込みと読みかえ書きは塊に溜めて答えを待たずに流し、読み・待つ前 (Flush) に送る
+    // I2C (5)。書き込みと読みかえ書きは1つずつ答えを待たずに塊に溜め、読む前と待つ前 (Flush) にまとめて送る
     // ---------------------------------------------------------------------
 
     public void Write(byte address, ReadOnlySpan<byte> data)
@@ -631,7 +631,7 @@ public sealed class Mb86h47 : II2c
 
     /// <summary>
     /// 待ちの間に、積んである流し始めの準備を1つずつ回す。<paramref name="until"/> (Stopwatch の時刻) を過ぎたら戻る。
-    /// 1つ回すごとに錠を外すので、カードの読み書きも挟まる
+    /// 1つ回すごとにロックを外すので、カードの読み書きも挟まる
     /// </summary>
     public void Idle(long until)
     {

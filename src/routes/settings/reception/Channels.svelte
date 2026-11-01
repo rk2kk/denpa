@@ -116,9 +116,9 @@
         <div class="cluster section-bar" data-testid="channel-actions">
           {@render scanControl()}
           <!--
-                        入れたばかりのとき用。普段の周回は録画にもスキャンにもロゴにも
+                        入れたばかりのとき用。普段の周回は録画にもスキャンにも
                         譲るので、何か動いていると番組表がなかなか埋まらない。
-                        押されている間は録画以外には譲らせて、全チューナーで回る
+                        押されている間は録画とライブ視聴以外には譲らせて、全チューナーで回る
                     -->
           <ActionButton
             action="?/collectNow"
@@ -192,6 +192,21 @@
         <div class="tiny muted" data-testid="logo-unavailable">
           <span class="num">{data.logos.unavailable}</span> 局はロゴが放送に載っていないため取れません
           (1週間後にまた確かめます)
+        </div>
+      {/if}
+      {#if data.logos.satellite.missing > 0 && !data.logoSweep.running}
+        <!--
+                    衛星のロゴは十数分に一度しか流れてこず、揃うまで何回か開き直すことがある。
+                    いつ続きを読むのかを言わないと、止まっているように見える (logo.awaitCarousel)
+                -->
+        <div class="tiny muted" data-testid="logo-satellite-waiting">
+          BS・CS の <span class="num">{data.logos.satellite.missing}</span>
+          局は、{#if data.logos.satellite.carrier !== null}
+            {data.logos.satellite.carrier} に十数分おきにまとめて流れてくるのを待っています。
+            番組表集めがこの中継を開いたときと、チューナーが空いているときに、続きから読みます
+          {:else}
+            ロゴを流している中継をまだ探しています。チューナーが空いているときと、番組表集めが衛星の中継を開いたときに確かめます
+          {/if}
         </div>
       {/if}
     {/if}

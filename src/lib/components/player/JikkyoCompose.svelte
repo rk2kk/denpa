@@ -29,10 +29,10 @@
    *
    * - 「NX-Jikkyo に書きます」・入力欄・色などを選ぶボタン・「送る」・✕ を 1 つのカプセルに並べる。書けないときと失敗したときは、
    *   頭の字をその理由 1 行に替える (トーストは出さない)
-   * - Enter で送る (変換中は送らない)。Esc か ✕ で閉じる。送れたら欄を空にし、失敗したら残す。自動で送り直さない
+   * - Enter で送る (変換中は送らない)。Esc か ✕ で閉じる (一覧の下では一覧ごとしまう)。送れたら欄を空にし、失敗したら残す。自動で送り直さない
    * - 色・位置・大きさは、パレットのボタンで開く選択の行で選ぶ。端末ごとに覚える (`JIKKYO_STYLE_KEY`)
-   * - 置き場は画面が決める。映像の上 (操作バーのすぐ上) か、スマホの形の下のタブのすぐ上 (`docked`。ソフトキーボードが
-   *   出たら `visualViewport` に合わせて上へ)
+   * - 置き場は画面が決める。ふだんはコメントの一覧の下 (`panel`。一覧の中なので面も影も付けず、頭の字は入力欄の上の行に。
+   *   ✕ は置かない。しまうのは一覧のボタン)。一覧を出せない形 (横にしたスマホ・全画面) では映像の上、操作バーのすぐ上
    */
   interface Props {
     feed: JikkyoFeed;
@@ -41,11 +41,24 @@
     /** 放送からの遅れ (秒)。分からなければ null */
     lag: number | null;
     paused: boolean;
-    /** 下のタブのすぐ上に置く (スマホの形) */
-    docked: boolean;
+    /** コメントの一覧の下に置く (ほかは映像の上) */
+    panel: boolean;
+    /** 出たら入力欄にフォーカスを移す (押して開いたとき。覚えていた一覧を開き直したときは移さない) */
+    focus: boolean;
+    /** 書きかけ。画面が持つ (列を入れ替えて描き直しても消えない) */
+    text: string;
     onclose: () => void;
   }
-  let { feed, air, lag, paused, docked, onclose }: Props = $props();
+  let {
+    feed,
+    air,
+    lag,
+    paused,
+    panel,
+    focus,
+    text = $bindable(),
+    onclose,
+  }: Props = $props();
 
   /** 色・位置・大きさを覚えておく鍵 (端末ごと。頭の `player-` は画面をまたいで効くもの) */
   const JIKKYO_STYLE_KEY = "player-jikkyo-style";
@@ -67,7 +80,6 @@
   const BEHIND = "ライブに戻ると書けます";
   const CLOSED = "(いまは書けません)";
 
-  let text = $state("");
   let busy = $state(false);
   /** 送った結果・送れなかった理由。打ち直したら消す */
   let note = $state("");
@@ -78,33 +90,13 @@
   /** 繋がっているかは $state ではないので、0.25 秒おきに読み直す */
   let ready = $state(false);
   let input = $state<HTMLInputElement | null>(null);
-  /** ソフトキーボードのぶん持ち上げる高さ (px。`docked` のときだけ) */
-  let lift = $state(0);
 
   onMount(() => {
     style = readPostStyle(read(JIKKYO_STYLE_KEY));
-    input?.focus();
+    if (focus) input?.focus();
     const timer = setInterval(() => (ready = feed.writable), 250);
     ready = feed.writable;
     return () => clearInterval(timer);
-  });
-
-  $effect(() => {
-    const view = window.visualViewport;
-    if (!docked || view === null) {
-      lift = 0;
-      return;
-    }
-    const measure = () => {
-      lift = Math.max(0, window.innerHeight - view.height - view.offsetTop);
-    };
-    measure();
-    view.addEventListener("resize", measure);
-    view.addEventListener("scroll", measure);
-    return () => {
-      view.removeEventListener("resize", measure);
-      view.removeEventListener("scroll", measure);
-    };
   });
 
   const caught = $derived(caughtUp(lag, paused));
@@ -189,15 +181,17 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="compose"
-  class:docked
-  style:--lift="{lift}px"
+  class:in-list={panel}
   data-testid="jikkyo-compose"
   {onkeydown}
 >
   {#if picking}
-    <!-- 色・位置・大きさ。メニューと同じ形 (塗らずに、選んでいるものは空色の太字と短い線) -->
+    <!--
+      色・位置・大きさ。どれも種別のタブと同じ並び (`app.css` の `.segmented`。塗らずに、選んでいるものは主の色の太字と下線。
+      選び直すと下線が滑る)。映像の上では主の色を空色に替える
+    -->
     <div class="pick" data-testid="jikkyo-style">
-      <div role="group" aria-label="色" class="choices">
+      <div role="group" aria-label="色" class="colors segmented">
         {#each POST_COLORS as color (color)}
           <button
             type="button"
@@ -212,7 +206,7 @@
           >
         {/each}
       </div>
-      <div role="group" aria-label="位置" class="choices">
+      <div role="group" aria-label="位置" class="segmented">
         {#each POSITIONS as position (position)}
           <button
             type="button"
@@ -224,7 +218,7 @@
           >
         {/each}
       </div>
-      <div role="group" aria-label="大きさ" class="choices">
+      <div role="group" aria-label="大きさ" class="segmented">
         {#each SIZES as size (size)}
           <button
             type="button"
@@ -281,23 +275,25 @@
       onclick={() => void send()}
       data-testid="jikkyo-compose-send">送る</button
     >
-    <button
-      type="button"
-      class="icon"
-      aria-label="閉じる"
-      title="閉じる"
-      onclick={onclose}
-      data-testid="jikkyo-compose-close"
-      ><Icon icon={CLOSE} size="size-5" /></button
-    >
+    {#if !panel}
+      <button
+        type="button"
+        class="icon"
+        aria-label="閉じる"
+        title="閉じる"
+        onclick={onclose}
+        data-testid="jikkyo-compose-close"
+        ><Icon icon={CLOSE} size="size-5" /></button
+      >
+    {/if}
   </div>
   <span class="visually-hidden" role="status" aria-live="polite">{told}</span>
 </div>
 
 <style>
   /*
-   * 操作の層のカプセル。映像の上ではメニューと同じ暗い面 (テーマで変えない)、下のタブの上 (`docked`) では
-   * ページの操作の層の面。色はこの中の変数だけで替える
+   * 映像の上では操作の層のカプセル (メニューと同じ暗い面。テーマで変えない)。コメントの一覧の下 (`panel`) では
+   * 一覧の中身の続きなので、面も影も付けずページの色で描く。色はこの中の変数だけで替える
    */
   .compose {
     --c-fg: var(--dp-on-video);
@@ -309,29 +305,24 @@
     --c-shadow: 0 2px 6px rgb(0 0 0 / 0.35), 0 18px 40px rgb(0 0 0 / 0.45);
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    margin-bottom: 0.5rem;
+    gap: var(--dp-space-1);
+    margin-bottom: var(--dp-space-2);
     color: var(--c-fg);
   }
-  .compose.docked {
+  .compose.in-list {
     --c-fg: var(--pico-color);
     --c-muted: var(--dp-muted);
     --c-on: var(--dp-primary-text);
     --c-hover: var(--dp-hover);
-    --c-face: var(--dp-float);
+    --c-face: transparent;
     --c-field: var(--dp-field);
-    --c-shadow: var(--dp-shadow-pop);
-    position: fixed;
-    inset-inline: 0.75rem;
-    bottom: max(
-      calc(var(--dp-tabbar, 0px) + 0.375rem),
-      calc(var(--lift) + 0.375rem)
-    );
-    z-index: 30;
-    margin: 0;
+    --c-shadow: none;
+    /* 選ぶ行と頭の字の間も、選ぶ行のまとまりの間と同じくらい空ける (詰めると選ぶ行の続きに見えた) */
+    gap: var(--dp-space-3);
+    margin: var(--dp-space-2) 0 0;
   }
   @media (prefers-reduced-transparency: reduce) {
-    .compose:not(.docked) {
+    .compose:not(.in-list) {
       --c-face: var(--dp-video-panel);
     }
   }
@@ -339,18 +330,44 @@
   .pick {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
-    padding: 0.25rem 0.25rem 0.25rem 0.75rem;
+    gap: var(--dp-space-1);
+    padding: var(--dp-space-1) var(--dp-space-1) var(--dp-space-1)
+      var(--dp-space-3);
     border-radius: var(--dp-radius-full);
     background: var(--c-face);
     box-shadow: var(--c-shadow);
   }
+  /*
+   * 色の 8 つは 1 行に並べ、入りきらない幅 (一覧の下の列) では 4 つずつ 2 行にそろえる (6 と 2 に崩さない)。
+   * 位置と大きさはその下の 1 行。まとまりの間はどれも同じ余白
+   */
   .pick {
+    container-type: inline-size;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 0.5rem;
-    padding: 0.5rem;
+    gap: var(--dp-space-3) var(--dp-space-4);
+    padding: var(--dp-space-2);
     border-radius: var(--dp-radius-lg);
+  }
+  /* 選んでいる印 (`.segmented`) の色。映像の上はボタンのオンと同じ空色 (一覧の下はページの色のまま) */
+  .compose:not(.in-list) .pick {
+    --pico-primary: var(--c-on);
+    --dp-primary-text: var(--c-on);
+    --dp-hover-soft: var(--c-hover);
+    --pico-secondary: var(--c-fg);
+    --pico-secondary-hover: var(--c-fg);
+  }
+  .pick .colors {
+    display: grid;
+    grid-template-columns: repeat(8, 2.5rem);
+    flex-basis: 100%;
+    justify-content: center;
+  }
+  /* 8 つ (2.5rem と間 2px) が入らない幅 */
+  @container (width < 21rem) {
+    .pick .colors {
+      grid-template-columns: repeat(4, 2.5rem);
+    }
   }
   .line {
     flex-shrink: 1;
@@ -367,12 +384,28 @@
     color: var(--c-fg);
     font-weight: var(--dp-weight-bold);
   }
+  /* 一覧の下は列の幅しか無いので、頭の字を 1 行目に、入力欄と押すものを 2 行目に置く */
+  .in-list .row {
+    flex-wrap: wrap;
+    padding: 0;
+  }
+  .in-list .line {
+    flex-basis: 100%;
+    max-width: none;
+  }
+  .in-list .pick {
+    justify-content: flex-start;
+    padding: 0;
+  }
+  .in-list .pick .colors {
+    justify-content: start;
+  }
   input {
     flex: 1;
     min-width: 6rem;
     height: 2.5rem;
     margin: 0;
-    padding: 0 0.75rem;
+    padding: 0 var(--dp-space-3);
     border: 0;
     border-radius: var(--dp-radius-full);
     background: var(--c-field);
@@ -405,7 +438,7 @@
     height: 2.5rem;
     min-width: 2.5rem;
     margin: 0;
-    padding: 0 0.75rem;
+    padding: 0 var(--dp-space-3);
     border: 0;
     border-radius: var(--dp-radius-full);
     background: transparent;
@@ -417,7 +450,8 @@
   button.icon {
     padding: 0;
   }
-  button:is(:hover, :focus-visible):not(:disabled) {
+  /* 選択肢 (`.choice`) の地と字は `.segmented` が決める (指を乗せたらごく薄い地) */
+  button:not(.choice):is(:hover, :focus-visible):not(:disabled) {
     background: var(--c-hover);
   }
   button:disabled {
@@ -430,26 +464,9 @@
     display: inline-flex;
     filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.6));
   }
-  .choices {
-    display: flex;
-    gap: 0.125rem;
-  }
-  /* 選んでいるものは空色 (ページの上では主の色) の太字と、下の短い線。塗らない */
-  .choice[aria-pressed="true"] {
-    color: var(--c-on);
-    font-weight: var(--dp-weight-bold);
-    background-image: none;
-  }
-  .choice[aria-pressed="true"]::after {
-    content: "";
-    position: absolute;
-    left: 50%;
-    bottom: 0.125rem;
-    width: 1rem;
-    height: 2px;
-    border-radius: 1px;
-    background: var(--c-on);
-    translate: -50% 0;
+  .choice {
+    background: var(--pico-background-color);
+    color: var(--pico-color);
   }
   .swatch {
     padding: 0;

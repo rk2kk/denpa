@@ -21,8 +21,8 @@ Apple Silicon の Mac と x64 の Windows で動きます。エージェント�
 ### arm64 でも動きますか
 
 Linux の arm64 で動きます。イメージは amd64 と arm64 を同じタグにまとめてあり、自分のアーキテクチャのものが降ってきます。
-arm64 には Intel の QSV が無く、VA-API のドライバも入れていないので、ソフトウェアでエンコードします。
-[install.md](install.md#用意するもの)・[encode.md](encode.md#gpu-でエンコードする-qsv--va-api)。
+arm64 には VA-API のドライバを入れていないので、ふつうはソフトウェアでエンコードします。Rockchip (RK3588) なら MPP でハードウェアエンコードします。
+[install.md](install.md#用意するもの)・[encode.md](encode.md#gpu-でエンコードする-va-api)・[Rockchip](encode.md#rockchip-rk3588-でエンコードする)。
 
 ### GPU が無くても使えますか
 
@@ -79,7 +79,7 @@ Android TV と Fire TV は、専用のアプリ [denpa-tv](https://github.com/da
 実況をオンにしたときだけ、最後の「実況」タブで勢いの順に並べます。
 
 コメントは denpa のサーバを通さず、端末が NX-Jikkyo に直接繋いで受け取ります。相手には端末の IP とどの局をいつ観ているかが見えます。
-ライブでは、映像の右端の「実況に書く」から NX-Jikkyo に書き込めます。書いたものは公開され、消せません (アカウントは使わず匿名ですが、同じ端末から書いたものは結び付けられます)。
+ライブでは、映像の右端の「コメントの一覧」で開く一覧の下 (全画面では同じボタンの「実況に書く」) から NX-Jikkyo に書き込めます。書いたものは公開され、消せません (アカウントは使わず匿名ですが、同じ端末から書いたものは結び付けられます)。
 [watch.md](watch.md#実況のコメント)・[watch.md](watch.md#実況に書き込む)・[architecture.md](architecture.md#端末が外へ繋ぐもの-実況のコメント)。
 
 ### 録画はどこに置かれますか

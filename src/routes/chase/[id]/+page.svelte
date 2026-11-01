@@ -75,6 +75,7 @@
   import { liveUpdates } from "#lib/live-updates.svelte.js";
   import { keepResume } from "#lib/resume.js";
   import { stepSpeed } from "#lib/ts/pacing.js";
+  import { playbackAt } from "#lib/ts/watch.js";
 
   /**
    * 追っかけ再生 (録画中の録画を頭から観る)。プレイヤーはライブと同じ (`live-player.svelte.ts` の chase モード)。
@@ -189,6 +190,18 @@
   function airTime(): number | null {
     const target = data.jikkyo;
     return target === null ? null : target.head + player.chasePosition * 1000;
+  }
+  /** 録れているところの端の放送時刻。一覧の「この先」はここまで (まだ無いところは並べない) */
+  function recordedAir(): number | null {
+    const target = data.jikkyo;
+    return target === null ? null : target.head + recorded * 1000;
+  }
+  /** 放送時刻 `at` が追っかけのどこか (`airTime` の逆)。録画の頭より前は「開始前」で、飛べない */
+  function placeAir(at: number): number | "before" | "cut" {
+    const target = data.jikkyo;
+    return target === null
+      ? "before"
+      : playbackAt((at - target.head) / 1000, null);
   }
   // 過去ログにまだ入っていない新しいところ (10 分以内) を観ているなら、NX-Jikkyo で 1 回だけ遡る
   $effect(() => {
@@ -332,7 +345,7 @@
 
 <svelte:window onkeydown={keys} />
 
-<!-- ライブ・観る画面と同じレイアウト (PlayerLayout / PlayerStage / MediaStack)。映像が左、番組の中身が右 -->
+<!-- ライブと同じレイアウト (PlayerLayout / PlayerStage / MediaStack。観る画面も PlayerLayout / PlayerStage は同じ)。映像が左、番組の中身が右 -->
 <PlayerLayout>
   <PlayerStage
     {controls}
@@ -360,6 +373,7 @@
               show={jikkyoActive && data.jikkyo !== null}
               paused={player.paused}
               rate={player.rate}
+              ahead
             />
           {/if}
         {/snippet}
@@ -572,7 +586,13 @@
       {#snippet top()}
         <!-- 実況のコメントの一覧は、出している間だけ列の頭に (観る画面と同じ) -->
         {#if canList && jikkyoList.on}
-          <JikkyoList feed={jikkyo} air={airTime} />
+          <JikkyoList
+            feed={jikkyo}
+            air={airTime}
+            place={placeAir}
+            seek={seekTo}
+            edge={recordedAir}
+          />
         {/if}
       {/snippet}
       <ProgramFacts program={detail.current ?? facts} />

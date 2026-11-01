@@ -3,7 +3,7 @@
  *
  * 画面は放送時刻 `W` (いま映しているコマの放送時刻。ライブは `clock` の通知、録画は `ts_head` と再生位置から) を
  * 渡して `take` を呼び、返ってきたものを流す (`JikkyoLayer`)。出し方は `cursor.ts`。
- * コメントの出どころ (NX-Jikkyo・過去ログ API) と控えはここが持つ。どこから埋めるかは docs/watch.md の「実況」
+ * コメントの出どころ (NX-Jikkyo・過去ログ API) と控えはここが持つ。どこから埋めるかは docs/watch.md の「実況のコメント」
  */
 import { type PostStyle, postStyle } from "./command";
 import type { Comment } from "./comments";
@@ -19,7 +19,7 @@ const KAKOLOG_RETRY = 60_000;
 /** 過去ログにまだ入りきっていないところを取り足す間隔 (過去ログは 5 分おきに集めている) */
 const KAKOLOG_REFRESH = 5 * 60_000;
 
-/** 形のずれは端末ごとに 1 回だけ言う (NX-Jikkyo や過去ログ API のバージョンが変わったときに気付けるように) */
+/** 形式のずれは端末ごとに 1 回だけ言う (NX-Jikkyo や過去ログ API のバージョンが変わったときに気付けるように) */
 let warned = false;
 function warnShape(what: string): void {
   if (warned) return;
@@ -76,14 +76,14 @@ export class JikkyoFeed {
 
   /**
    * NX-Jikkyo で 1 回だけ遡る (録画中の追っかけ)。いまの放送時刻 `w` が過去ログにまだ入っていない新しいところ
-   * (10 分以内) に来たときだけ。NX-Jikkyo の DB の読み出しは重いので、2 度目からは何もしない
+   * (10 分以内) に来たときだけ
    */
   backfill(w: number, now = Date.now()): void {
     if (w > now - KAKOLOG_LAG) this.nx?.backfill(now);
   }
 
   /**
-   * 過去ログ API から `[from, to())` を取る。録画は開いたときに 1 回 (`every` を省く)、録画中の追っかけは
+   * 過去ログ API から `from` から `to()` までを取る。録画は開いたときに 1 回 (`every` を省く)、録画中の追っかけは
    * `every` ごとに新しいところを取り足す。取ったところは控えが覚えているので、同じ区間を 2 度訊かない。
    * **10 分より新しいところは、取っても「埋めた」ことにしない** (過去ログにまだ入りきっていない)。録り終えてすぐ開いた録画は、
    * そこが埋まるまで `KAKOLOG_REFRESH` ごとに取り足す。読めなければ「いまは読めない」にして、60 秒後にもう一度試す
@@ -103,7 +103,7 @@ export class JikkyoFeed {
         try {
           const got = await fetchKakolog(channel, start, stop);
           if (run !== this.kakologRun) return;
-          if (got.odd > 0) warnShape("過去ログの返事の形が一部違います");
+          if (got.odd > 0) warnShape("過去ログの返事の形式が一部違います");
           this.cursor.receive(got.comments, [start, Math.min(stop, settled)]);
         } catch {
           ok = false;
@@ -172,11 +172,11 @@ export class JikkyoFeed {
 
   /**
    * いまの放送時刻 `w` までに書かれたもののうち、まだ流していないもの。流していないときは何も返さない。
-   * NG ワードを含むものは外す (自分の書き込みも)
+   * 録画は枠の外から流し始めるぶん、`ahead` ms 先まで出す (`cursor.ts`)。NG ワードを含むものは外す (自分の書き込みも)
    */
-  take(w: number): Take {
+  take(w: number, ahead = 0): Take {
     if (!this.active) return { comments: [], jumped: false };
-    const take = this.cursor.take(w);
+    const take = this.cursor.take(w, ahead);
     const comments = take.comments.filter((c) => !this.isNg(c));
     return { comments, jumped: take.jumped };
   }
@@ -193,6 +193,15 @@ export class JikkyoFeed {
       limit,
       (c) => !this.isNg(c),
     );
+  }
+
+  /**
+   * コメントの一覧の「この先」(録画だけ)。いまの放送時刻 `w` より後、`until` までに書かれたもののうち、古いほうから `limit` 件。
+   * `recent` と同じく何も消費せず、NG ワードを含むものは外す
+   */
+  ahead(w: number, until: number, limit: number): Comment[] {
+    if (!this.active || until <= w) return [];
+    return this.cursor.store.earliest(w, until, limit, (c) => !this.isNg(c));
   }
 
   private isNg(comment: Comment): boolean {

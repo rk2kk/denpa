@@ -3,28 +3,38 @@
  * 探し方・エンコード方式の本体は `server/hwenc.ts` (画面からは読み込めない)
  */
 
-/** GPU でエンコードできるコーデック。**AV1 が先** — 主 (`library_path`) をそちらにする順序と同じ */
-export const HW_CODECS = ["av1", "h264"] as const;
+/**
+ * GPU でエンコードできるコーデック。**並びは小さくなる順 (AV1 → H.265 → H.264)** — 主 (`library_path`) を
+ * 選ぶ順、端末で観るものを選ぶ順と同じ。**H.265 (`hevc`) は GPU でだけエンコードする** (ソフトウェアの
+ * エンコーダを組んでいない。`SOFTWARE_CODECS`)。ライブと追っかけは H.265 を出さない (`#lib/live.ts` の `LiveCodec`)
+ */
+export const HW_CODECS = ["av1", "hevc", "h264"] as const;
 export type HwCodec = (typeof HW_CODECS)[number];
 
 /**
- * GPU でエンコードする方式。並びがそのまま試す順 (QSV が先。理由は server/hwenc.ts)。
+ * GPU でエンコードする方式。並びがそのまま試す順。Intel・AMD は VA-API (QSV を使わない理由は server/hwenc.ts)。
  * `rkmpp` は Rockchip (RK3588 / RK3588S) のハードウェアエンコーダ、`nvenc` は NVIDIA の GPU の
- * エンコーダで、どちらもデバイスが QSV・VA-API と別 (`/dev/mpp_service`・`/dev/nvidia0`。server/hwenc.ts)
+ * エンコーダで、どちらもデバイスが VA-API と別 (`/dev/mpp_service`・`/dev/nvidia0`。server/hwenc.ts)
  */
-export const HW_KINDS = ["qsv", "vaapi", "rkmpp", "nvenc"] as const;
+export const HW_KINDS = ["vaapi", "rkmpp", "nvenc"] as const;
 export type HwKind = (typeof HW_KINDS)[number];
 
 export const HW_KIND_LABEL: Record<HwKind, string> = {
-  qsv: "QSV",
   vaapi: "VA-API",
   rkmpp: "Rockchip MPP",
   nvenc: "NVENC",
 };
 export const CODEC_LABEL: Record<HwCodec, string> = {
   av1: "AV1",
+  hevc: "H.265",
   h264: "H.264",
 };
+
+/**
+ * ソフトウェア (CPU) でもエンコードできるコーデック。H.265 は入らない — 録画のエンコードで GPU が全部落ちても
+ * ソフトウェアには倒れず、設定のエンコーダにも「ソフトウェア」を出さない (docs/encode.md「H.265 は GPU でだけ」)
+ */
+export const SOFTWARE_CODECS: readonly HwCodec[] = ["av1", "h264"];
 
 /**
  * **デバイス (GPU) ごとに、GPU でエンコードしてよいコーデック** (設定 `hwAllow`)。デバイスの path がキー。
@@ -89,7 +99,7 @@ export function hwChoice(
  * **選んだエンコーダを設定 (`hwAllow`) に書き戻す。** 持ち方はデバイス × 方式 × コーデックのまま。
  *
  * - 選ばれなかったデバイスは、このコーデックの印を (使える方式すべてで) 外す
- * - 選ばれたデバイスは、すでにどれかの方式で許されていればそのまま (QSV だけ外した、などを崩さない)。
+ * - 選ばれたデバイスは、すでにどれかの方式で許されていればそのまま。
  *   どれも許されていなければ、使える方式すべてに印を付ける
  * - 使えない方式の印・ほかのコーデック・いま見えていないデバイスは前のまま (GPU を挿し替えたときにそのまま効く)
  */
@@ -110,7 +120,7 @@ export function chooseHw(
         );
         if (keep || !device[kind].includes(codec)) return [kind, before];
         const others = before.filter((c) => c !== codec);
-        // 並びは HW_CODECS のまま (AV1 が先)
+        // 並びは HW_CODECS のまま (AV1 → H.265 → H.264)
         return [
           kind,
           chosen

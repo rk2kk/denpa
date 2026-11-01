@@ -77,9 +77,10 @@ FROM scratch AS mpeg2wasm-out
 COPY --from=mpeg2wasm /opt/denpa/mpeg2 /
 
 # ---------------------------------------------------------------------------
-# データ放送と字幕、画面の放送の字を描くブラウザに渡す字 (Denpa Font。danything/denpa-font のリリースの woff2。
-# `/api/font/denpa-font.woff2` が配る)。BML は**等幅・丸ゴシック・ARIB外字**を要求していて、
-# この1本が3つとも満たす (借りている側は Kosugi を 4.4MB ぶん抱えているが、外字は入っていない)。
+# データ放送と字幕、画面の放送の字を描くブラウザに渡す字 (Denpa Font。danything/denpa-font のリリースの woff2 の 2 つ
+# (基本の字と JIS X 0213 で足された漢字) と、後のほうの字の範囲 (CSS の unicode-range)。
+# `/api/font/` が配る)。BML は**等幅・丸ゴシック・ARIB外字**を要求していて、
+# この字が3つとも満たす (借りている側は Kosugi を 4.4MB ぶん抱えているが、外字は入っていない)。
 # **留めるのはタグだけ** (Renovate はタグだけ上げればよい)。中身は同じリリースの SHA256SUMS で照らす。
 # 画面はこのタグを URL に付けて1年持たせる (vite.config.ts がこの行を読む)。配る側は VERSION と
 # 照らし、合うときだけ immutable にする (src/lib/server/font.ts)。
@@ -87,13 +88,16 @@ COPY --from=mpeg2wasm /opt/denpa/mpeg2 /
 # ---------------------------------------------------------------------------
 FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS denpa-font
 # renovate: datasource=github-releases depName=danything/denpa-font
-ARG DENPA_FONT_VERSION=v3.5
+ARG DENPA_FONT_VERSION=v3.6
 ADD --chmod=644 https://github.com/danything/denpa-font/releases/download/${DENPA_FONT_VERSION}/SHA256SUMS \
     https://github.com/danything/denpa-font/releases/download/${DENPA_FONT_VERSION}/denpa-font.woff2 \
+    https://github.com/danything/denpa-font/releases/download/${DENPA_FONT_VERSION}/denpa-font-jisx0213.woff2 \
+    https://github.com/danything/denpa-font/releases/download/${DENPA_FONT_VERSION}/denpa-font-jisx0213.txt \
     /usr/share/denpa-font/
-RUN cd /usr/share/denpa-font && grep ' denpa-font.woff2$' SHA256SUMS | sha256sum -c - && rm SHA256SUMS && \
+RUN cd /usr/share/denpa-font && \
+    grep -E ' (denpa-font\.woff2|denpa-font-jisx0213\.woff2|denpa-font-jisx0213\.txt)$' SHA256SUMS > want && \
+    [ "$(wc -l < want)" = 3 ] && sha256sum -c want && rm SHA256SUMS want && \
     printf '%s\n' "$DENPA_FONT_VERSION" > VERSION
-
 # ---------------------------------------------------------------------------
 # 開発用。compose からソースを bind mount して使う
 # ---------------------------------------------------------------------------
@@ -141,7 +145,7 @@ ENV FFPROBE=/usr/bin/ffprobe
 CMD ["bun", "scripts/capture-docs.ts"]
 
 # ---------------------------------------------------------------------------
-# ffmpeg (自前ビルド。AV1 libsvtav1/dav1d + H.264 x264 + Opus + Intel・AMD の GPU (VA-API/QSV) + NVIDIA NVENC (amd64) + Rockchip MPP (arm64)。
+# ffmpeg (自前ビルド。AV1 libsvtav1/dav1d + H.264 x264 + Opus + Intel・AMD の GPU (VA-API) + NVIDIA NVENC (amd64) + Rockchip MPP (arm64)。
 # 上流に投げる直しがあれば patches/ から当てる。ARIB 字幕はデコードせずに写すだけなので
 # デコーダ (libaribcaption) は組み込まない — `-c:s copy` にデコーダは要らない)
 # ---------------------------------------------------------------------------
@@ -153,26 +157,22 @@ FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5
 SHELL ["/bin/bash", "-c"]
 # **arch ごとに、その arch のランナーで組む** (CI は amd64 と arm64 を別の機械で。QEMU で
 # ffmpeg を組むと何倍も掛かる)。digest は複数 arch の索引を指しているので、上の FROM は
-# 組む arch のものを引く。違うのは Intel の QSV・NVIDIA の NVENC と Rockchip の MPP だけ (下の説明)
+# 組む arch のものを引く。違うのは NVIDIA の NVENC と Rockchip の MPP だけ (下の説明)
 ARG TARGETARCH
 
 # ダウンロードは CI で切られることがあるので必ずリトライさせる。
 # 一度これで ffmpeg の取得に失敗してデプロイが止まった
 ENV CURL="curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20"
 
-# libvpl-dev / libva-dev は Intel の GPU (QSV) 向け (docs/encode.md「GPU でエンコードする」)。
-# ffmpeg に libvpl (QSV = h264_qsv / av1_qsv) を組み込み、実行イメージにドライバを
-# 入れてある。コンテナから /dev/dri が見えれば、起動時に src/lib/server/hwenc.ts が試しのエンコードで
-# 見つけて使い、無ければソフトウェア (libsvtav1 / libx264) でエンコードする。
-# **libva は QSV の下に必ずいる** (Linux では libvpl → libmfx-gen → libva → /dev/dri)。
-# vaapi も有効にしてあるのは、QSV が初期化できない機種の逃げ道 (h264_vaapi) のため
+# libva-dev は Intel・AMD の GPU (VA-API) 向け (docs/encode.md「GPU でエンコードする」)。
+# 実行イメージにドライバを入れてあり、コンテナから /dev/dri が見えれば、起動時に
+# src/lib/server/hwenc.ts が試しのエンコードで見つけて使い、無ければソフトウェア
+# (libsvtav1 / libx264) でエンコードする。
+# **Intel の QSV (libvpl) は組み込まない。** QSV は VA-API の上にかぶさる層で、denpa が使う
+# 指定 (ICQ・キーフレーム) は VA-API だけで足りる。Tiger Lake より前の世代ではそもそも動かない
+# (docs/encode.md「QSV を使わない理由」)
 #
-# **QSV (libvpl) は amd64 だけ。** Debian の libvpl / libmfx-gen / intel-media-va-driver は
-# amd64 にしか無い (Intel の GPU が載る arm の機械は無い)。arm64 では libvpl を外して組み、
-# VA-API だけ残す — 起動時の試しのエンコード (src/lib/server/hwenc.ts) で QSV が落ちて、VA-API か
-# ソフトウェアでエンコードするだけなので、denpa の側は何も変えない
-#
-# **Rockchip の MPP (h264_rkmpp) は arm64 だけ。** RK3588 / RK3588S のハードウェアエンコーダを
+# **Rockchip の MPP (h264_rkmpp・hevc_rkmpp) は arm64 だけ。** RK3588 / RK3588S のハードウェアエンコーダを
 # FFmpeg 本家のエンコーダ (8.1 から) で使う (docs/encode.md「Rockchip (RK3588) でエンコードする」)。
 # MPP は Debian に無いのでソースから組み、`librockchip_mpp.so.1` を /usr/local/lib に置く
 # (下の runtime-libs 段が ldd で辿って運ぶ)。イメージは分けず、arm64 の全員に入る —
@@ -181,14 +181,14 @@ ENV CURL="curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-time
 # `--enable-version3` にそろえる** (出来上がる ffmpeg は GPL-3.0-or-later。docs/licenses.md)。
 # rkmpp は libdrm も要る (`--enable-libdrm`)
 #
-# **NVIDIA の NVENC (h264_nvenc / av1_nvenc) は amd64 だけ。** NVIDIA の GPU を挿した arm64 の家庭用サーバは
+# **NVIDIA の NVENC (h264_nvenc・av1_nvenc・hevc_nvenc) は amd64 だけ。** NVIDIA の GPU を挿した arm64 の家庭用サーバは
 # まず無い (Jetson はエンコーダの仕組みが別)。組むのに要るのは nv-codec-headers (Debian の
 # libffmpeg-nvenc-dev。MIT のヘッダだけで、nonfree にはならない) で、ドライバのライブラリ (libcuda・
 # libnvidia-encode) は ffmpeg が実行時に dlopen する。**実行イメージには何も足さない** — NVIDIA Container
 # Toolkit がホストのドライバのライブラリをコンテナに差し込む (docs/encode.md「NVIDIA でエンコードする」)。
-# GPU が無ければ試しのエンコードが落ちて使わないだけなのは QSV と同じ。
+# GPU が無ければ試しのエンコードが落ちて使わないだけなのは VA-API と同じ。
 # clang は CUDA のフィルタ (scale_cuda・bwdif_cuda) を PTX に組むため (`--enable-cuda-llvm`。CUDA の SDK は要らない)
-ENV DEV="curl ca-certificates build-essential cmake pkg-config nasm patch zlib1g-dev libopus-dev libx264-dev libdav1d-dev libva-dev"
+ENV DEV="curl ca-certificates build-essential cmake pkg-config nasm patch zlib1g-dev libx264-dev libdav1d-dev libva-dev"
 
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>.*)$
 ENV FFMPEG_VERSION=9.0.2
@@ -197,6 +197,12 @@ ENV FFMPEG_VERSION=9.0.2
 # (そのために `-DCMAKE_POSITION_INDEPENDENT_CODE=ON` で組む)
 # renovate: datasource=gitlab-tags depName=AOMediaCodec/SVT-AV1 registryUrl=https://gitlab.com
 ARG SVT_AV1_VERSION=v4.2.0
+# Opus も**ソースから組んで libavcodec に静的に繋ぐ**。Debian の libopus (1.5) は、パケットの欠けを AI で補う
+# 機能 (deep PLC・DRED・OSCE) の重みを抱えて 3.5MB あり、そのうち 3MB が重み。denpa は Opus をエンコードする
+# だけで (デコードは FFmpeg 自前の opus デコーダ)、どれも使わないので、既定 (どれも切れている) で組むと 0.6MB ほどで済む。
+# 配布物は xiph のもの (GitHub の tar には組むときに生成するファイルが無い)
+# renovate: datasource=github-tags depName=xiph/opus extractVersion=^v(?<version>.*)$
+ARG OPUS_VERSION=1.6.1
 # Rockchip MPP (arm64 だけ。上の説明)。FFmpeg の configure が求めるのは pkg-config で `rockchip_mpp >= 1.3.8`
 # renovate: datasource=github-tags depName=rockchip-linux/mpp
 ARG MPP_VERSION=1.1.0
@@ -216,21 +222,24 @@ COPY patches/ /patches/
 #
 # **組むのは denpa が使う部品だけ** (`--disable-everything` のうえで下の一覧を足す)。全部組むと
 # libavcodec だけで 26MB あり、ほとんどは放送にも録画にも出てこないコーデックだった。
-# 名前は src/lib/server の ffmpeg の引数から拾ったもの。**引数に新しいフィルタ・コーデック・形式を足したら、
+# 名前は src/lib/server の ffmpeg の引数から取り出したもの。**引数に新しいフィルタ・コーデック・形式を足したら、
 # ここにも足すこと** — テストは偽の ffmpeg で回るので気づけず、イメージの確かめ (.github/image-smoke.sh) が
 # 同じ経路を本物の ffmpeg で通して初めて分かる。名前の出どころ:
 # - デコーダ: 放送 (mpeg2video・h264・aac)、録画 (libdav1d・h264・opus)、切り抜きの画像 (png・mjpeg・webp)。
-#   hevc・ac3・eac3・mp2・aac_latm は、ほかの録画ソフトから移した録画 (サムネイル・音声だけ) のため
+#   hevc は GPU で H.265 にエンコードした録画 (その場の変換・CM 検出のやり直し) と、ほかの録画ソフトから移した録画。
+#   ac3・eac3・mp2・aac_latm は、ほかの録画ソフトから移した録画 (サムネイル・音声だけ) のため
 # - lavfi の入力 (GPU の試しの素材) は wrapped_avframe で届くので、その「デコーダ」も要る。
 #   pcm_s16le のデコーダは、イメージの確かめで lavfi の音 (sine) を受けるためだけ
 # - エンコーダ: wrapped_avframe と pcm_s16le は `-f null` の既定。mpeg2video は GPU の試しの素材、mjpeg はサムネイル、
-#   rawvideo は CM 検出のロゴのコマ。qsv・nvenc は amd64、rkmpp は arm64 だけで、相手の arch では configure が黙って外す
+#   rawvideo は CM 検出のロゴのコマ。H.265 (hevc_*) は GPU のものだけで、libx265 は組まない
+#   (ソフトウェアでは H.265 をエンコードしない。docs/encode.md「H.265 は GPU でだけ」)。
+#   nvenc は amd64、rkmpp は arm64 だけで、相手の arch では configure が黙って外す
 # - hwaccel の nvdec と、フィルタの hwupload_cuda・scale_cuda・bwdif_cuda は、NVIDIA の GPU で放送の MPEG-2 を
 #   デコードしてインタレ解除まで済ませるためのもの。**denpa はまだ使わない** (実機で確かめてから引数に足す。
 #   docs/encode.md「NVIDIA でエンコードする」)。clang で組めているかは、イメージの確かめで先に見ておく
 # - パーサ: demuxer が頼るのに configure が自分で足さないもの。画像の *_pipe は区切りをパーサに任せる
-# - bsf: h264_mp4toannexb は concat の demuxer が H.264 の mkv に差し込む (cm-cut.ts)。extract_extradata は
-#   libavformat が入力を調べるときに使う (無いと `-ss` で途中から読んだ MPEG-2 が次のシーケンスヘッダまで
+# - bsf: h264_mp4toannexb・hevc_mp4toannexb は concat の demuxer が H.264・H.265 の mkv に差し込む (cm-cut.ts)。
+#   extract_extradata は libavformat が入力を調べるときに使う (無いと `-ss` で途中から読んだ MPEG-2 が次のシーケンスヘッダまで
 #   デコードできず、エラーを並べる)
 # - フィルタ: 引数に書いたもののほか、ffmpeg が自分で差し込むもの (buffer・null・format・aformat・scale・
 #   aresample・trim・atrim・fps、回転の印がある画像の transpose・hflip・vflip・rotate)
@@ -238,8 +247,8 @@ COPY patches/ /patches/
 # - testsrc2・sine・telecine・tinterlace・noise は denpa は使わず、イメージの確かめで素材を作るためだけ
 #   (.github/image-smoke.sh と scripts/fps-smoke.ts)。合わせても数百 KB
 RUN case "${TARGETARCH}" in \
-      amd64) arch_dev="libvpl-dev libffmpeg-nvenc-dev clang" \
-             arch_flags="--enable-libvpl --enable-ffnvcodec --enable-nvenc --enable-nvdec --enable-cuda-llvm" ;; \
+      amd64) arch_dev="libffmpeg-nvenc-dev clang" \
+             arch_flags="--enable-ffnvcodec --enable-nvenc --enable-nvdec --enable-cuda-llvm" ;; \
       arm64) arch_dev=libdrm-dev arch_flags="--enable-libdrm --enable-rkmpp" ;; \
       *) echo "対応していない arch: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
@@ -253,11 +262,18 @@ RUN case "${TARGETARCH}" in \
       rm /usr/local/lib/librockchip_vpu.* && \
       mkdir -p /out/doc/rockchip-mpp && cp LICENSES/* /out/doc/rockchip-mpp/; \
     fi && \
+    mkdir /tmp/opus && cd /tmp/opus && \
+    $CURL https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz | tar -xz --strip-components=1 && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_TESTING=OFF && \
+    cmake --build build -j$(nproc) && cmake --install build && \
+    mkdir -p /out/doc/opus && cp COPYING /out/doc/opus/ && \
     mkdir /tmp/svtav1 && cd /tmp/svtav1 && \
     $CURL https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/${SVT_AV1_VERSION}/SVT-AV1-${SVT_AV1_VERSION}.tar.gz | tar -xz --strip-components=1 && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_APPS=OFF \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
     cmake --build build -j$(nproc) && cmake --install build && \
+    mkdir -p /out/doc/svt-av1 && cp LICENSE.md PATENTS.md /out/doc/svt-av1/ && \
     mkdir /tmp/ffmpeg_sources && cd /tmp/ffmpeg_sources && \
     $CURL https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2 | tar -xj --strip-components=1 && \
     for p in /patches/ffmpeg-*.patch; do [ -e "$p" ] || continue; patch -p1 --fuzz=0 < "$p"; done && \
@@ -277,19 +293,21 @@ RUN case "${TARGETARCH}" in \
       --disable-everything \
       --disable-network \
       --enable-decoder=mpeg2video,h264,aac,opus,libdav1d,png,mjpeg,webp,hevc,ac3,eac3,mp2,aac_latm,wrapped_avframe,pcm_s16le \
-      --enable-encoder=libsvtav1,libx264,libopus,aac,h264_vaapi,av1_vaapi,h264_qsv,av1_qsv,h264_nvenc,av1_nvenc,h264_rkmpp,mpeg2video,mjpeg,rawvideo,wrapped_avframe,pcm_s16le \
+      --enable-encoder=libsvtav1,libx264,libopus,aac,h264_vaapi,av1_vaapi,hevc_vaapi,h264_nvenc,av1_nvenc,hevc_nvenc,h264_rkmpp,hevc_rkmpp,mpeg2video,mjpeg,rawvideo,wrapped_avframe,pcm_s16le \
       --enable-hwaccel=mpeg2_vaapi,h264_vaapi,mpeg2_nvdec,h264_nvdec \
       --enable-demuxer=mpegts,matroska,mov,concat,ffmetadata,image2,png_pipe,jpeg_pipe,webp_pipe \
       --enable-muxer=matroska,mp4,adts,avif,rawvideo,null,image2,mpegts \
       --enable-parser=mpegvideo,h264,aac,av1,opus,png,mjpeg,webp,hevc,ac3,mpegaudio,aac_latm \
-      --enable-bsf=h264_mp4toannexb,aac_adtstoasc,extract_extradata \
+      --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
       --enable-filter=buffer,buffersink,abuffer,abuffersink,null,anull,format,aformat,scale,aresample,trim,atrim,fps,transpose,hflip,vflip,rotate,bwdif,setsar,scdet,metadata,ametadata,silencedetect,channelsplit,pan,hwupload,deinterlace_vaapi,hwupload_cuda,scale_cuda,bwdif_cuda,crop,split,vstack,field,separatefields,signalstats,thumbnail,nullsrc,testsrc2,sine,telecine,tinterlace,noise,overlay \
       --enable-indev=lavfi \
       --enable-protocol=file,pipe \
     && \
     make -j$(nproc) && make install && \
-    if [ "${TARGETARCH}" = arm64 ] && ! /usr/local/bin/ffmpeg -hide_banner -encoders | grep -q h264_rkmpp; then \
-      echo "ffmpeg に h264_rkmpp が組み込まれていません" >&2; exit 1; \
+    if [ "${TARGETARCH}" = arm64 ]; then \
+      for e in h264_rkmpp hevc_rkmpp; do \
+        /usr/local/bin/ffmpeg -hide_banner -encoders | grep -qw "$e" || { echo "ffmpeg に $e が組み込まれていません" >&2; exit 1; }; \
+      done; \
     fi && \
     mkdir -p /out/bin /out/lib /out/doc && \
     cp /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /out/bin/ && \
@@ -304,7 +322,9 @@ RUN case "${TARGETARCH}" in \
 #
 # **Debian の mesa-va-drivers は使わず、Mesa をソースから組む。** パッケージは全部の GPU のドライバと
 # LLVM (libLLVM 120MB) を引き込み、イメージが展開後で約 170MB 増える。radeonsi と VA-API だけを
-# LLVM 無しで組むと 18MB の1ファイルで済む (radeonsi は Mesa 24.0 から LLVM 無しで組め、シェーダは ACO で組む)。
+# LLVM 無しで組むと1ファイルで済む (radeonsi は Mesa 24.0 から LLVM 無しで組め、シェーダは ACO で組む)。
+# **大きさを優先して組む** (`buildtype=minsize`)。release の 18MB が 13MB になる (LTO を足しても 0.4MB しか減らない)。
+# エンコードは GPU の回路がやり、ドライバの CPU 側は命令を渡すくらいなので、速さへの響きは小さいはず (実機では見ていない)。
 # `video-codecs=all` は、既定では外れる H.264・H.265 のエンコードとデコードを入れるため (AV1 は既定で入る)。
 # ドライバが繋ぐ libdrm_amdgpu・libelf・libexpat・libzstd は Debian のもので、runtime-libs 段が ldd で辿って運ぶ
 #
@@ -324,7 +344,7 @@ RUN mkdir -p /out/dri /out/doc && \
       mkdir /tmp/mesa && cd /tmp/mesa && \
       curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
         "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz" | tar -xJ --strip-components=1 && \
-      meson setup build --prefix=/usr --buildtype=release -Db_ndebug=true \
+      meson setup build --prefix=/usr --buildtype=minsize -Db_ndebug=true \
         -Dllvm=disabled -Dgallium-drivers=radeonsi -Dvulkan-drivers= -Dplatforms= \
         -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
         -Dgallium-va=enabled -Dvideo-codecs=all && \
@@ -340,29 +360,34 @@ RUN mkdir -p /out/dri /out/doc && \
 FROM deps AS build
 WORKDIR /app
 COPY . .
-RUN bun run build
+# ソースマップ (*.map。サーバの分で 6MB ほど) は本番に入れない。サーバのコードは圧縮していないので、
+# エラーの場所はマップが無くても読める
+RUN bun run build && find build -name "*.map" -delete
 
 # ---------------------------------------------------------------------------
 # 本番イメージの土台 (distroless。Debian 13 = trixie から glibc・ca-certificates・tzdata など
 # 要るものだけを置いたもの)。**libssl の無い base-nossl を使う** — bun は TLS を自分で持ち (BoringSSL を静的に繋ぐ)、
 # ffmpeg も OpenSSL を繋がないので、cc の土台にある libssl・libcrypto・libgomp (8MB ほど) は誰も読まない。
 # ffmpeg と GPU のドライバが繋ぐ libstdc++・libgcc_s・zlib は、下の `runtime-libs` 段が ldd で辿って写す
-# (エージェントを同じコンテナに入れる denpa-aio は libssl を要るので、あちらで足す。.github/aio.Dockerfile)。下の `runtime-libs` 段が「土台にもうあるライブラリ」を
-# 見分けるのにも使うので、段に名前を付けておく
+# (エージェントを同じコンテナに入れる denpa-aio は libssl を要るので、あちらで足す。.github/aio.Dockerfile)。
+# その段が「土台にもうあるライブラリ」を見分けるのにも使うので、段に名前を付けておく
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:ca1c7e6a875e59345ae6ff182a1e0930f0ca1ffef23a9b830f8823ab348ad5dd AS distroless
+FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:d710a5c8bfe4cf7e726d7e1afd73e363a9fb02c2a11ad893d2d6185c1b9a89cb AS distroless
 
 # ---------------------------------------------------------------------------
 # 本番イメージへ写すライブラリを集める段。**本番イメージにはシェルも apt も無い**ので、
 # ここで Debian のパッケージを入れて ffmpeg を置き、要るファイルだけを /rootfs にまとめる。
 # 土台は ffmpeg 段と同じ digest (どちらも trixie なので、glibc のバージョンは distroless と揃う)
 #
-# libvpl2 + libmfx-gen1.2 (QSV のランタイム) + libva* + intel-media-va-driver (iHD) は
-# Intel の GPU (QSV / VA-API) 向け (上の ffmpeg 段の説明)。GPU の無い機械でも害は無い
-# (起動時の試しのエンコードが落ちて、ソフトウェアでエンコードするだけ)。**Intel の4つは amd64 だけ**
+# libva* + intel-media-va-driver-non-free (iHD) は Intel の GPU (VA-API) 向け (上の ffmpeg 段の説明)。
+# GPU の無い機械でも害は無い
+# (起動時の試しのエンコードが落ちて、ソフトウェアでエンコードするだけ)。**Intel のドライバは amd64 だけ**
 # (ffmpeg 段の説明。arm64 の Debian には無い)。libva は arm64 にも入れる。
 # arm64 の Rockchip MPP (librockchip_mpp.so.1) は ffmpeg 段で組んで /usr/local/lib に一緒に来る。
 # libdrm (rkmpp と VA-API が繋ぐ) は libva-drm2 の依存で入り、どちらも下の ldd で /rootfs に運ばれる
+# iHD は Debian の non-free 版 (そのために non-free を足す)。free 版はソースの無い GPU のカーネル (シェーダ) を
+# 抜いてあり、シェーダを使うエンコードができない。Skylake〜Comet Lake の H.265 と、Broadwell のエンコードは
+# どれもシェーダを使うので、free 版では GPU でエンコードできない。中身のライセンスは free 版と同じ MIT
 # i965-va-driver は iHD が対応しない古い世代 (Haswell など) の内蔵 GPU 用。
 # AMD の VA-API ドライバ (radeonsi) は `mesa` 段で組んだもの。それが繋ぐライブラリ (libdrm-amdgpu1 など) と、
 # GPU の名前の一覧 (libdrm-common の amdgpu.ids) は Debian から入れる。これも amd64 だけ
@@ -371,13 +396,14 @@ FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG TARGETARCH
 RUN case "${TARGETARCH}" in \
-      amd64) gpu="libvpl2 intel-media-va-driver i965-va-driver libmfx-gen1.2 libdrm-amdgpu1 libdrm-common libelf1t64 libexpat1 libzstd1" ;; \
+      amd64) gpu="intel-media-va-driver-non-free i965-va-driver libdrm-amdgpu1 libdrm-common libelf1t64 libexpat1 libzstd1" ;; \
       arm64) gpu="" ;; \
       *) echo "対応していない arch: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
+    sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
     apt-get -y --no-install-recommends install \
-      libopus0 libx264-164 libdav1d7 \
+      libx264-164 libdav1d7 \
       libva2 libva-drm2 $gpu && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -386,14 +412,13 @@ COPY --from=ffmpeg /out/bin/ /usr/local/bin/
 COPY --from=ffmpeg /out/lib/ /usr/local/lib/
 # AMD の VA-API ドライバ (`mesa` 段。arm64 では空)。Debian のパッケージのものではないので、下で別に扱う
 COPY --from=mesa /out/dri/ /usr/local/lib/dri/
-# 自前で組んだもののうち、Debian のパッケージの copyright に載らないもののライセンス (arm64 の Rockchip MPP と amd64 の Mesa)
+# 自前で組んだもののうち、Debian のパッケージの copyright に載らないもののライセンス (Opus・SVT-AV1・arm64 の Rockchip MPP・amd64 の Mesa)
 COPY --from=ffmpeg /out/doc/ /rootfs/usr/share/doc/
 COPY --from=mesa /out/doc/ /rootfs/usr/share/doc/
 
 # /rootfs に写すもの:
 # - ffmpeg / ffprobe / libav* と、それらが繋ぐライブラリ (ldd で辿る)
-# - **dlopen で読むもの** (ldd には出ない): libva のドライバ (dri/ の iHD・i965) と、libvpl が読む
-#   QSV のランタイム (libmfx-gen.so.1.2 と、それがさらに読む libmfx-gen/)。ドライバはディレクトリ
+# - **dlopen で読むもの** (ldd には出ない): libva のドライバ (dri/ の iHD・i965)。ドライバはディレクトリ
 #   ごと写し、それらが繋ぐライブラリも ldd で辿る。`mesa` 段で組んだ AMD のドライバも同じ dri/ に置く
 #   (パッケージの記録は無いので status.d には載らない。ライセンスは /usr/share/doc/mesa)
 # **土台 (distroless) にもうあるもの (glibc など) は写さない** (名前で見分ける)。
@@ -409,14 +434,9 @@ RUN --mount=type=bind,from=distroless,target=/distroless \
     cp -a /usr/local/lib/lib*.so.* /rootfs/usr/local/lib/ && \
     targets=(/usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/lib/lib*.so.*) && \
     owned=() && \
-    for dir in "${lib}/dri" "${lib}/libmfx-gen"; do \
-      [ -d "$dir" ] || continue; \
-      cp -a "$dir" "/rootfs${lib}/"; \
-      targets+=("$dir"/*.so); owned+=("$dir"/*.so); \
-    done && \
-    if [ -e "${lib}/libmfx-gen.so.1.2" ]; then \
-      cp -L "${lib}/libmfx-gen.so.1.2" "/rootfs${lib}/"; \
-      targets+=("${lib}/libmfx-gen.so.1.2"); owned+=("${lib}/libmfx-gen.so.1.2"); \
+    if [ -d "${lib}/dri" ]; then \
+      cp -a "${lib}/dri" "/rootfs${lib}/"; \
+      targets+=("${lib}"/dri/*.so); owned+=("${lib}"/dri/*.so); \
     fi && \
     for drv in /usr/local/lib/dri/*.so; do \
       mkdir -p "/rootfs${lib}/dri" && cp "$drv" "/rootfs${lib}/dri/"; \
@@ -455,10 +475,13 @@ RUN --mount=type=bind,from=distroless,target=/distroless \
 # ---------------------------------------------------------------------------
 FROM distroless AS runtime
 WORKDIR /app
+# BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 は、bun が動いている間にコンテナの中 (/root/.bun) へ書く変換のキャッシュを切る
+# (bun の公式イメージと同じ。コンテナを作り直せば消えるので、溜めても得が無い)
 ENV NODE_ENV=production \
     TZ=Asia/Tokyo \
     FFMPEG=/usr/local/bin/ffmpeg \
-    FFPROBE=/usr/local/bin/ffprobe
+    FFPROBE=/usr/local/bin/ffprobe \
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 # NVIDIA の GPU を渡されたとき (ffmpeg 段の説明) に、NVIDIA Container Toolkit が差し込むドライバのライブラリ。
 # 既定 (compute,utility) には NVENC の libnvidia-encode が入らないので video を足す。
 # CUDA の GPU の番号は PCI のバスの順にする — 既定 (速い順) だと、`-gpu N` が /dev/nvidiaN の並びと合わない
@@ -466,7 +489,7 @@ ENV NODE_ENV=production \
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
     CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-# B-CASカードは触らない。掛かったまま録れたTSの解除はチューナーエージェントに
+# B-CASカードは触らない。掛かったまま録れたTSの復号はチューナーエージェントに
 # 投げる(カードリーダーとやり取りするのはあちら)。recisdb も libpcsclite も要らない
 COPY --from=runtime-libs /rootfs/ /
 
@@ -489,7 +512,7 @@ COPY --from=mpeg2wasm /opt/denpa/mpeg2 /opt/denpa/mpeg2
 # bun の組み込み (`bun:sqlite`) だけ。載せていた頃は playwright も vite も
 # typescript もイメージに入っていて、**312MB がまるごと無駄**だった。
 # 置くのは下のものだけ: build/ (アプリ)、server.js (入口) とそれが読む
-# src/lib/server/address.ts・compress.ts、package.json (`"type": "module"` の宣言)、drizzle/
+# src/lib/server/address.ts・compress.ts・hold-signals.ts、package.json (`"type": "module"` の宣言)、drizzle/
 # (マイグレーション)。これで起動して /api/health が答えるかは CI で毎回見ている
 # (.github/image-smoke.sh。PR の docker-build-check と、push の前の build-and-deploy)
 #
@@ -507,6 +530,8 @@ COPY --from=build /app/server.js ./server.js
 COPY --from=build /app/src/lib/server/address.ts ./src/lib/server/address.ts
 # 入口が画面の HTML とデータを縮めるのに使う (`src/lib/server/compress.ts`。同じく `node:zlib` しか引かない)
 COPY --from=build /app/src/lib/server/compress.ts ./src/lib/server/compress.ts
+# 入口がいちばん先に読む。起動の途中に来た止まれの合図を取っておく (`src/lib/server/hold-signals.ts`。何も引かない)
+COPY --from=build /app/src/lib/server/hold-signals.ts ./src/lib/server/hold-signals.ts
 
 EXPOSE 3000
 # 動いているバージョン。ここでは `dev` のまま — リリースのときに、このイメージを土台に

@@ -32,7 +32,7 @@
 
   /**
    * アンビエントモード。いまのコマの色を、映像の周りの地に薄く敷く (YouTube と同じ見え方。docs/player.md)。
-   * 舞台 (`PlayerStage`) が枠のすぐ前 (兄弟) に置く。オン/オフと写し方は `ambient.svelte.ts`、計算は `ambient.ts`。
+   * 舞台 (`PlayerStage`) が枠の置き場 (`.room`) の前に置く。オン/オフと写し方は `ambient.svelte.ts`、計算は `ambient.ts`。
    *
    * - 縦に積むときは映像の下の中身に、二段組は窓全体に敷き、枠から離れるほど薄くする (`reach`・`farthest`)。
    *   明るさを抑えてから敷くので、上の字はどちらのテーマでも 4.5:1 以上で読める (`toneFrame`・`WASH_LUMINANCE`)
@@ -49,8 +49,11 @@
     stage,
     fullscreen,
     testid,
+    shown = $bindable(false),
   }: {
     ambient: Ambient;
+    /** 色が枠の外に見えているか (敷いていて、全画面でない)。舞台が実況のコメントを枠の外へも流すのに使う */
+    shown?: boolean;
     /** 映像の枠 (`PlayerStage` の `.stage`) */
     stage: HTMLElement | null;
     /** 全画面か (`StageFullscreen.active`) */
@@ -114,15 +117,16 @@
 
   /** ページの上の端に見える色 (`washTop`)。ブラウザの枠の色にする (下の `toolbar`) */
   let top = $state<Rgb | null>(null);
+  /** 色が枠の外に見えているか。消した・まだ1枚も写していない・全画面 (枠の外が見えない) なら false */
+  const painted = $derived(now !== "off" && loop.lit && !fullscreen);
+  $effect(() => {
+    shown = painted;
+  });
   /**
    * **ブラウザの枠の色** (`theme-color.ts`)。色を敷いている間だけ。消した・全画面 (枠が見えない)・
    * 画面を離れたときはテーマの地に戻す。変わるのは色を入れ替えたときだけ (多くて 1 秒に 5 回)
    */
-  const toolbar = $derived(
-    now !== "off" && loop.lit && !fullscreen && top !== null
-      ? toHex(top)
-      : null,
-  );
+  const toolbar = $derived(painted && top !== null ? toHex(top) : null);
   $effect(() => {
     setAmbientThemeColor(toolbar);
   });

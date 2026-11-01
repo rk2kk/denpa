@@ -5,13 +5,10 @@
  * - 勢いが同じ局は番号順 (種別は 地上波 → BS → CS。局の一覧はもうこの順に並んでいる)
  * - 放送中のスレッドが無い局 (返事に入っていない) は末尾に番号順で
  * - 勢いを読めないときは番号順のまま
- *
- * 数字が届くたびに並べ直す。ただし一覧に指・ポインタ・キーボードのフォーカスが乗っている間は待つ
- * (`ListHold`。押そうとした行が動いて別の局を選ばないように)
  */
 
 /** 一覧から離れてから並べ直すまで (ミリ秒)。指を離した直後にもう 1 行押そうとしても、並びが替わっていない */
-export const SETTLE = 1_000;
+const SETTLE = 1_000;
 
 /** 一覧を使っている理由。どれか 1 つでも立っていれば並べ直さない */
 export type HoldReason = "pointer" | "touch" | "focus";
@@ -71,7 +68,7 @@ export class ListHold {
   }
 }
 
-/** 勢いの中継の返事 (`GET /api/jikkyo/ranking`) を読む。形がずれていれば null */
+/** 勢いの中継の返事 (`GET /api/jikkyo/ranking`) を読む。形式がずれていれば null */
 export function parseRanking(body: unknown): Map<number, number> | null {
   const channels = (body as { channels?: unknown } | null)?.channels;
   if (!Array.isArray(channels)) return null;

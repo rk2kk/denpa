@@ -2,7 +2,7 @@
  * **実況のコメント (サーバの受け持ち)。** コメントそのものはサーバを通らない — 端末が NX-Jikkyo と
  * 過去ログ API に直接繋ぐ (`#lib/jikkyo/endpoints.ts`)。サーバが渡すのは次の 2 つだけ:
  *
- * - 録画の実況のチャンネルと頭の放送時刻 (`recordingJikkyo`)。観る画面がコメントを再生位置に合わせるのに使う
+ * - 録画の実況のチャンネルと、頭と終わりの放送時刻 (`recordingJikkyo`)。観る画面がコメントを取って再生位置に合わせるのに使う
  * - 局の勢い (`RankingRelay`)。NX-Jikkyo の REST は CORS を許していないのでブラウザから読めず、
  *   ここで中継する。**保持しない** (30 秒だけメモリに持つ。DB にもファイルにも書かない)
  *
@@ -23,15 +23,15 @@ import { settings } from "./settings";
  * 録画の実況。チャンネルと、元の TS の頭 (再生位置 0 の手前) の放送時刻、録画の終わりの放送時刻 (unix ms)。
  * 観る画面は `[head, end)` のコメントを過去ログ API から 1 回で取る
  */
-export interface RecordingJikkyo {
+interface RecordingJikkyo {
   channel: string;
   head: number;
   end: number;
 }
 
 /**
- * 録画の実況のチャンネルと頭の放送時刻 (`recording.tsHeadOf`。測れていない録画は予定の時刻で代わりにするので、
- * 数秒ずれることがある)。世帯の設定がオフ・実況の無い局なら null
+ * 録画の実況 (頭は `recording.tsHeadOf`。測れていない録画は予定の時刻で代わりにするので、数秒ずれることがある)。
+ * 世帯の設定がオフ・実況の無い局なら null
  */
 export function recordingJikkyo(recording: Recording): RecordingJikkyo | null {
   if (!settings().jikkyo) return null;
@@ -55,7 +55,7 @@ export function recordingJikkyo(recording: Recording): RecordingJikkyo | null {
 }
 
 /** NX-Jikkyo から読んだ勢い (チャンネル → 直近 60 秒のコメント数) */
-export type Forces = ReadonlyMap<string, number>;
+type Forces = ReadonlyMap<string, number>;
 
 /** 中継を読んで持っておく長さ。勢いは 60 秒の窓なので、細かく読んでも変わらない (NX-Jikkyo 自身も 10 秒ごとに作り直している) */
 export const RANKING_TTL = 30_000;
@@ -63,14 +63,14 @@ export const RANKING_TTL = 30_000;
 /**
  * `GET /api/v1/channels` の返事から、放送中のスレッドの勢いを抜く。
  * 返すのは勢いだけで、`viewers` (NX-Jikkyo に繋いでいる数で、ニコニコの視聴者数ではない)・番組名・スレッドの一覧は捨てる。
- * 形がずれていたら、読めたチャンネルだけ使う (`warn` に 1 回言う)。1 つも読めなければ失敗にする
+ * 形式がずれていたら、読めたチャンネルだけ使う (`warn` に 1 回言う)。1 つも読めなければ失敗にする
  */
 export function parseForces(
   body: unknown,
   warn: (message: string) => void = () => {},
 ): Map<string, number> {
   if (!Array.isArray(body))
-    throw new Error("返事の形が違います (配列ではありません)");
+    throw new Error("返事の形式が違います (配列ではありません)");
   const forces = new Map<string, number>();
   let odd = 0;
   for (const entry of body as unknown[]) {
@@ -95,10 +95,10 @@ export function parseForces(
     forces.set(channel.id, active.jikkyo_force);
   }
   if (odd > 0 && forces.size === 0)
-    throw new Error("返事の形が違います (勢いを読めません)");
+    throw new Error("返事の形式が違います (勢いを読めません)");
   if (odd > 0)
     warn(
-      `NX-Jikkyo の返事の形が一部違います (${odd} チャンネルを読めません)。NX-Jikkyo のバージョンが変わったかもしれません`,
+      `NX-Jikkyo の返事の形式が一部違います (${odd} チャンネルを読めません)。NX-Jikkyo のバージョンが変わったかもしれません`,
     );
   return forces;
 }
@@ -128,7 +128,7 @@ export class RankingRelay {
   private failed: { at: number; error: unknown } | null = null;
   /** 最後に記録に残した失敗の理由。戻ったら null */
   private failure: string | null = null;
-  /** 形のずれの警告を出したか (1 回だけ) */
+  /** 形式のずれの警告を出したか (1 回だけ) */
   private warnedShape = false;
 
   constructor(
@@ -179,7 +179,7 @@ export class RankingRelay {
 }
 
 /** 勢いの一覧の 1 行。`serviceId` は denpa の局の ID (`services.id`) */
-export interface RankingEntry {
+interface RankingEntry {
   serviceId: number;
   force: number;
 }

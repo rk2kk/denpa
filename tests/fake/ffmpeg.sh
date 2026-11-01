@@ -35,24 +35,23 @@ if printf '%s\n' "$@" | grep -qx -- 'avif'; then
 fi
 
 # **何を渡されたかを残す** (ライブの FAKE_FFMPEG_ARGS_FILE と同じ形式)。エンコードするときに
-# GPU の方式 (`h264_qsv` など) を選べているか、落ちたらソフトウェアへ倒れているかを
+# GPU の方式 (`h264_vaapi` など) を選べているか、落ちたらソフトウェアへ倒れているかを
 # テストから見るため。**どの方式でも、落ちる前に**残す。1回ぶんずつ足す
 if [ -n "${FAKE_FFMPEG_ENCODE_ARGS_FILE:-}" ]; then
     printf -- '---\n%s\n' "$(printf '%s\n' "$@")" >> "$FAKE_FFMPEG_ENCODE_ARGS_FILE"
 fi
 
-# GPU (QSV / VA-API) の方式。`-init_hw_device` が付いていたら、それ。
+# GPU (VA-API) の方式。`-init_hw_device` が付いていたら、それ。
 #
 # 本物はデバイス (/dev/dri/renderD128) が無ければ初期化で落ちる。ここでも同じで、
-# **渡されたデバイス (`child_device=…` / `vaapi=va:…`) がファイルとして在れば「GPU がある」**
+# **渡されたデバイス (`vaapi=va:…`) がファイルとして在れば「GPU がある」**
 # ことにする — 起動時の試しのエンコード (server/hwenc.ts、入力は lavfi) は黙って通し、
 # 本番のエンコードはそのまま下の普通の経路へ流す。無ければ本物と同じく落ちる
 # (エンコードの途中で GPU が駄目になったときの、次の方式での再エンコードもこれで通る)
 prev=""
 for arg in "$@"; do
     if [ "$prev" = "-init_hw_device" ]; then
-        dev="${arg##*child_device=}"
-        dev="${dev##*vaapi=va:}"
+        dev="${arg##*vaapi=va:}"
         if [ ! -e "$dev" ]; then
             echo "Device creation failed: -19." >&2
             echo "Failed to set value '$arg' for option 'init_hw_device': No such device" >&2
@@ -65,9 +64,9 @@ for arg in "$@"; do
     prev="$arg"
 done
 
-# Rockchip MPP (`h264_rkmpp`)。本物は引数でデバイスを受けず、MPP が /dev/mpp_service を自分で開く。
+# Rockchip MPP (`h264_rkmpp` / `hevc_rkmpp`)。本物は引数でデバイスを受けず、MPP が /dev/mpp_service を自分で開く。
 # ここでは denpa と同じ `RKMPP_DEVICE` を見て、**在れば上の GPU と同じく通し、無ければ初期化で落ちる**
-if printf '%s\n' "$@" | grep -qx -- 'h264_rkmpp'; then
+if printf '%s\n' "$@" | grep -qE -- '^(h264|hevc)_rkmpp$'; then
     if [ ! -e "${RKMPP_DEVICE:-/dev/mpp_service}" ]; then
         echo "mpp_open failed: no such device" >&2
         exit 1
@@ -77,10 +76,10 @@ if printf '%s\n' "$@" | grep -qx -- 'h264_rkmpp'; then
     fi
 fi
 
-# NVIDIA の NVENC (`h264_nvenc` / `av1_nvenc`)。本物はデバイスファイルを受けず、GPU を番号 (`-gpu N`) で受ける。
+# NVIDIA の NVENC (`h264_nvenc` / `hevc_nvenc` / `av1_nvenc`)。本物はデバイスファイルを受けず、GPU を番号 (`-gpu N`) で受ける。
 # ここでは denpa と同じく `NVIDIA_DIR` の nvidia<番号> を番号の順に並べ、**N 番目が在れば上の GPU と同じく通し、
 # 無ければ初期化で落ちる** (本物も、コンテナから見える GPU の数を超えた番号では降りる)
-if printf '%s\n' "$@" | grep -qE -- '^(h264|av1)_nvenc$'; then
+if printf '%s\n' "$@" | grep -qE -- '^(h264|hevc|av1)_nvenc$'; then
     gpu=0
     prev=""
     for arg in "$@"; do
@@ -173,6 +172,21 @@ if [ "$input" = "pipe:0" ]; then
         printf -- '---\n%s\n' "$(printf '%s\n' "$@")" >> "$FAKE_FFMPEG_ARGS_FILE"
     fi
 
+    # 字幕を持たない放送 (E2E が偽の放送の PMT から字幕を外すのと一緒に置く)。本物と同じ言い分で、
+    # 字幕の出口を頼まれていたら組み立ての時点で降りる (`server/captions.ts` の `NO_SUBTITLE`)。
+    # 起こしたことは上で残してあるので、テストから起こし直したかを数えられる
+    if [ -f "${FAKE_FFMPEG_NO_CAPTIONS_FILE:-/nonexistent}" ]; then
+        map="$(printf '%s\n' "$@" | grep -E '^0(:p:[0-9]+)?:s:[0-9]+$' | head -1)"
+        if [ -n "$map" ]; then
+            echo "Stream map '$map' matches no streams." >&2
+            echo "To ignore this, add a trailing '?' to the map." >&2
+            echo "Failed to set value '$map' for option 'map': Invalid argument" >&2
+            echo "Error parsing options for output file pipe:3." >&2
+            echo "Error opening output files: Invalid argument" >&2
+            exit 1
+        fi
+    fi
+
     # **互換モード (canvas に描く方式) の E2E から「本物の映像を流せ」と指示する目印。**
     # 置いてあれば、本物の ffmpeg に書かせた fMP4 (H.264 + AAC / AV1 + Opus。エンコード方式はライブと同じ組) を
     # 時刻を進めながら繰り返し流す (`fmp4-loop.ts`)。置いていなければ今までどおり素通し
@@ -211,6 +225,21 @@ if [ -f "${FAKE_FFMPEG_FAIL_FILE:-/nonexistent}" ]; then
     echo "Conversion failed!" >&2
     exit 1
 fi
+# 名指ししたエンコーダ (ファイルの中身。`libx264` など) を使うエンコードだけ失敗させる。
+# コーデックを同時にエンコードするとき、1本が落ちてもほかが止まらないことを確かめるのに要る
+if [ -s "${FAKE_FFMPEG_FAIL_ENCODER_FILE:-/nonexistent}" ] &&
+    printf '%s\n' "$@" | grep -qxF -- "$(cat "$FAKE_FFMPEG_FAIL_ENCODER_FILE")"; then
+    echo "[$(cat "$FAKE_FFMPEG_FAIL_ENCODER_FILE") @ 0x1] Error initializing the encoder" >&2
+    echo "Conversion failed!" >&2
+    exit 1
+fi
+
+# **エンコードしている間を残す** (始まりと終わりの時刻 (ミリ秒)・入力・出力をタブで区切る)。コーデックを同時にエンコードしているか
+# (2本の間が重なるか)、中止で全部止まったか (終わりが無い) をテストから見るため。1行ずつ1回で書く
+spans="${FAKE_FFMPEG_ENCODE_SPANS_FILE:-}"
+if [ -n "$spans" ] && [ "$output" != "-" ]; then
+    printf 'start\t%s\t%s\t%s\n' "$(date +%s%3N)" "$input" "$output" >> "$spans"
+fi
 
 # 進み具合の出口。エンコードするほうは fd 3 を開いて渡す (`-progress pipe:3`)。開いていなければ stdout
 if { true >&3; } 2>/dev/null; then exec 4>&3; else exec 4>&1; fi
@@ -242,4 +271,7 @@ if [ "$output" != "-" ]; then
 fi
 
 printf 'frame=1200\nfps=120\nbitrate=2000.0kbits/s\ntotal_size=4096\nout_time_us=10000000\nspeed=8.0x\ndrop_frames=0\nprogress=end\n' >&4
+if [ -n "$spans" ] && [ "$output" != "-" ]; then
+    printf 'end\t%s\t%s\t%s\n' "$(date +%s%3N)" "$input" "$output" >> "$spans"
+fi
 exit 0

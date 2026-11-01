@@ -1,5 +1,5 @@
 /**
- * EPGStation (v2・v3) の録画・ルール・手動予約を、**HTTP API だけで** denpa に引き継ぐ (読み方は
+ * EPGStation (v2・v3) の録画・ルール・手動予約と録画の履歴を、**HTTP API だけで** denpa に引き継ぐ (読み方は
  * `epgstation-api.ts`)。EDCB からの引き継ぎ (`migrate-edcb.ts`) も、進み具合と記録 ({@link status}・
  * {@link record}・{@link track}) と、ルール・予約・履歴の入れ方 ({@link insertRule}・{@link importReservation}・
  * {@link addHistory}・{@link SlotWindows}) はここのものを使う。
@@ -201,9 +201,7 @@ function temporaryPath(
  * 置き場は元のTSの置き場の直下と、保存先のシリーズのフォルダ (`libraryPath` の形式)。
  * 走るのは一度に1つだけ (`start`) なので、ここで見つかるものは誰も書いていない
  */
-export function sweepTemporaries(
-  keep: ReadonlySet<string> = new Set(),
-): number {
+export function sweepTemporaries(keep: ReadonlySet<string>): number {
   const dirs = [config.rawDir, config.encodedDir];
   try {
     for (const entry of readdirSync(config.encodedDir, {
@@ -248,9 +246,12 @@ function importedRow(sourceId: number): Recording | undefined {
 
 /** 行の指すファイルが1つでも実在するか */
 function hasFile(recording: Recording): boolean {
-  return [recording.ts_path, recording.library_path, recording.alt_path].some(
-    (path) => path !== null && existsSync(path),
-  );
+  return [
+    recording.ts_path,
+    recording.library_path,
+    recording.hevc_path,
+    recording.alt_path,
+  ].some((path) => path !== null && existsSync(path));
 }
 
 /**
@@ -265,7 +266,7 @@ function alreadyImported(existing: Recording | undefined): boolean {
 }
 
 /** 取ってくるファイル。エンコード済みがあればそちら、複数あれば最初のもの */
-export interface VideoChoice {
+interface VideoChoice {
   id: number;
   size: number;
   /** 元のTSか (`type` がエンコード済みでない)。元のTSは作業領域へ置く */
@@ -464,6 +465,7 @@ async function importOne(
         .set({
           ts_path: file.raw ? target : null,
           library_path: file.raw ? null : target,
+          hevc_path: null,
           alt_path: null,
           ts_size: file.size,
           updated_at: at,
@@ -1189,6 +1191,8 @@ export async function start(
         message:
           "EPGStation v1 には対応していません。v2 か v3 にしてから実行してください",
       };
+    // 訊いている間に EDCB の引き継ぎが走り出していたら譲る (startEdcb と同じ)
+    if (running()) return { started: false, message: "すでに実行中です" };
     controller = new AbortController();
     void runEpgstation(client, version, options, controller.signal);
     return {

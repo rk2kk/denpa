@@ -22,7 +22,7 @@ Mirakurun や EDCB、メディアサーバは要りません。番組表から�
   </tr>
 </table>
 
-ほかの画面 (番組表・検索・ルール・設定) は [docs/screens.md](docs/screens.md)。
+ほかの画面 (番組表・切り抜き・検索・ルール・設定) は [docs/screens.md](docs/screens.md)。
 
 ## 使ってよい範囲
 
@@ -40,7 +40,7 @@ denpa は、**自分の B-CAS カードで、自分の世帯の中で、私的�
 ## できること
 
 - **予約** — 番組表から押すか、検索から作るルールで自動で。同じ回は最初の放送だけ録る
-- **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする。字幕は放送の ARIB 字幕のまま入れる。Intel の GPU があれば使う
+- **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする (GPU があれば H.265 も)。字幕は放送の ARIB 字幕のまま入れる。GPU (Intel・AMD・NVIDIA・Rockchip) があれば使う
 - **ライブ** — 放送から 1 秒ほどで。止めれば追っかけ、二カ国語・解説放送も選べる ([docs/watch.md](docs/watch.md#ライブ))
 - **データ放送** — テレビと同じ BML がブラウザで動く (d ボタン)。ライブでも録画でも
 - **観る** — 行を押せばその場で再生。CM は1コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存)
@@ -168,20 +168,22 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 **手を入れてくれた人** (ありがとうございます):
 
 - [@Khronos31](https://github.com/Khronos31) ([#188](https://github.com/danything/denpa/issues/188))
-- [@unlimish](https://github.com/unlimish) ([#431](https://github.com/danything/denpa/issues/431))
+- [@unlimish](https://github.com/unlimish) ([#431](https://github.com/danything/denpa/issues/431) [#1843](https://github.com/danything/denpa/issues/1843))
 - [@fetburner](https://github.com/fetburner) ([#662](https://github.com/danything/denpa/issues/662))
 - [@sirius128](https://github.com/sirius128) ([#775](https://github.com/danything/denpa/issues/775))
-- [@chiroru27](https://github.com/chiroru27) ([#1681](https://github.com/danything/denpa/issues/1681) [#1724](https://github.com/danything/denpa/issues/1724))
+- [@chiroru27](https://github.com/chiroru27) ([#1681](https://github.com/danything/denpa/issues/1681) [#1724](https://github.com/danything/denpa/issues/1724) [#1822](https://github.com/danything/denpa/issues/1822) [#1838](https://github.com/danything/denpa/issues/1838))
+- [@minetaro12](https://github.com/minetaro12) ([#1850](https://github.com/danything/denpa/issues/1850))
 
 **報告や提案をくれた人** (ありがとうございます):
 
 - [@Khronos31](https://github.com/Khronos31) ([#184](https://github.com/danything/denpa/issues/184) [#195](https://github.com/danything/denpa/issues/195) [#376](https://github.com/danything/denpa/issues/376) [#377](https://github.com/danything/denpa/issues/377))
-- [@unlimish](https://github.com/unlimish) ([#417](https://github.com/danything/denpa/issues/417))
+- [@unlimish](https://github.com/unlimish) ([#417](https://github.com/danything/denpa/issues/417) [#1834](https://github.com/danything/denpa/issues/1834))
 - [@kametani-mikihiro](https://github.com/kametani-mikihiro) ([#437](https://github.com/danything/denpa/issues/437) [#471](https://github.com/danything/denpa/issues/471) [#480](https://github.com/danything/denpa/issues/480) [#481](https://github.com/danything/denpa/issues/481) [#503](https://github.com/danything/denpa/issues/503) [#505](https://github.com/danything/denpa/issues/505) [#509](https://github.com/danything/denpa/issues/509))
 - [@fetburner](https://github.com/fetburner) ([#668](https://github.com/danything/denpa/issues/668))
 - [@shino-zxc](https://github.com/shino-zxc) ([#1210](https://github.com/danything/denpa/issues/1210) [#1713](https://github.com/danything/denpa/issues/1713))
 - [@eggplants](https://github.com/eggplants) ([#1617](https://github.com/danything/denpa/issues/1617) [#1709](https://github.com/danything/denpa/issues/1709))
 - [@ogatomo21](https://github.com/ogatomo21) ([#1708](https://github.com/danything/denpa/issues/1708))
+- [@yuki-untitled](https://github.com/yuki-untitled) ([#1806](https://github.com/danything/denpa/issues/1806))
 
 <!-- thanks:end -->
 

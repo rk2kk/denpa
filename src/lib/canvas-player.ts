@@ -136,7 +136,7 @@ function selectIn(engine: RawEngine, input: RawInput, id: string): void {
   engine.selectAudio(track.stream, input === "mkv" ? "both" : track.side);
 }
 
-/** 写さずに worker へ渡せる形にする (塊が大きな ArrayBuffer の一部なら写す) */
+/** 写さずに worker へ渡せるようにする (塊が大きな ArrayBuffer の一部なら写す) */
 function own(bytes: Uint8Array): ArrayBuffer {
   if (
     bytes.byteOffset === 0 &&
@@ -336,14 +336,15 @@ export function canvasPlayer(options: CanvasOptions): CanvasPlayer {
   }
 
   const ticker = setInterval(() => {
-    const playing = engine.playing;
-    if (playing) position();
-    /*
-     * 貯め直して流れ出した。**流れ出した瞬間ではなく、鳴っているかで見る** — エンジンの刻みのほうが細かいので、
-     * 使い切ってから流れ出すまでがこの刻みの間に収まると (読み始めの、音がまとめてデコードされてくるとき)
-     * 止まったところを見ないまま、読み込み中の輪が出たままになっていた。止めている間は立てない (`stalled`)
-     */
-    if (playing) unstarve();
+    if (engine.playing) {
+      position();
+      /*
+       * 貯め直して流れ出した。**流れ出した瞬間ではなく、鳴っているかで見る** — エンジンの刻みのほうが細かいので、
+       * 使い切ってから流れ出すまでがこの刻みの間に収まると (読み始めの、音がまとめてデコードされてくるとき)
+       * 止まったところを見ないまま、読み込み中の輪が出たままになっていた。止めている間は立てない (`stalled`)
+       */
+      unstarve();
+    }
     options.tick();
   }, TICK);
 

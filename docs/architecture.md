@@ -13,7 +13,7 @@
                                                     └─→ テレビのアプリ (denpa-tv)
 ```
 
-メディアサーバは置きません。エンコードしたもの (AV1/H.264 + Opus の mkv) はブラウザが
+メディアサーバは置きません。エンコードしたもの (AV1・H.265・H.264 + Opus の mkv) はブラウザが
 そのまま読むので `/watch` で観られ、テレビのアプリへは denpa がファイルを配ります。
 ブラウザが読めない元のTS (MPEG-2) や違うコーデックは、denpa がその場で詰め替え・変換して流すか、
 ブラウザが WebAssembly でデコードします ([library.md](library.md#何で観るかはサーバが出せるものから画面が選ぶ))。
@@ -113,9 +113,9 @@ arch ごとにその arch のランナー (amd64 は `ubuntu-latest`、arm64 は
 組んで digest だけで push し、最後に両方を束ねた索引へ名前を付けます
 (`.github/workflows/build-and-deploy.yml`)。QEMU で arm64 を組むと ffmpeg と Native AOT が
 何倍も掛かるので使いません。片方の arch が落ちたら名前は付けません (片方だけの
-`develop` が出ていくより、前のものが残るほうがいい)。中身の違いは Intel と AMD の GPU の部品 (QSV と
-VA-API のドライバ) だけで、arm64 のイメージには入れていません
-([encode.md](encode.md#gpu-でエンコードする-qsv--va-api))。
+`develop` が出ていくより、前のものが残るほうがいい)。中身の違いは GPU の部品だけで、Intel・AMD の VA-API のドライバ・
+NVIDIA の NVENC は amd64 に、Rockchip の MPP は arm64 にだけ入れています
+([encode.md](encode.md#gpu-でエンコードする-va-api))。
 
 `denpa-aio` (本体とエージェントを1つにしたもの) も同じ名前で出ます。組み直さず、束ねた2つを
 写すだけです (`.github/aio.Dockerfile`)。main では `develop` と `<denpa の sha>-<agent の sha>`、
@@ -192,7 +192,7 @@ JS として動き**、ログインの控えで API を呼べることになる�
 | `script-src-attr`          | `'none'`                                                                | `onclick="…"` などの属性のハンドラを止める (上の穴そのもの)                                                                                                                                                                                                                                                                         |
 | `style-src`                | `'self' 'unsafe-inline'`                                                | 下の「スタイルは止めない」                                                                                                                                                                                                                                                                                                          |
 | `img-src`                  | `'self' data: blob:`                                                    | 局ロゴ・ポスターは自分。データ放送の画像と DRCS (外字) は作り直して blob:。data: は CSS に埋めたアイコン                                                                                                                                                                                                                            |
-| `font-src`                 | `'self' data: blob:`                                                    | Denpa Font は自分 (`/api/font/denpa-font.woff2`)                                                                                                                                                                                                                                                                                    |
+| `font-src`                 | `'self' data: blob:`                                                    | Denpa Font は自分 (`/api/font/`。woff2 の 2 つ)                                                                                                                                                                                                                                                                                     |
 | `media-src`                | `'self' blob:`                                                          | 録画は自分。ライブの MSE と端末に保存した録画は blob:                                                                                                                                                                                                                                                                               |
 | `connect-src`              | `'self' wss://nx-jikkyo.tsukumijima.net https://jikkyo.tsukumijima.net` | fetch・SSE・データ放送の双方向の中継 (`/api/bml/…`)・ライブの WebSocket。`'self'` は同じ host の `ws:` / `wss:` も含む。外の 2 つは実況のコメント (下の「端末が外へ繋ぐもの」)。ホストまで書き、世帯の設定がオフでも許したまま (CSP は組むときに決まる。繋ぐかどうかは画面が設定を見て決める)                                       |
 | `worker-src`               | `'self'`                                                                | 変換せずに観る経路の worker (`src/lib/raw/worker.ts`) と PWA の ServiceWorker                                                                                                                                                                                                                                                       |
@@ -235,8 +235,9 @@ HTML は小さく、重いもの (`_app/immutable/`) は永く持たせたまま
 CSS で抜き出して困る秘密 (属性に入った鍵など) はありません。
 
 **この「外へは出られない」は `img-src` / `font-src` を自分・data:・blob: に絞っているから**
-成り立っています。外のサーバの画像や字を許すと、BML の CSS (属性セレクタ + `url()`) で
-画面の中身を外へ送れるようになるので、そのときはスタイルも絞り直します。
+成り立っています。外のサーバの画像や字を許すと、差し込まれた CSS (属性セレクタ + `url()`) で
+画面の中身を外へ送れるようになるので、そのときはスタイルも絞り直します。データ放送の CSS はブラウザの CSS に
+渡さず、エンジンが読んで確かめた値だけを `element.style` に書く (`src/lib/bml/css.ts`) ので、この経路にはなりません。
 `connect-src` に外を足しても、CSS からは `connect-src` を使えないので、ここは崩れません。
 
 ### 増やすとき

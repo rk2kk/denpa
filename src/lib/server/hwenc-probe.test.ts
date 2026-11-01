@@ -9,8 +9,10 @@ import type { HwDevice } from "./hwenc";
  * **試しのエンコードの落とし方** (`hwenc.probe`)。手元にも CI にも GPU は無いので、ffmpeg を
  * 起こす `run` だけ差し替えて、ドライバの返事を作って見る。
  *
- * 作る返事は issue #417 の機材 (Gemini Lake・i965) に寄せたもの: QSV は初期化できず、
- * VA-API は ICQ を持たず CQP ならエンコードでき、MPEG-2 は GPU でデコードできる。AV1 はエンコードできない
+ * 作る返事は issue #417 の機材 (Gemini Lake・i965) に寄せたもの:
+ * VA-API は ICQ を持たず、MPEG-2 は GPU でデコードできる。AV1 はエンコードできない。
+ * H.264・H.265 はいつも CQP で指定するので通る (デコードから GPU は、ライブが使わない H.265 では試さない)。
+ * AV1 も CQP で通るドライバ (Mesa) は下の `mesa`
  */
 const real = await import("./stream");
 /*
@@ -50,59 +52,144 @@ afterAll(() => {
   config.nvidiaDir = nvidiaDirBefore;
 });
 
-const { probe, describeDevice, liveHw } = await import("./hwenc");
+const { probe, describeDevice, liveHw, hwReady, hwEncode } =
+  await import("./hwenc");
 
 /** i965 らしい返事 */
 function i965(argv: string[]): number {
   const line = argv.join(" ");
   if (line.includes("-f mpegts")) return 0; // 試し素材を作る (CPU)
-  if (line.includes("qsv")) return 1;
   if (line.includes("av1_vaapi")) return 1;
   if (line.includes("-rc_mode ICQ")) return 1;
   return 0;
 }
 
-test("ICQ が落ちたら CQP で試し、通ったほうを覚える", async () => {
+/*
+ * **録画のエンコードは確かめ終わるのを待つ** (`hwReady`)。起動した直後のジョブが、確かめる前の「GPU 無し」で
+ * H.265 を飛ばしていた。まだなら確かめて待ち、確かめ終わっていれば ffmpeg を起こさない
+ */
+test("hwReady: まだ確かめていなければ確かめ終わるのを待ち、済んでいれば探し直さない", async () => {
+  answer = i965;
+  calls.length = 0;
+  const wasProbed = hwEncode().probed;
+  const ready = await hwReady();
+  expect(ready.probed).toBe(true);
+  expect(ready.devices[0]?.vaapi).toEqual(["hevc", "h264"]);
+  if (!wasProbed) expect(calls.length).toBeGreaterThan(0);
+  calls.length = 0;
+  expect(await hwReady()).toBe(hwEncode());
+  expect(calls).toEqual([]);
+});
+
+test("H.264・H.265 は初めから CQP で試し、ICQ では試さない", async () => {
   answer = i965;
   calls.length = 0;
   const { devices } = await probe();
   expect(devices).toHaveLength(1);
   const device = devices[0]!;
-  expect(device.qsv).toEqual([]);
-  expect(device.vaapi).toEqual(["h264"]);
-  expect(device.cqp).toEqual(["h264"]);
-  // デコードから GPU の試しも CQP で指定している (ICQ で指定すると i965 では落ちる)
+  expect(device.vaapi).toEqual(["hevc", "h264"]);
+  // CQP の印は AV1 が ICQ から落ちたときだけ。H.264・H.265 はいつも CQP なので付けない
+  expect(device.cqp).toEqual([]);
+  const lines = calls.map((argv) => argv.join(" "));
+  // 録画と同じ引数 (品質寄りの段と B フレームのピラミッドも) で試す。どれもドライバが持たなくても落ちない
+  for (const [codec, factor] of [
+    ["hevc", "1.4"],
+    ["h264", "1.3"],
+  ]) {
+    expect(
+      lines.some((l) =>
+        l.includes(
+          `${codec}_vaapi -rc_mode CQP -qp 24 -compression_level:v 1 -bf 3 -b_depth 2 -b_qfactor ${factor}`,
+        ),
+      ),
+    ).toBe(true);
+  }
+  expect(lines.some((l) => /(h264|hevc)_vaapi -rc_mode ICQ/.test(l))).toBe(
+    false,
+  );
+  // デコードから GPU の試しは H.264 だけ (ライブは H.265 を出さない)
+  expect(
+    calls
+      .filter((argv) => argv.includes("-hwaccel"))
+      .map((argv) => argv.find((a) => a.endsWith("_vaapi"))),
+  ).toEqual(["h264_vaapi"]);
+  // デコードから GPU の試しはライブと同じ引数 (qp 25、ピラミッドなし)
   const full = calls.find((argv) => argv.includes("-hwaccel"));
-  expect(full?.join(" ")).toContain("-rc_mode CQP -qp 24");
+  expect(full?.join(" ")).toContain("-rc_mode CQP -qp 25 -bf 0 -async_depth 1");
   expect(full?.join(" ")).toContain("deinterlace_vaapi=rate=field");
   expect(device.full).toEqual(["h264"]);
   expect(describeDevice(device)).toBe(
-    "VA-API: H.264 (CQP)、ライブはデコードから GPU: H.264",
+    "VA-API: H.265 / H.264、ライブはデコードから GPU: H.264",
   );
-  // ライブはデコードから GPU の方式を、CQP のまま採る
   expect(liveHw("h264", {}, 0, devices)).toEqual({
-    way: { device: device.path, kind: "vaapi", cqp: true },
+    way: { device: device.path, kind: "vaapi" },
     full: true,
   });
 });
 
-test("ICQ が通れば CQP は試さない", async () => {
-  answer = (argv) => (argv.join(" ").includes("qsv") ? 1 : 0);
+/** Mesa (AMD) らしい返事。ICQ を持たないが、AV1 も CQP ならエンコードできる */
+function mesa(argv: string[]): number {
+  return argv.join(" ").includes("-rc_mode ICQ") ? 1 : 0;
+}
+
+test("AV1 は ICQ が落ちたら CQP (-global_quality 75) で試し、通ったほうを覚える", async () => {
+  answer = mesa;
   calls.length = 0;
   const { devices } = await probe();
-  expect(devices[0]!.vaapi).toEqual(["av1", "h264"]);
+  const device = devices[0]!;
+  expect(device.vaapi).toEqual(["av1", "hevc", "h264"]);
+  expect(device.cqp).toEqual(["av1"]);
+  const lines = calls.map((argv) => argv.join(" "));
+  expect(lines.some((l) => l.includes("av1_vaapi -rc_mode ICQ"))).toBe(true);
+  expect(
+    lines.some((l) =>
+      l.includes(
+        "av1_vaapi -rc_mode CQP -global_quality:v 75 -compression_level:v 1",
+      ),
+    ),
+  ).toBe(true);
+  // デコードから GPU の試しも、AV1 は CQP のまま
+  const fullAv1 = calls.find(
+    (argv) => argv.includes("-hwaccel") && argv.includes("av1_vaapi"),
+  );
+  expect(fullAv1?.join(" ")).toContain("-rc_mode CQP -global_quality:v 75");
+  expect(device.full).toEqual(["av1", "h264"]);
+  // (CQP) を添えるのは AV1 の落とした分だけ
+  expect(describeDevice(device)).toBe(
+    "VA-API: AV1 (CQP) / H.265 / H.264、ライブはデコードから GPU: AV1 / H.264",
+  );
+  // ライブはデコードから GPU の方式を、AV1 は CQP のまま採る
+  expect(liveHw("av1", {}, 0, devices)).toEqual({
+    way: { device: device.path, kind: "vaapi", cqp: true },
+    full: true,
+  });
+  expect(liveHw("h264", {}, 0, devices)).toEqual({
+    way: { device: device.path, kind: "vaapi" },
+    full: true,
+  });
+});
+
+test("AV1 の ICQ が通れば CQP は試さない", async () => {
+  answer = () => 0;
+  calls.length = 0;
+  const { devices } = await probe();
+  expect(devices[0]!.vaapi).toEqual(["av1", "hevc", "h264"]);
   expect(devices[0]!.cqp).toEqual([]);
-  expect(calls.some((argv) => argv.includes("CQP"))).toBe(false);
+  expect(
+    calls.some((argv) => argv.join(" ").includes("av1_vaapi -rc_mode CQP")),
+  ).toBe(false);
+  // QSV は試さない (VA-API だけ)
+  expect(calls.some((argv) => argv.join(" ").includes("qsv"))).toBe(false);
 });
 
 test("MPEG-2 を GPU でデコードできなければ、エンコードするところだけ GPU", async () => {
   answer = (argv) => {
     const line = argv.join(" ");
-    if (line.includes("qsv") || line.includes("-hwaccel")) return 1;
+    if (line.includes("-hwaccel")) return 1;
     return 0;
   };
   const { devices } = await probe();
-  expect(devices[0]!.vaapi).toEqual(["av1", "h264"]);
+  expect(devices[0]!.vaapi).toEqual(["av1", "hevc", "h264"]);
   expect(devices[0]!.full).toEqual([]);
   expect(liveHw("h264", {}, 0, devices)).toEqual({
     way: { device: devices[0]!.path, kind: "vaapi" },
@@ -111,20 +198,17 @@ test("MPEG-2 を GPU でデコードできなければ、エンコードする�
 });
 
 test("試し素材を作れなければ、デコードから GPU は試さない", async () => {
-  answer = (argv) =>
-    argv.join(" ").includes("-f mpegts") || argv.join(" ").includes("qsv")
-      ? 1
-      : 0;
+  answer = (argv) => (argv.join(" ").includes("-f mpegts") ? 1 : 0);
   calls.length = 0;
   const { devices } = await probe();
   expect(devices[0]!.full).toEqual([]);
   expect(calls.some((argv) => argv.includes("-hwaccel"))).toBe(false);
 });
 
-test("/dev/mpp_service が在れば、別の行で H.264 だけ h264_rkmpp を試す", async () => {
+test("/dev/mpp_service が在れば、別の行で H.264 と H.265 だけ MPP で試す", async () => {
   writeFileSync(mppService, "");
   try {
-    answer = (argv) => (argv.join(" ").includes("qsv") ? 1 : 0);
+    answer = () => 0;
     calls.length = 0;
     const { devices, message } = await probe();
     expect(devices.map((d) => d.path)).toEqual([
@@ -136,9 +220,8 @@ test("/dev/mpp_service が在れば、別の行で H.264 だけ h264_rkmpp を�
     expect(gpu.rkmpp).toEqual([]);
     expect(mpp).toMatchObject({
       label: "mpp_service (Rockchip)",
-      qsv: [],
       vaapi: [],
-      rkmpp: ["h264"],
+      rkmpp: ["hevc", "h264"],
       nvenc: [],
       full: [],
     });
@@ -146,15 +229,15 @@ test("/dev/mpp_service が在れば、別の行で H.264 だけ h264_rkmpp を�
       argv.some((a) => a.endsWith("_rkmpp")),
     );
     expect(tried.map((argv) => argv.find((a) => a.endsWith("_rkmpp")))).toEqual(
-      ["h264_rkmpp"],
+      ["hevc_rkmpp", "h264_rkmpp"],
     );
-    expect(describeDevice(mpp)).toBe("Rockchip MPP: H.264");
+    expect(describeDevice(mpp)).toBe("Rockchip MPP: H.265 / H.264");
     expect(message).toBe(
       "デバイスが 2 個見つかり、2 個で GPU エンコードできます",
     );
 
     // MPP が開けなければ (BSP でないカーネル) 行は出るが、使えない
-    answer = (argv) => (argv.includes("h264_rkmpp") ? 1 : 0);
+    answer = (argv) => (argv.some((a) => a.endsWith("_rkmpp")) ? 1 : 0);
     const again = await probe();
     expect(again.devices[1]!.rkmpp).toEqual([]);
   } finally {
@@ -167,10 +250,9 @@ test("NVIDIA の GPU は1枚ずつ別の行で NVENC を試し、GPU の番号�
   for (const name of ["nvidia0", "nvidia1", "nvidiactl"])
     writeFileSync(join(nvidiaDir, name), "");
   try {
-    // 1枚目 (-gpu 0) は RTX 40 より前で AV1 をエンコードできない。QSV はどの行でも落ちる
+    // 1枚目 (-gpu 0) は RTX 40 より前で AV1 をエンコードできない
     answer = (argv) => {
       const line = argv.join(" ");
-      if (line.includes("qsv")) return 1;
       if (line.includes("av1_nvenc -gpu 0")) return 1;
       return 0;
     };
@@ -187,22 +269,21 @@ test("NVIDIA の GPU は1枚ずつ別の行で NVENC を試し、GPU の番号�
     expect(n0).toMatchObject({
       label: "nvidia0 (NVIDIA)",
       gpu: 0,
-      qsv: [],
       vaapi: [],
-      nvenc: ["h264"],
+      nvenc: ["hevc", "h264"],
       full: [],
     });
-    expect(n1).toMatchObject({ gpu: 1, nvenc: ["av1", "h264"] });
+    expect(n1).toMatchObject({ gpu: 1, nvenc: ["av1", "hevc", "h264"] });
     // GPU の番号はデバイスファイルの並びの位置。デバイスファイルは ffmpeg に渡さない
     const tried = calls.filter((argv) =>
       argv.some((a) => a.endsWith("_nvenc")),
     );
-    expect(tried).toHaveLength(4);
+    expect(tried).toHaveLength(6);
     expect(tried.every((argv) => !argv.join(" ").includes(nvidiaDir))).toBe(
       true,
     );
-    expect(describeDevice(n0)).toBe("NVENC: H.264");
-    expect(describeDevice(n1)).toBe("NVENC: AV1 / H.264");
+    expect(describeDevice(n0)).toBe("NVENC: H.265 / H.264");
+    expect(describeDevice(n1)).toBe("NVENC: AV1 / H.265 / H.264");
     expect(message).toBe(
       "デバイスが 3 個見つかり、3 個で GPU エンコードできます",
     );

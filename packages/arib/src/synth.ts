@@ -200,7 +200,7 @@ export interface SynthSeries {
  * expire_date(16) / episode_number(12) last_episode_number(12) / series_name_char。
  * 有効期限は載せない (flag 0、日付は全ビット1)
  */
-export function seriesDescriptor(series: SynthSeries): number[] {
+function seriesDescriptor(series: SynthSeries): number[] {
   const episode = series.episode ?? 0;
   const last = series.lastEpisode ?? 0;
   const body = [
@@ -523,6 +523,16 @@ export function bxmlDescriptor(
     0xa0, // 即時取得あり / 蓄積不可 / 起動優先
   ];
   return [0xfd, body.length, ...body];
+}
+
+/**
+ * 字幕の ES (stream_type 0x06) に付ける記述子。**字幕の目印。**
+ *
+ * 部品タグ (stream_identifier_descriptor。ふつうの字幕は 0x30〜0x37) と、データ符号化方式記述子の
+ * data_component_id 0x0008 (字幕)。続く1バイトの DMF・時刻制御モードは denpa も ffmpeg も見ない
+ */
+export function captionDescriptors(componentTag = 0x30): number[] {
+  return [0x52, 0x01, componentTag, 0xfd, 0x03, 0x00, 0x08, 0x3d];
 }
 
 /** DSM-CC のセクションで包む */

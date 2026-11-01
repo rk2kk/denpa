@@ -46,8 +46,8 @@ spec:
         # **入れ替えの合図。** CI が「そのイメージの中身を最後に変えたコミット」を書く。
         # 手で触らない
         imageMarks:
-          denpa: sha-71ad78c71981
-          agent: sha-dc9d3f67465c
+          denpa: sha-4114c0301cfc
+          agent: sha-b226c320f679
 
         denpa:
           # LAN から来たときだけ何も聞かずに通す (docs/auth.md)
@@ -80,6 +80,10 @@ spec:
             size: 64Gi
           encoded:
             size: 170Gi
+          # 中身は数 KB だが、StorageClass が xfs で、xfs は 300MB より小さいとフォーマットできない
+          # (128Mi だと PV がマウントできず、Pod が ContainerCreating のまま止まる)
+          agentConfig:
+            size: 512Mi
 
         # Cilium Gateway (danything/gitops の bootstrap/gateway/) に付ける。
         # dp.doany.io は `*.doany.io` の、dp.l.doany.io は `*.l.doany.io` の
@@ -88,7 +92,7 @@ spec:
           enabled: true
           # Cloudflare を通さない(映像の配信と遅延。アドレスの判定も接続元の IP に頼る)。
           # gitops は Cloudflare を通すのを基本にし、通さないものにこの注釈を付ける
-          # (danything/gitops の apps/external-dns/README.md)。ExternalDNS が proxied ではないレコードを作る
+          # (danything/gitops の deploy/external-dns/README.md)。ExternalDNS が proxied ではないレコードを作る
           annotations:
             external-dns.kubernetes.io/cloudflare-proxied: "false"
           parentRefs:

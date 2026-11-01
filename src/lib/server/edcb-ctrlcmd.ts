@@ -15,7 +15,7 @@
  */
 import { connect } from "node:net";
 
-/** 待つ長さと応答の上限。試験は短くする */
+/** 待つ長さと、BUSY のときの送り直し。テストでは短くする */
 export const timing = {
   /** 繋がるまで (EDCB の `CONNECT_TIMEOUT` と同じ) */
   connect: 15_000,
@@ -48,7 +48,7 @@ const RESULT = {
 } as const;
 
 /** 宛先 */
-export interface EdcbTarget {
+interface EdcbTarget {
   host: string;
   port: number;
   /** 画面と記録に出す `host:port` (IPv6 は `[::1]:4510`) */
@@ -237,7 +237,7 @@ export interface EdcbDate {
 }
 
 /** 局 (`serviceList` の `ONID << 32 | TSID << 16 | SID`) */
-export interface EdcbService {
+interface EdcbService {
   networkId: number;
   transportStreamId: number;
   serviceId: number;

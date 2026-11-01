@@ -142,7 +142,7 @@
 
   /**
    * 端末に保存する ([docs/offline.md](../../docs/offline.md))。落とすものは
-   * `saveOffline` が決める (既定 AV1、端末がデコードできなければ H.264)。
+   * `saveOffline` が決める (AV1 → H.265 → H.264 のうち、端末で観られる最初のもの)。
    * Background Fetch ならタブを閉じても続くので、押したら詳細は閉じる
    */
   async function saveToDevice(rec: Rec): Promise<void> {
@@ -659,7 +659,7 @@
     pinned,
     onpick: (day: number) => void pickDay(day),
   });
-  /** 頭の1行 (`TimelineBar`) とサイドバー (`HomeAside`) が同じものを受ける */
+  /** 操作の1行 (`TimelineBar`) とサイドバー (`HomeAside`) が同じものを受ける */
   const controls = $derived<HomeControls>({
     filter,
     setFilter,
@@ -1022,7 +1022,7 @@
 
 <style>
   /*
-     * 一覧・行・頭の1行の見た目は部品と分け合うので `#lib/components/home/home.css` (`.board` の下だけに効く)。
+     * 一覧・行・操作の1行の見た目は部品と分け合うので `#lib/components/home/home.css` (`.board` の下だけに効く)。
      * ここに残すのは、一覧の外 (番組の詳細) に出るものだけ。送るだけの項目を包むフォーム (`.menu-form`) は `app.css`
      */
   /* 「その他…」の中身 (枠は `Menu` の中なので :global)。項目は左寄せで縦に積む (`app.css` の `.menu`) */

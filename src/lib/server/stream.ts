@@ -1,3 +1,5 @@
+import { constants, setPriority } from "node:os";
+
 /**
  * ReadableStream を1チャンクずつ読む。
  *
@@ -31,7 +33,7 @@ async function text(stream: ReadableStream<Uint8Array>): Promise<string> {
 
 /**
  * 流れてくるバイト列を行に割って返す。
- * ffmpeg の `-progress pipe:1` のように、終わるのを待たずに読みたいとき用。
+ * ffmpeg の `-progress` の出力のように、終わるのを待たずに読みたいとき用。
  */
 export async function* lines(
   stream: ReadableStream<Uint8Array>,
@@ -46,6 +48,39 @@ export async function* lines(
     for (const part of parts) yield part.trim();
   }
   if (buffer.trim() !== "") yield buffer.trim();
+}
+
+/** 優先度を下げられなかったことは1度だけ知らせる (コンテナで権限が無いなど) */
+let lowerFailed = false;
+
+/**
+ * **子プロセスを OS のいちばん低い優先度 (nice 19) にする。** 録ったあとのエンコードと、
+ * その中で録画をデコードする CM 検出 (`cm-scan.scan`・ロゴの学習) に使う。
+ *
+ * 非力な機材 (Raspberry Pi 5 など) では、録画のエンコードがライブの変換 (libx264 ultrafast) と
+ * CPU を取り合い、ライブのコマが落ちていた。録画のエンコードは急がないので、ライブに譲る。
+ * 他に何も動いていなければ空いた CPU をそのまま使うので、速さは変わらない。GPU でエンコードするときも
+ * 同じ道を通るが、下がるのは CPU の順番だけなので困らない。
+ *
+ * - Linux では `setpriority`。起こした直後に下げるので、ffmpeg が後から作るスレッドも引き継ぐ
+ * - Windows では libuv が 19 を IDLE_PRIORITY_CLASS に当てる
+ *
+ * 下げられなくても止めない (いつもの優先度で走るだけ)
+ */
+export function lowerPriority(
+  pid: number,
+  set: (pid: number, priority: number) => void = setPriority,
+): void {
+  try {
+    set(pid, constants.priority.PRIORITY_LOW);
+  } catch (error) {
+    // もう終わっていた (ESRCH) なら下げる相手がいないだけ。権限不足の知らせを取っておく
+    if ((error as { code?: unknown }).code === "ESRCH" || lowerFailed) return;
+    lowerFailed = true;
+    console.warn(
+      `[encode] 優先度を下げられませんでした。いつもの優先度で続けます: ${String(error)}`,
+    );
+  }
 }
 
 /** `onStderrLine` のとき返す標準エラーの行数 */
@@ -89,6 +124,8 @@ export async function run(
      * `stderr` より優先し、返る `stderr` は末尾の数行だけ (落ちた理由を読むため)
      */
     onStderrLine?: (line: string) => void;
+    /** 起こしたらいちばん低い優先度にする (`lowerPriority`。録ったあとの重い処理だけ) */
+    lowPriority?: boolean;
   } = {},
 ): Promise<RunResult> {
   /*
@@ -116,6 +153,7 @@ export async function run(
   } catch (error) {
     return { code: 127, stdout: new Uint8Array(), stderr: String(error) };
   }
+  if (options.lowPriority === true) lowerPriority(proc.pid);
   const kill = () => proc.kill();
   options.signal?.addEventListener("abort", kill, { once: true });
   const timer =
@@ -185,7 +223,8 @@ export async function run(
 }
 
 /**
- * **ffmpeg の出口をそのまま応答の本文にする** (音声だけ・詰め替え。`stdout` に流させる)。
+ * **ffmpeg の出口をそのまま応答の本文にする** (音声だけの取り出し。`stdout` に流させる)。
+ * 録画のその場の変換・詰め替えは、降りたときの次の手と詰まりの見張りを足した `playback.transcodeBody`
  *
  * - 読まれたぶんしか読み出さない (`pull`)。相手が読まなければ出口が詰まり、ffmpeg も止まる
  * - 閉じられたら (`cancel`) ffmpeg を殺す

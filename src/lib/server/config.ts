@@ -100,6 +100,7 @@ export const config = {
    * /app に被せるため** (中に置くと隠れる)。無ければ放送そのままの経路は使えず、画面はエンコードしたものに戻る
    */
   mpeg2Dir: str("MPEG2_DIR", "/opt/denpa/mpeg2"),
+  /** 録ったあとのエンコードを同時に走らせる本数。**ジョブではなく ffmpeg の本数で数える** (コーデックごとに1本。`encode-slots.ts`) */
   encodeConcurrency: num("ENCODE_CONCURRENCY", 2),
   /** 先頭が壊れていて初期化に失敗したときに頭を捨てて再試行する秒数 (enc.js 由来) */
   encodeRetrySeek: 0.2,
@@ -107,7 +108,7 @@ export const config = {
    * 1つのエンコードを何回まで試すか。**毒ジョブでキューを止めないため。**
    *
    * プロセスごと落とすジョブ (メモリ超過など) は、再起動のたびに running→queued
-   * へ戻され、同時実行1・id順だと毎回先頭に来て永久にキューを塞ぐ。取り出すたびに
+   * へ戻され、id順なので毎回先頭に来てキューを塞ぎ続ける。取り出すたびに
    * attempts を数えていて (頭を捨てる再試行も1回と数える)、ここを超えたら諦めて failed にし、後ろを進める
    */
   encodeMaxAttempts: num("ENCODE_MAX_ATTEMPTS", 5),
@@ -123,7 +124,7 @@ export const config = {
    */
   liveCopy: bool("DENPA_LIVE_COPY", false),
   /**
-   * GPU のデバイスを探すパターン (最後の段に `*`)。当たったデバイスを全部試して、QSV / VA-API が
+   * GPU のデバイスを探すパターン (最後の段に `*`)。当たったデバイスを全部試して、VA-API が
    * 初期化できたものでエンコードする (server/hwenc.ts)。Pod / コンテナに `/dev/dri` を
    * 渡していなければ1つも無いのが普通
    */
@@ -270,7 +271,8 @@ export const config = {
    */
   agentDownGrace: num("AGENT_DOWN_GRACE", 3 * MIN),
   /**
-   * 局ロゴの定期チェックの間隔。**ほかの選局を共有するだけで、自分ではチューナーを開かない** (`logo.sweep`)。
+   * 局ロゴの定期チェックの間隔。**ほかの選局を共有する** (`logo.sweep`)。自分で開くのは、衛星のロゴが足りない間に
+   * どのチューナーも空いているときに、当たりの中継で待つ (分からなければ探す。`logo.awaitCarousel`)。
    * 開いた瞬間の通知 (`tuners`) でも共有するので、これは通知を取りこぼしたときの保険
    */
   logoSweepInterval: 10 * MIN,

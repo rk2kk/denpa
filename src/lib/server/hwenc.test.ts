@@ -10,6 +10,7 @@ import {
   hwBitrate,
   hwChain,
   type HwDevice,
+  type HwWay,
   liveHw,
   liveHwArgs,
   nvencBusy,
@@ -18,7 +19,6 @@ import {
 const A: HwDevice = {
   path: "/dev/dri/renderD128",
   label: "A",
-  qsv: ["h264", "av1"],
   vaapi: ["h264", "av1"],
   rkmpp: [],
   nvenc: [],
@@ -28,7 +28,6 @@ const A: HwDevice = {
 const B: HwDevice = {
   path: "/dev/dri/renderD129",
   label: "B",
-  qsv: ["h264"],
   vaapi: ["h264"],
   rkmpp: [],
   nvenc: [],
@@ -37,9 +36,8 @@ const B: HwDevice = {
 };
 
 describe("GPU の方式の選び方", () => {
-  test("載っていないデバイスは全部よい。同じデバイスの中では QSV → VA-API", () => {
+  test("載っていないデバイスは全部よい", () => {
     expect(hwChain("av1", {}, 0, [A, B])).toEqual([
-      { device: A.path, kind: "qsv" },
       { device: A.path, kind: "vaapi" },
     ]);
   });
@@ -47,32 +45,26 @@ describe("GPU の方式の選び方", () => {
   test("デバイスはジョブごとに回す。両方エンコードできる H.264 は先頭が入れ替わる", () => {
     const first = hwChain("h264", {}, 0, [A, B]).map((w) => w.device);
     const second = hwChain("h264", {}, 1, [A, B]).map((w) => w.device);
-    expect(first).toEqual([A.path, A.path, B.path, B.path]);
-    expect(second).toEqual([B.path, B.path, A.path, A.path]);
+    expect(first).toEqual([A.path, B.path]);
+    expect(second).toEqual([B.path, A.path]);
   });
 
   test("デバイスごとに外せる。A は AV1 だけ、B は H.264 だけ、のような割り振り", () => {
     const allow = {
-      [A.path]: { qsv: ["av1" as const], vaapi: [], rkmpp: [], nvenc: [] },
-      [B.path]: {
-        qsv: ["h264" as const],
-        vaapi: ["h264" as const],
-        rkmpp: [],
-        nvenc: [],
-      },
+      [A.path]: { vaapi: ["av1" as const], rkmpp: [], nvenc: [] },
+      [B.path]: { vaapi: ["h264" as const], rkmpp: [], nvenc: [] },
     };
     expect(hwChain("h264", allow, 0, [A, B])).toEqual([
-      { device: B.path, kind: "qsv" },
       { device: B.path, kind: "vaapi" },
     ]);
     expect(hwChain("av1", allow, 0, [A, B])).toEqual([
-      { device: A.path, kind: "qsv" },
+      { device: A.path, kind: "vaapi" },
     ]);
     // 使えないものは許しても出ない (B は AV1 をエンコードできない)
     expect(
       hwChain(
         "av1",
-        { [B.path]: { qsv: ["av1"], vaapi: ["av1"], rkmpp: [], nvenc: [] } },
+        { [B.path]: { vaapi: ["av1"], rkmpp: [], nvenc: [] } },
         0,
         [B],
       ),
@@ -91,43 +83,92 @@ describe("GPU の方式の選び方", () => {
   });
 });
 
-describe("ICQ を持たないドライバ (i965)", () => {
+describe("VA-API の画質の指定", () => {
+  test("H.264 は CQP の qp 24 に、品質寄りの段と B フレームのピラミッドを足す", () => {
+    expect(hwArgs({ device: A.path, kind: "vaapi" }, "h264").encoder).toEqual([
+      "h264_vaapi",
+      "-rc_mode",
+      "CQP",
+      "-qp",
+      "24",
+      "-compression_level:v",
+      "1",
+      "-bf",
+      "3",
+      "-b_depth",
+      "2",
+      "-b_qfactor",
+      "1.3",
+    ]);
+  });
+
+  test("AV1 は ICQ 26 に品質寄りの段だけ足す (B フレームと GOP は既定のまま)", () => {
+    expect(hwArgs({ device: A.path, kind: "vaapi" }, "av1").encoder).toEqual([
+      "av1_vaapi",
+      "-rc_mode",
+      "ICQ",
+      "-global_quality:v",
+      "26",
+      "-compression_level:v",
+      "1",
+    ]);
+  });
+
+  /*
+   * **`-compression_level` は `:v` 付きで。** 付けないと libopus が計算の手間 (complexity) として読み、
+   * 10 から 1 に落とす。`-bf 7 -b_depth 3` は A310 で映像が壊れたので、どのコーデックにも出さない
+   */
+  test("品質寄りの段は映像にだけ効かせ、壊れる深さのピラミッドは出さない", () => {
+    for (const way of [
+      { device: A.path, kind: "vaapi" },
+      { device: A.path, kind: "vaapi", cqp: true },
+    ] as const) {
+      for (const codec of ["h264", "hevc", "av1"] as const) {
+        const args = hwArgs(way, codec).encoder;
+        expect(args).not.toContain("-compression_level");
+        expect(args).toContain("-compression_level:v");
+        expect(args.join(" ")).not.toContain("-bf 7");
+        expect(args.join(" ")).not.toContain("-b_depth 3");
+      }
+    }
+  });
+});
+
+describe("ICQ を持たないドライバの AV1 (i965・Mesa)", () => {
   const C: HwDevice = {
-    ...B,
+    ...A,
     path: "/dev/dri/renderD130",
-    qsv: [],
-    cqp: ["h264"],
+    cqp: ["av1"],
   };
 
-  test("CQP でだけエンコードできた VA-API には印を付けて渡す", () => {
-    expect(hwChain("h264", {}, 0, [C])).toEqual([
+  test("AV1 が CQP でだけエンコードできた VA-API には印を付けて渡す", () => {
+    expect(hwChain("av1", {}, 0, [C])).toEqual([
       { device: C.path, kind: "vaapi", cqp: true },
     ]);
-    // QSV には付けない (CQP に落とすのは VA-API の試しだけ)
-    expect(hwChain("h264", {}, 0, [{ ...A, cqp: ["h264"] }])[0]).toEqual({
-      device: A.path,
-      kind: "qsv",
+    // CQP に落ちたのは AV1 だけ。H.264 には印を付けない
+    expect(hwChain("h264", {}, 0, [C])[0]).toEqual({
+      device: C.path,
+      kind: "vaapi",
     });
   });
 
-  test("CQP なら -qp で指定する。値は ICQ と同じ軸", () => {
-    const icq = hwArgs({ device: C.path, kind: "vaapi" }, "h264").encoder;
-    expect(icq).toEqual([
-      "h264_vaapi",
-      "-rc_mode",
-      "ICQ",
-      "-global_quality",
-      "24",
-    ]);
-    const cqp = hwArgs(
-      { device: C.path, kind: "vaapi", cqp: true },
-      "h264",
-    ).encoder;
-    expect(cqp).toEqual(["h264_vaapi", "-rc_mode", "CQP", "-qp", "24"]);
-    // AV1 の qp は 0〜255
+  test("AV1 の CQP は -qp を受けないので -global_quality の 75 で", () => {
+    // AV1 の量子化の値は 0〜255。`-qp` は黙って無視されるので使わない
     expect(
       hwArgs({ device: C.path, kind: "vaapi", cqp: true }, "av1").encoder,
-    ).toContain("120");
+    ).toEqual([
+      "av1_vaapi",
+      "-rc_mode",
+      "CQP",
+      "-global_quality:v",
+      "75",
+      "-compression_level:v",
+      "1",
+    ]);
+    // H.264 は印があってもなくても同じ CQP
+    expect(
+      hwArgs({ device: C.path, kind: "vaapi", cqp: true }, "h264").encoder,
+    ).toEqual(hwArgs({ device: C.path, kind: "vaapi" }, "h264").encoder);
   });
 });
 
@@ -137,33 +178,19 @@ describe("ライブを GPU でエンコードする経路", () => {
   test("印が無ければ (使えなければ) ソフトウェア", () => {
     expect(liveHw("h264", {}, 0, [])).toBeNull();
     expect(
-      liveHw(
-        "h264",
-        { [A.path]: { qsv: [], vaapi: [], rkmpp: [], nvenc: [] } },
-        0,
-        [A],
-      ),
+      liveHw("h264", { [A.path]: { vaapi: [], rkmpp: [], nvenc: [] } }, 0, [A]),
     ).toBeNull();
   });
 
-  test("デコードから GPU で通せる VA-API を、同じデバイスの QSV より先に採る", () => {
-    expect(liveHw("h264", {}, 0, [FULL])).toEqual({
+  test("デコードから GPU で通せる VA-API を、ほかのデバイスより先に採る", () => {
+    // 回す番では B が先頭でも、デコードから GPU で通せる A を採る
+    expect(liveHw("h264", {}, 1, [FULL, B])).toEqual({
       way: { device: A.path, kind: "vaapi" },
       full: true,
     });
-    // 通せないコーデックは録画と同じ順 (QSV が先) で、エンコードするところだけ
+    // 通せないコーデックは録画と同じ順で、エンコードするところだけ
     expect(liveHw("av1", {}, 0, [FULL])).toEqual({
-      way: { device: A.path, kind: "qsv" },
-      full: false,
-    });
-  });
-
-  test("VA-API の印を外せば、デコードから GPU も使わない", () => {
-    const allow = {
-      [A.path]: { qsv: ["h264" as const], vaapi: [], rkmpp: [], nvenc: [] },
-    };
-    expect(liveHw("h264", allow, 0, [FULL])).toEqual({
-      way: { device: A.path, kind: "qsv" },
+      way: { device: A.path, kind: "vaapi" },
       full: false,
     });
   });
@@ -180,24 +207,33 @@ describe("ライブを GPU でエンコードする経路", () => {
       "va",
     ]);
     expect(vaapi.filter).toEqual(["format=nv12", "hwupload"]);
+    // 録画の品質寄りの段とピラミッドは足さず、qp も前のままの 25
     expect(vaapi.encoder.join(" ")).toBe(
-      "h264_vaapi -rc_mode ICQ -global_quality 24 -bf 0 -async_depth 1",
+      "h264_vaapi -rc_mode CQP -qp 25 -bf 0 -async_depth 1",
     );
-
-    const qsv = liveHwArgs(
-      { way: { device: A.path, kind: "qsv" }, full: false },
+    const av1 = liveHwArgs(
+      { way: { device: A.path, kind: "vaapi" }, full: false },
       "av1",
     );
-    expect(qsv.filter).toEqual(["format=nv12"]);
-    expect(qsv.encoder.join(" ")).toBe(
-      "av1_qsv -preset veryfast -global_quality 24 -bf 0 -async_depth 1",
+    expect(av1.encoder.join(" ")).toBe(
+      "av1_vaapi -rc_mode ICQ -global_quality:v 26 -bf 0 -async_depth 1",
     );
+    // デコードから GPU のときも同じ
+    for (const codec of ["h264", "av1"] as const) {
+      const full = liveHwArgs(
+        { way: { device: A.path, kind: "vaapi" }, full: true },
+        codec,
+      ).encoder;
+      expect(full).not.toContain("-compression_level:v");
+      expect(full).not.toContain("-b_depth");
+      expect(full.join(" ")).toContain("-bf 0 -async_depth 1");
+    }
   });
 
   test("デコードから GPU なら、フレームを GPU に置いたままインタレ解除してエンコードする", () => {
     const full = liveHwArgs(
       { way: { device: A.path, kind: "vaapi", cqp: true }, full: true },
-      "h264",
+      "av1",
     );
     expect(full.input.join(" ")).toBe(
       `-init_hw_device vaapi=va:${A.path} -hwaccel vaapi -hwaccel_output_format vaapi -hwaccel_device va`,
@@ -205,17 +241,16 @@ describe("ライブを GPU でエンコードする経路", () => {
     // CPU のフィルタ (format / hwupload) は挟まない
     expect(full.filter).toEqual(["deinterlace_vaapi=rate=field"]);
     expect(full.encoder.join(" ")).toBe(
-      "h264_vaapi -rc_mode CQP -qp 24 -bf 0 -async_depth 1",
+      "av1_vaapi -rc_mode CQP -global_quality:v 75 -bf 0 -async_depth 1",
     );
   });
 });
 
 describe("Rockchip MPP", () => {
-  /** `/dev/mpp_service`。renderD* とは別の行で、H.264 だけ */
+  /** `/dev/mpp_service`。renderD* とは別の行 (ここでは H.264 だけ) */
   const R: HwDevice = {
     path: "/dev/mpp_service",
     label: "mpp_service (Rockchip)",
-    qsv: [],
     vaapi: [],
     rkmpp: ["h264"],
     nvenc: [],
@@ -223,10 +258,9 @@ describe("Rockchip MPP", () => {
     full: [],
   };
 
-  test("H.264 だけを受け持ち、ほかの GPU と同じくジョブごとに回す", () => {
+  test("AV1 は受け持たず、ほかの GPU と同じくジョブごとに回す", () => {
     expect(hwChain("av1", {}, 0, [R])).toEqual([]);
     expect(hwChain("h264", {}, 0, [B, R])).toEqual([
-      { device: B.path, kind: "qsv" },
       { device: B.path, kind: "vaapi" },
       { device: R.path, kind: "rkmpp" },
     ]);
@@ -236,12 +270,9 @@ describe("Rockchip MPP", () => {
     });
     // 印を外せば使わない
     expect(
-      hwChain(
-        "h264",
-        { [R.path]: { qsv: [], vaapi: [], rkmpp: [], nvenc: [] } },
-        0,
-        [R],
-      ),
+      hwChain("h264", { [R.path]: { vaapi: [], rkmpp: [], nvenc: [] } }, 0, [
+        R,
+      ]),
     ).toEqual([]);
   });
 
@@ -313,7 +344,6 @@ describe("NVIDIA NVENC", () => {
   const N0: HwDevice = {
     path: "/dev/nvidia0",
     label: "nvidia0 (NVIDIA)",
-    qsv: [],
     vaapi: [],
     rkmpp: [],
     nvenc: ["av1", "h264"],
@@ -354,7 +384,7 @@ describe("NVIDIA NVENC", () => {
     expect(
       hwChain(
         "h264",
-        { [N0.path]: { qsv: [], vaapi: [], rkmpp: [], nvenc: ["av1"] } },
+        { [N0.path]: { vaapi: [], rkmpp: [], nvenc: ["av1"] } },
         0,
         [N0],
       ),
@@ -447,5 +477,108 @@ describe("NVIDIA NVENC", () => {
       false,
     );
     expect(nvencBusy("Device creation failed: -19.")).toBe(false);
+  });
+});
+
+describe("H.265 (GPU でだけ)", () => {
+  const H: HwDevice = {
+    ...A,
+    vaapi: ["av1", "hevc", "h264"],
+  };
+  const R: HwDevice = {
+    path: "/dev/mpp_service",
+    label: "mpp_service (Rockchip)",
+    vaapi: [],
+    rkmpp: ["hevc", "h264"],
+    nvenc: [],
+    cqp: [],
+    full: [],
+  };
+  const N: HwDevice = {
+    ...R,
+    path: "/dev/nvidia0",
+    label: "nvidia0 (NVIDIA)",
+    rkmpp: [],
+    nvenc: ["hevc", "h264"],
+    gpu: 0,
+  };
+
+  test("試しのエンコードが通った方式だけを、ほかのコーデックと同じ順で使う", () => {
+    expect(hwChain("hevc", {}, 0, [B])).toEqual([]);
+    expect(hwChain("hevc", {}, 0, [B, H, R])).toEqual([
+      { device: H.path, kind: "vaapi" },
+      { device: R.path, kind: "rkmpp" },
+    ]);
+  });
+
+  test("VA-API の H.265 は H.264 と同じ CQP の qp 24 (0〜51 の軸) とピラミッドで、B の qp の倍率だけ 1.4", () => {
+    expect(hwArgs({ device: H.path, kind: "vaapi" }, "hevc").encoder).toEqual([
+      "hevc_vaapi",
+      "-rc_mode",
+      "CQP",
+      "-qp",
+      "24",
+      "-compression_level:v",
+      "1",
+      "-bf",
+      "3",
+      "-b_depth",
+      "2",
+      "-b_qfactor",
+      "1.4",
+    ]);
+  });
+
+  /*
+   * **画質の指定は映像にだけ効かせる** (`-global_quality:v`)。付けないと音のエンコーダにも効き、
+   * libopus は開けずに転ぶ (AV1 + Opus の録画とライブ)。録画・ライブのどちらの引数にも素の形を出さない
+   */
+  test("-global_quality は :v 付きで、音のエンコーダに効かせない", () => {
+    // `-global_quality` を使うのは AV1 だけ (ICQ・CQP どちらも)。H.264・H.265 は `-qp`
+    const ways: HwWay[] = [
+      { device: H.path, kind: "vaapi" },
+      { device: H.path, kind: "vaapi", cqp: true },
+    ];
+    for (const way of ways) {
+      const record = hwArgs(way, "av1").encoder;
+      const live = liveHwArgs({ way, full: false }, "av1").encoder;
+      for (const args of [record, live]) {
+        expect(args).not.toContain("-global_quality");
+        expect(args).toContain("-global_quality:v");
+      }
+    }
+  });
+
+  test("NVENC・Rockchip MPP の表は H.264 と別に引くが、測るまでは同じ値", () => {
+    const picture = { height: 720, smooth: true };
+    for (const p of [
+      { height: 1080, smooth: true },
+      picture,
+      { height: 480, smooth: false },
+    ]) {
+      expect(hwBitrate("hevc", p)).toBe(hwBitrate("h264", p));
+    }
+    const bps = hwBitrate("hevc", picture);
+    const nvenc = hwArgs(
+      { device: N.path, kind: "nvenc", gpu: 0 },
+      "hevc",
+      picture,
+    );
+    expect(nvenc.encoder.slice(0, 5)).toEqual([
+      "hevc_nvenc",
+      "-gpu",
+      "0",
+      "-preset",
+      "p4",
+    ]);
+    expect(nvenc.encoder).toContain(String(bps));
+    const mpp = hwArgs({ device: R.path, kind: "rkmpp" }, "hevc", picture);
+    expect(mpp.encoder.slice(0, 5)).toEqual([
+      "hevc_rkmpp",
+      "-rc",
+      "avbr",
+      "-b:v",
+      String(bps),
+    ]);
   });
 });

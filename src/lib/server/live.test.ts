@@ -196,7 +196,7 @@ describe("ライブのエンコード方法", () => {
     // 映像の出口が先。字幕はそのあと
     expect(args.indexOf("pipe:1")).toBeLessThan(args.indexOf("pipe:3"));
     // 字幕はデコードせずに写す。描く指定 (-sub_type) も要らない
-    expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+    expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
     expect(args).not.toContain("-sub_type");
   });
 
@@ -218,7 +218,7 @@ describe("ライブのエンコード方法", () => {
   /** **言語が複数ある放送**では2本目を選べる */
   test("何本目の字幕かを選べる", () => {
     expect(encodeArgs(1024, stereo, "h264", 1).join(" ")).toContain(
-      "-map 0:p:1024:s:1 -c:s copy",
+      "-map 0:p:1024:s:1? -c:s copy",
     );
   });
 
@@ -374,7 +374,7 @@ describe("音声も組で決まる", () => {
   test("AV1 は Opus 256k", () => {
     expect(args("av1")).toContain("libopus");
     expect(rate(args("av1"))).toBe("256k");
-    expect(codecsFor("av1")).toContain("opus");
+    expect(codecsFor("av1")).toBe('video/mp4; codecs="av01.0.08M.08,Opus"');
   });
 
   test("H.264 は AAC のまま", () => {
@@ -539,7 +539,7 @@ describe("音声だけのエンコード方式 (外から使う API の ?audio=o
 
 /**
  * **HTTP の API で音声を選ぶ** (`live?audio=<id>`・`chase?audio=<id>`)。画面の WebSocket と同じ
- * 合言葉 (`AudioTrack.id`) を、同じ `pickTrack` → `encodeArgs` に通す
+ * ID (`AudioTrack.id`) を、同じ `pickTrack` → `encodeArgs` に通す
  */
 describe("外から選ぶ音声 (?audio=<id>)", () => {
   const tracks = audioTracks([{ componentType: 2, langs: ["jpn", "eng"] }]);
@@ -614,16 +614,16 @@ describe("GPU でエンコードする", () => {
   test("字幕の出口・コマ数の上限・音声はソフトウェアのときと同じ", () => {
     for (const args of [encodeOnly(), full()]) {
       expect(args[args.indexOf("-fpsmax") + 1]).toBe("60000/1001");
-      expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+      expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
       expect(args).toContain("pipe:3");
       expect(args.join(" ")).toContain("-c:a aac");
     }
     // AV1 は Opus のまま
     const av1 = encodeArgs(1024, stereo, "av1", 0, {
-      way: { device, kind: "qsv" },
+      way: { device, kind: "vaapi" },
       full: false,
     });
-    expect(av1.join(" ")).toContain("-c:v av1_qsv");
+    expect(av1.join(" ")).toContain("-c:v av1_vaapi");
     expect(av1.join(" ")).toContain("-c:a libopus");
   });
 

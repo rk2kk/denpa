@@ -6,6 +6,7 @@
   import { onMount } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import CalendarDays from "~icons/lucide/calendar-days";
+  import Camera from "~icons/lucide/camera";
   import Ellipsis from "~icons/lucide/ellipsis";
   import ExternalLink from "~icons/lucide/external-link";
   import ListChecks from "~icons/lucide/list-checks";
@@ -23,7 +24,7 @@
   import Menu from "#lib/components/Menu.svelte";
   import Icon from "#lib/components/player/Icon.svelte";
   import SearchField from "#lib/components/SearchField.svelte";
-  import { denpaFontUrl } from "#lib/font.js";
+  import { denpaFontCssUrl } from "#lib/font.js";
   import { markLite } from "#lib/lite.js";
   import { measure } from "#lib/measure.svelte.js";
   import { startOffline } from "#lib/offline.svelte.js";
@@ -219,9 +220,6 @@
    * `/offline` (端末に保存した録画) はここに並べない。ふだんの操作は一覧で
    * 全部できて、あの画面が要るのは**電波が無いとき**だけ — そのときは
    * サービスワーカーが勝手にあそこへ落とす (service-worker/index.ts)
-   *
-   * 切り抜き (`/clips`) は広い形のヘッダーにだけ並べる。**下のタブは増やさない** — スマホの形では検索の結果・
-   * 録画の詳細・観る画面から入る
    */
   const links = [
     { href: "/", label: "録画" },
@@ -320,8 +318,8 @@
    * 項目を横に並べると、スマートフォンの幅ではヘッダーそのものが画面より
    * 広くなり、ページ全体が横スクロールしていた (実測で 390px の端末に対して
    * 420px)。上のハンバーガーに畳んでいた頃は、画面を移るたびに2回押していた。
-   * 640px 未満はよく開く 3 画面と検索をタブに、残り (ルール・設定) は「その他」の `Menu` (popover) に。
-   * 640px からはルール・設定もタブに出し (`wide`。6 つ並ぶ)、「その他」は出さない (中身が無くなる)。
+   * 640px 未満はよく開く 3 画面と検索をタブに、残り (切り抜き・ルール・設定) は「その他」の `Menu` (popover) に。
+   * 640px からは切り抜き・ルール・設定もタブに出し (`wide`。7 つ並ぶ。並びはヘッダーと同じ)、「その他」は出さない (中身が無くなる)。
    * テーマは設定の「この端末」、新しいバージョンは設定の「バージョンと環境」にあり、設定の入口に点で知らせる (下の `fresh`)。
    * ヘッダー (検索の欄) を隠すので、検索はタブから入る
    */
@@ -329,16 +327,17 @@
     { href: "/", label: "録画", icon: ListVideo, wide: false },
     { href: "/guide", label: "番組表", icon: CalendarDays, wide: false },
     { href: "/live", label: "ライブ", icon: Tv, wide: false },
+    { href: "/clips", label: "切り抜き", icon: Camera, wide: true },
     { href: "/rules", label: "ルール", icon: ListChecks, wide: true },
     { href: SEARCH.href, label: SEARCH.label, icon: Search, wide: false },
     { href: "/settings", label: "設定", icon: Settings, wide: true },
   ] as const;
   /**
-   * ルール・設定もタブに出している幅か。**下の style の `@media (min-width: 640px)` と同じ線**。
+   * 切り抜き・ルール・設定もタブに出している幅か。**下の style の `@media (min-width: 640px)` と同じ線**。
    * その幅では「その他」を隠すので、印も付けない (隠れたタブに印が付くと、下線がそこへ滑っていく)
    */
   const wideTabbar = new MediaQuery("(min-width: 640px)", false);
-  /** 「その他」の中身。640px 未満で隠れるタブ (ルール・設定) */
+  /** 「その他」の中身。640px 未満で隠れるタブ (切り抜き・ルール・設定) */
   const moreLinks = tabs.filter((tab) => tab.wide);
   const moreCurrent = $derived(
     !wideTabbar.current && moreLinks.some((link) => link.href === here),
@@ -405,18 +404,19 @@
   }
 
   /**
-   * **放送の字 (Denpa Font) をここで名乗らせる** (使うのは `app.css` の `.broadcast`)。
+   * **放送の字 (Denpa Font) をここで名乗らせる** (使うのは `app.css` の `.broadcast` と字幕)。
    * バージョン付きの URL は組むときに決まるので、`app.css` には書けない (`#lib/font.ts`)。
-   * 使う字が画面に出たときだけ落ちてくる。届くまでは画面の字で出しておく (`swap`)
+   * 名乗らせる CSS は基本の字と JIS X 0213 で足された漢字の 2 つの woff2 を `unicode-range` で分けて書いてあり、
+   * どちらも使う字が画面に出たときだけ落ちてくる。届くまでは画面の字で出しておく (`swap`)
    */
-  const fontFace = `<style>@font-face{font-family:"Denpa Font";src:url("${denpaFontUrl()}") format("woff2");font-display:swap}</style>`;
+  const fontCss = denpaFontCssUrl();
 </script>
 
 <svelte:window onkeydown={searchShortcut} />
 
 <svelte:head>
   <title>{title}</title>
-  {@html fontFace}
+  <link rel="stylesheet" href={fontCss} />
 </svelte:head>
 
 <!--
@@ -782,8 +782,7 @@
     gap: 0.125rem;
     padding: 0 0.25rem;
   }
-  /* ヘッダーの押すものは高さ 40px。小さい字のままでも指で外さない */
-  .actions :global(button),
+  /* ヘッダーのリンクは高さ 40px。小さい字のままでも指で外さない */
   .actions :global(a.button) {
     min-height: 2.5rem;
   }
@@ -1064,7 +1063,7 @@
     padding-top: var(--dp-page-top);
   }
   /*
-   * **640px からはルール・設定もタブに出し、「その他」を隠す** (6 つ。上の `wideTabbar` と同じ線)。字はアイコンの下のまま一段大きく。
+   * **640px からは切り抜き・ルール・設定もタブに出し、「その他」を隠す** (7 つ。上の `wideTabbar` と同じ線)。字はアイコンの下のまま一段大きく。
    * 640px 未満は 5 つ (録画・番組表・ライブ・検索・その他)。タブの幅はどれも等分 (`.tabbar` の `grid-auto-flow`)
    */
   .tabbar .tab.wide {

@@ -5,11 +5,13 @@
 
 - **認証は画面と同じです** ([下記](#認証))。`TRUSTED_NETWORKS` に入っている相手はそのまま通ります
   (家の LAN の Home Assistant など。名前で呼ぶなら [ALLOWED_HOSTS](auth.md#ログインなしで開ける名前-allowed_hosts) に書く)。それ以外はログインか、アクセストークンが要ります
-- **書き込み (POST・DELETE) には `Content-Type: application/json` を付けます** (本文が無い DELETE でも)。
+- **書き込み (POST・PATCH・DELETE) には `Content-Type: application/json` を付けます** (本文が無い DELETE でも。画像を送る [`POST /api/clips`](#切り抜き-post-apiclips) は除く)。
   付けないと、SvelteKit の CSRF の守りが「よそのサイトからのフォーム送信」とみなして 403 を返します
   (アプリは Origin を付けないため)
 - 設定の画面からだけ使うもの (denpa を別の機械へ移す `/settings/integrations/transfer/…` など) はここに載せません。
   形式は保たず、アクセストークンでは断ります (403。[auth.md](auth.md#アプリのペアリング))
+- 画面と起動の確かめだけが使うもの (番組表のマス `/api/guide`・ライブのチケット `/api/live/ticket`・データ放送の中継 `/api/bml/…`・
+  `/api/health` など) も載せません。形式は保ちません
 - **URL は denpa の根からの相対で返します** (`api/services/…`)。denpa を開いている URL に足して使います。
   前段の接頭辞 (`/denpa/` など) の下で動かしていても、そのまま解決できます
 
@@ -158,6 +160,11 @@
         "url": "api/recordings/12/file?source=encoded"
       },
       {
+        "source": "hevc",
+        "codec": "hevc",
+        "url": "api/recordings/12/file?source=hevc"
+      },
+      {
         "source": "alt",
         "codec": "h264",
         "url": "api/recordings/12/file?source=alt"
@@ -184,12 +191,16 @@
 
 - 時刻は UNIX ミリ秒。`title` は記号 (`[字]` など) を落とした名前、`name` は放送のままの名前
 - `files` は出せるものだけ。**どれを開くかは呼ぶ側が決めます** (テレビのアプリなら、その端末がデコードできるもの)。
+  並びは主 (`encoded`) → H.265 (`hevc`) → H.264 (`alt`) → 元のTS (`ts`) で、エンコードしたものは小さい順 (AV1 → H.265 → H.264)。
+  観る画面と端末に保存は、この順にデコードできる最初のものを選んでいます。`codec` は `av1` / `hevc` / `h264` / `mpeg2`
+  (知らない値は読み飛ばしてください)。`hevc` の行は H.265 を GPU でエンコードした録画にだけあり、
+  H.265 が主 (AV1 を選ばなかった) なら `encoded` の `codec` が `hevc` になります。
   エンコードしたものは Matroska (`video/x-matroska`)、元のTSは TS (`video/mp2t`)。Range に応じます。
   再生のためのもので、ダウンロード用ではありません (添付は付けない)
 - `audio` は主音声だけを AAC (ADTS、`audio/aac`) で流します。音声だけを聴くとき向け。
   `source` と一緒に渡せば、元にするファイルを選べます
 - `resumeMs` は続きから観る位置 (画面の「続き」と同じもの)。観ていない・観終えたものは `null`。
-  **エンコードしたもの (`source` が `encoded`・`alt`) の時刻**で、エンコードしたものが無ければ元のTSの時刻。
+  **エンコードしたもの (`source` が `encoded`・`hevc`・`alt`) の時刻**で、エンコードしたものが無ければ元のTSの時刻。
   エンコードしたものがあるのに元のTS (`source=ts`) で開くときは、時刻が合わないので使えません (CM を切ったもの・頭を捨てたもの)。
   `durationMs` もエンコードし終えると出来上がりの長さになるので、`resumeMs` と同じ物差しです (観た割合・残りは2つから出せます)
 - `watchedAt` は末尾まで観た時刻 (ms)。まだなら `null`。`watchedAt` も `resumeMs` も `null` なら未視聴 (画面の一覧の印と同じ)。
@@ -255,7 +266,7 @@
       "codecs": "av01.0.08M.08,opus"
     },
     { "codec": "h264", "way": "stream", "codecs": "avc1.640029,mp4a.40.2" },
-    { "codec": "av1", "way": "stream", "codecs": "av01.0.08M.08,opus" },
+    { "codec": "av1", "way": "stream", "codecs": "av01.0.08M.08,Opus" },
     { "codec": "mpeg2", "way": "raw" }
   ]
 }
@@ -264,18 +275,19 @@
 - `axis` は**時刻の物差し**。`encoded` はエンコード済みのファイルの時刻、`ts` は元の TS の頭を 0 とした時刻
   (エンコード済みが無い録画)。`duration`・下の `from`・ストリームの時刻・字幕 (`captions.json`)・チャプターはどれもこれで数えます
 - `offers` の `way`:
-  - `file` … エンコード済みのファイルそのまま (`api/recordings/<id>/file?source=<source>`)。`codecs` は入れ物の中身 (読めなければ無い)
-  - `stream` … `stream?codec=<codec>` で fragmented MP4。`codecs` は MP4 の中身。エンコード済みと同じコーデックなら詰め替えるだけ
-    (軽い)、違えばエンコード済み (無ければ元の TS) から変換します
+  - `file` … エンコード済みのファイルそのまま (`api/recordings/<id>/file?source=<source>`。`source` は `encoded` / `hevc` / `alt`)。`codecs` は入れ物の中身 (読めなければ無い。H.265 は `hvc1.…`)
+  - `stream` … `stream?codec=<codec>` で fragmented MP4。`codecs` は MP4 の中身。MP4 の Opus は大文字の `Opus` (MP4 の中の名前。Safari は小文字の `opus` を受け取らない)。`file` は Matroska・WebM なので小文字の `opus`。エンコード済みと同じコーデックなら詰め替えるだけ
+    (軽い)、違えばエンコード済み (無ければ元の TS) から変換します。
+    **`hevc` の `stream` は詰め替えだけ**で、H.265 のエンコード済みがある録画にだけ出します (その場の変換では H.265 を作らない。`hvc1` と名乗り、音声は AAC)
   - `raw` … `stream?codec=mpeg2` で元の TS をそのまま。元の TS が残っていて、CM を切らずにエンコードした録画 (か、エンコード済みが無い録画) だけ。エンコードで捨てた頭の長さを覚えていない古い録画には出さない
 - `audios` の `id` を `stream?audio=` に渡します
 - 録っている最中の録画、エンコード済みも元の TS も無い録画は 404
 
 ## 録画を流す `GET /api/recordings/<id>/stream`
 
-`?codec=h264` / `av1` / `mpeg2` (要る。無い・知らない値は 400)、`?from=<秒>` (物差しの上の位置。既定 0)、`?audio=<id>`。**シークは `from` を変えてリクエストし直します。**
+`?codec=h264` / `hevc` / `av1` / `mpeg2` (要る。無い・知らない値は 400。`hevc` は `offers` にあるときだけ)、`?from=<秒>` (物差しの上の位置。既定 0)、`?audio=<id>`。**シークは `from` を変えてリクエストし直します。**
 
-- `h264` / `av1` … fragmented MP4 (`video/mp4`)。塊の時刻 (tfdt) は物差しの時刻のまま書きます (頭を 0 に詰め直さない)。
+- `h264` / `hevc` / `av1` … fragmented MP4 (`video/mp4`)。塊の時刻 (tfdt) は物差しの時刻のまま書きます (頭を 0 に詰め直さない)。
   詰め替えは `from` の手前のキーフレームから、変換は元の TS なら `from` の 1 秒手前の映像から始まります
 - `mpeg2` … 元の TS を `from` の 1 秒手前の映像から流します (`video/mp2t`)。**`X-Denpa-Origin` に物差しの 0 にあたる PTS** (90kHz) を返します。
   物差しの時刻 = (PTS − `X-Denpa-Origin`) を 33 ビットの一周の中で取って 90000 で割ったもの。`audio` は効きません (全部の音声が入る)
@@ -431,13 +443,15 @@ CM 飛ばしの行き先です。観る画面とテレビのアプリが使っ�
   - `flash` は点滅 (0.5 秒ずつ出す・消す)。`ruby` はルビらしい小さな字 (隠したければ隠してよい)。`bold` / `italic` は印だけ (描き分けなくてよい)
   - `drcs` は置き換えられなかった外字。`text` は「〓」で、`drcs` の画像を字の枠いっぱいに `fg` で描く
   - 字の表で空いている点 (規格の空きなど) も「〓」で来ます (`drcs` は付かない)。`text` に U+FFFD は入りません
+  - `joined` は `text` 全体で1つの区画。JIS X 0213 の か゚・æ̀・˩˥ のように2つのコードポイントで1字のもので、
+    その run はこの1字だけです。`text` をまとめて描いてください (Denpa Font が1字に組みます)
 - `drcs` の画像は左上から1画素 `bits` ビットずつ上の桁から詰めたもの (base64)。値 v の濃さは v / (`depth` − 1)。
   いまは denpa が放送の白黒の画像 (16〜36 画素) の斜めを丸め、**濃淡の画像** (`bits` 4・`depth` 16、一辺 64〜256。18x18 の字なら 72x72 で base64 3.5KB ほど) にして送ります。
   濃さを `fg` の不透明度に掛けて塗り、字の枠いっぱいへなめらかに (双線形などで) 引き伸ばしてください。`bits` は 1・2・4・8 のどれでも
   読めるようにしておいてください (前に保存した字幕には白黒の `bits` 1 が入っています)。
   `md5` は放送の元の画像の MD5 (外字の置き換え表に足すときのキー。描くのには使わない)。
   置き換え表で字にできたもの (〓 にならないもの) はここに来ません
-- 色は `#rrggbbaa`。字はデータ放送と同じ丸ゴシック (`GET /api/font/denpa-font.woff2`。Denpa Font) で描きます。Denpa Font に無い字 (JIS X 0213 にだけある字など) は端末の角ゴシックへ落としてください。バージョンの付かない URL は毎回確かめる (`no-cache` + ETag) ので、そのまま取っても古い字は残りません
+- 色は `#rrggbbaa`。字はデータ放送と同じ丸ゴシック (Denpa Font) で描きます。字は 2 つの woff2 に分かれています: 基本の字の `GET /api/font/denpa-font.woff2` と、JIS X 0213 で足された漢字の `GET /api/font/denpa-font-jisx0213.woff2`。ブラウザは `GET /api/font/denpa-font.css` (2 つを同じファミリ名で名乗らせ、後のほうに `unicode-range` を付けたもの) を読めば、要るときだけ後のほうを取ります。Android など 1 つのファイルが欲しいときは、danything/denpa-font のリリースの `denpa-font.ttf` (全部の字) を使ってください。2 つを合わせると字幕に出る字 (JIS X 0213 の1面・2面も) を全部持っていますが、念のため無い字は端末の角ゴシックへ落としてください。バージョンの付かない URL は毎回確かめる (`no-cache` + ETag) ので、そのまま取っても古い字は残りません
 
 ## 番組表の番組の中身 `GET /api/programs/<id>`
 
@@ -561,7 +575,7 @@ CM 飛ばしの行き先です。観る画面とテレビのアプリが使っ�
 ## 観た位置 `POST /api/recordings/<id>/resume`
 
 本文は `{ "at": 秒, "length": 尺の秒, "source": "encoded" }` (`length` は分からなければ省く)。`source` は観ているファイル
-(`files` の `source` と同じ `encoded` / `alt` / `ts`。追っかけは `ts`)。省くと、エンコードしたものがあれば `encoded`、無ければ `ts` とみなします。
+(`files` の `source` と同じ `encoded` / `hevc` / `alt` / `ts`。追っかけは `ts`)。省くと、エンコードしたものがあれば `encoded`、無ければ `ts` とみなします。
 `at` と `length` はそのファイルの時刻です。画面と同じく、頭の少しと
 末尾の 30 秒は「覚えない」(消す) 扱いです。答えは `{ "resume": 覚えた秒 または null, "edge": 30 }`。
 15 秒おきくらいに送れば、ほかの端末 (画面・ほかのテレビ) でも続きから観られます。
@@ -623,7 +637,7 @@ CM 飛ばしの行き先です。観る画面とテレビのアプリが使っ�
 - **探す** `GET /api/clips?q=&service=&day=YYYY-MM-DD&recording=&kind=live|recorded&before=` → `{ "clips": [...], "next": ID または null }`。
   新しい順に 60 件ずつで、続きは `before` に `next` を入れます。`q` は空白で区切った語をすべて含むもの (番組名・局名・字幕)
 - **画像** `GET /api/clips/<id>/image` (AVIF)・`GET /api/clips/<id>/small` (一覧用)。`GET /api/clips/<id>` は1枚の中身。
-  重ねを持つものは出し入れで中身が替わるので、端末に持たせるのは `?v=` にいまの版を付けたときだけです (版は `layers` から作る
+  重ねを持つものは出し入れで中身が替わるので、端末に持たせるのは `?v=` にいまのバージョンを付けたときだけです (バージョンは `layers` から作る
   `コメント・字幕` の順の2文字で、持っていない `-`・重ねていない `0`・重ねている `1`。例 `?v=-1`)。付けなければ毎回取り直させます
 - **元の画像** `GET /api/clips/<id>/layer/frame` (映像。送られた WebP か JPEG のまま)・`/layer/captions`・`/layer/comments`
   (透明な PNG。3枚とも同じ縦横)。重ねを持つものだけで、持っていなければ `404` です。替わらないので `?v=` なしで端末に持たせます
