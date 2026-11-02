@@ -51,14 +51,15 @@
   const ctx = home();
 
   /**
-   * 置き場の使用量。**主 (AV1) を先に出し、あるものだけ括弧に添える。**
+   * 置き場の使用量。**主を先に出し、あるものだけ括弧に添える。**
    *
-   * `ts_size` が持っているのは主のぶんだけなので、両方エンコードした録画では画面の
+   * `ts_size` が持っているのは主のぶんだけなので、いくつもエンコードした録画では画面の
    * 数字と実際に使っている量が食い違っていた (H.264 のほうが大きいことも
    * ある)。「消していいのか、どれだけ空くのか」を1行で読めるようにする
    */
   function sizeLabel(rec: Rec): string {
     const extra = [
+      rec.hevc_size === null ? "" : `H.265 ${size(rec.hevc_size)}`,
       rec.alt_size === null ? "" : `H.264 ${size(rec.alt_size)}`,
       rec.raw_size === null ? "" : `元のTS ${size(rec.raw_size)}`,
     ].filter((s) => s !== "");
@@ -189,13 +190,13 @@
     }
     problems.push(...clipLine(rec, true));
     if (logoUnusable(rec.cm_note) && rec.deleted_at === null) {
-      // 覚えたロゴは設定の「チャンネル」の「CMロゴ」で確かめられる
+      // 覚えたロゴは設定の「受信できるチャンネル」の「CMロゴ」で確かめられる
       problems.push({
         kind: "logo",
         tone: "warning",
         label: "ロゴでCMを判定できませんでした",
         detail:
-          "無音だけで判定。覚えたロゴは設定の「チャンネル」の「CMロゴ」で確かめられます",
+          "無音だけで判定。覚えたロゴは設定の「受信できるチャンネル」の「CMロゴ」で確かめられます",
       });
     }
     return statusLines(activities, problems);
@@ -376,6 +377,7 @@
     data-recording-id={rec.id}
     data-program-id={rec.program_id}
     data-library-path={rec.library_path}
+    data-hevc-path={rec.hevc_path}
     data-alt-path={rec.alt_path}
     data-duration-ms={rec.duration_ms}
     data-cm-ranges={rec.cm_ranges === null

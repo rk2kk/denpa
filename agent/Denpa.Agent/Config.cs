@@ -97,9 +97,27 @@ public sealed class Config(string tunersFile, string channelsFile)
     /// <summary>CECH-ZD1 J がチャンネルごとに覚えたロックの値 (tuners.json の隣。消してよい。Zd1j.cs の <see cref="Zd1jLocks"/>)</summary>
     public string Zd1jLocksFile => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(TunersFile))!, "zd1j-locks.json");
 
+    /// <summary>
+    /// px4-userland の機材に流し込む IT930x のファームウェアを、取ってきて置く場所 (tuners.json の隣。
+    /// イメージには入れない。<see cref="Px4Firmware"/>)
+    /// </summary>
+    public string Px4FirmwareFile => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(TunersFile))!, Px4Firmware.FileName);
+
     public static Config FromEnvironment() => new(
-        Environment.GetEnvironmentVariable("TUNERS_FILE") ?? "/config/tuners.json",
-        Environment.GetEnvironmentVariable("CHANNELS_FILE") ?? "/config/channels.json");
+        Environment.GetEnvironmentVariable("TUNERS_FILE") ?? Path.Combine(DefaultDir(), "tuners.json"),
+        Environment.GetEnvironmentVariable("CHANNELS_FILE") ?? Path.Combine(DefaultDir(), "channels.json"));
+
+    /// <summary>
+    /// 変数が無いときの置き場。Linux はコンテナの <c>/config</c>。Mac と Windows はインストーラと同じ
+    /// <c>DENPA_HOME</c> (既定 <c>~/denpa</c>) の <c>config</c> — 常駐を止めて手で <c>--tune</c> などを流したときに、
+    /// 書けない <c>/config</c> を見に行かず、常駐と同じファイルを使う
+    /// </summary>
+    private static string DefaultDir() => OperatingSystem.IsLinux()
+        ? "/config"
+        : Path.Combine(
+            Environment.GetEnvironmentVariable("DENPA_HOME")
+                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "denpa"),
+            "config");
 
     private static JsonArray ReadArray(string path, string? key)
     {

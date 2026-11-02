@@ -10,7 +10,7 @@
  * - 受信機 API (放送の映像の object・`navigator.receiverDevice`) を、用意できる範囲で用意する。
  *   無いものは「使えない」(null) を返し、何を呼ばれたかを親に知らせる (本物の放送で、どの API が
  *   要るかを見るため)
- * - キー (色ボタン・戻る) を受信機のキーに直す
+ * - キーの色ボタンを受信機のキーに直す。戻る (Backspace・x) と d はアプリを閉じる
  * - **受信機を名乗る** (UA の `Hybridcast/`)。データ放送の受信機の機能 (`navigator.bmlCompat` など) は
  *   `compat.ts` が置く (`bml/` の部品を使うので、別に束ねて後ろに差し込む。ここは渡すものを置くだけ)
  *
@@ -133,8 +133,8 @@ export function shim(init: ShimInit): void {
     if (url.startsWith(denpaTop)) return relayFrom + url.slice(denpaTop.length);
     return url;
   };
-  // 後から作る script・画像・CSS の URL。属性でもプロパティでも入るので両方を見る
   /*
+   * 後から作る script・画像・CSS の URL。属性でもプロパティでも入るので両方を見る。
    * **読み込む要素だけ。** iframe・a の行き先まで中継にすると、中継の返り (sandbox の CSP) の中で script が
    * 動かなくなる。iframe は CSP の frame-src で止めてあり、a で移った先はアプリの外
    */

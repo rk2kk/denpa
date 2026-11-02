@@ -28,7 +28,7 @@ export interface Fields {
 }
 
 /** 保存する形に直した条件。並びは**空なら NULL** (指定なし) にするところまでがここの仕事 */
-export interface Conditions {
+interface Conditions {
   keyword: string;
   ignoreKeyword: string;
   searchFields: string;
@@ -139,7 +139,7 @@ function switchOf(fields: Fields, key: string): boolean | null {
  * (`0 || 2` は 2)。「いちばん譲る」を選べないことになる。
  * 既定はルールの 1 で、手動予約はその上の 2。
  *
- * **空欄と 0 は別物。** `Number('')` は 0 なので、まとめて読むと**箱を空にした
+ * **空欄と 0 は別物。** `Number('')` は 0 なので、まとめて読むと**欄を空にした
  * だけで「いちばん譲る」に落ちる**。無ければ既定に戻す
  */
 export function rulePriority(fields: Fields): number {
@@ -258,7 +258,7 @@ export function ruleValues(conditions: Conditions, form: Fields) {
 }
 
 /** 録画・番組からルールを作るときの元 (`originOf`) */
-export interface Origin {
+interface Origin {
   kind: "recording" | "program";
   id: number;
   name: string;
@@ -318,7 +318,7 @@ function recordingSource(id: number) {
 /**
  * 番組から読む分。**番組表の行が無ければ予約の行から** — 番組表は終わった番組を
  * 消していくが、予約の一覧には済んだものも残る。予約の行はジャンルを持たないので、
- * そのときの下書きはキーワードだけになる
+ * ジャンルで絞ったルールは「このシリーズを既に録っているルール」(`rules.coveringRule`) に挙がらない
  */
 function programSource(id: number) {
   const program = orm()

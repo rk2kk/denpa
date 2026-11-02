@@ -5,12 +5,13 @@
 
 - **PSI** — パケットの切り出し、セクションの組み立て、PAT / PMT / SDT / NIT (`psi`)
 - **PES** — 映像・音声の PES と ADTS (`pes`)
-- **番組表** — EIT[p/f] と EIT[schedule]。ジャンル・音声・拡張形式イベント記述子まで (`eit`)
-- **ARIB の文字** — STD-B24 の8単位符号と ARIB 外字 (`aribtext`、`aribtext-gaiji`)
+- **番組表** — EIT[p/f] と EIT[schedule]。ジャンル・音声・拡張形式イベント・シリーズ記述子まで (`eit`)
+- **ARIB の文字** — STD-B24 の8単位符号 (JIS X 0213 の1面・2面まで) と ARIB 外字 (`aribtext`、`aribtext-gaiji`)
 - **字幕** — STD-B24 の字幕文を、字の置き場所まで決めた JSON にする (`b24caption`、形式は `caption-text`)
-- **データ放送** — DSM-CC のカルーセルからモジュールとファイルを組み立てる (`dsmcc`、`multipart`、`bml`)
+- **データ放送** — DSM-CC のカルーセルからモジュールとファイルを組み立てる (`dsmcc`、`multipart`、`bml`、形式は `bml-protocol`)
 - **Hybridcast の AIT** (`ait`)、**1つの局だけを抜き出す** (`service-filter`)
 - **試験用の TS を組み立てる** — PSI・EIT・字幕・カルーセル・映像と音声 (`synth`、`synth-caption`、`synth-av`)
+- 下で使う道具 — バイト列 (`bytes`)、言語の名前 (`language`)、文字の表 (`b24-tables`)、字幕の外字の画像をなめらかにする (`drcs-smooth`)
 
 依存するパッケージはありません。
 
@@ -59,10 +60,11 @@ if (page !== null) draw(page); // 形式は caption-text.ts の CaptionPage
 
 ## バージョン
 
-0.x の間は、マイナーバージョン (0.1 → 0.2) で互換のない変更をすることがあります。
+[セマンティック バージョニング](https://semver.org/lang/ja/) に従います。互換のない変更 (モジュールや書き出している名前を消す・型や形式を変える) はメジャーバージョンを上げます。
 
 ## ライセンス
 
 MIT。字幕の表とデコードの方法は [libaribcaption](https://github.com/xqq/libaribcaption) (MIT)、
-外字表の一部は [ariblib](https://github.com/youzaka/ariblib) (MIT) から来ています。
+外字表の一部は [ariblib](https://github.com/youzaka/ariblib) (MIT)、
+JIS X 0213 の表は [x0213.org](https://x0213.org/) の対応表 (自由に使ってよいと書かれたもの) から来ています。
 著作権表示は [LICENSE](LICENSE) にあります。

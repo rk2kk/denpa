@@ -19,7 +19,7 @@ const {
 } = await import("./jikkyo");
 
 /*
- * 実況のサーバの受け持ち。コメントは通さず、録画の頭の時刻と局の勢いだけを渡す。
+ * 実況のサーバの受け持ち。コメントは通さず、録画の頭と終わりの時刻と局の勢いだけを渡す。
  * NX-Jikkyo には繋がない (読む関数を差し替える)。返事は自分で作った偽物
  */
 
@@ -138,7 +138,7 @@ describe("RankingRelay", () => {
 });
 
 describe("rankingEntries", () => {
-  test("同じ対応表で局に当てる。系列の地方局・サブチャンネルにも同じ勢い、放送中でない局は載せない", () => {
+  test("同じ対応表で局に当てる。系列の地方局にも同じ勢い。サブチャンネルと放送中でない局は載せない", () => {
     const forces = new Map([
       ["jk6", 36],
       ["jk101", 0],
@@ -146,11 +146,12 @@ describe("rankingEntries", () => {
     expect(
       rankingEntries(
         [
-          { id: 1, type: "GR", service_id: 1048, name: "ＴＢＳ１" },
-          { id: 2, type: "GR", service_id: 2064, name: "ＭＢＳ毎日放送" },
-          { id: 3, type: "GR", service_id: 1024, name: "ＮＨＫ総合１・東京" },
-          { id: 4, type: "BS", service_id: 102, name: "ＮＨＫ　ＢＳ" },
-          { id: 5, type: "GR", service_id: 9999, name: "どこかの局" },
+          { id: 1, type: "GR", service_id: 1048 },
+          { id: 2, type: "GR", service_id: 2064 },
+          { id: 3, type: "GR", service_id: 1024 },
+          { id: 4, type: "BS", service_id: 101 },
+          { id: 6, type: "BS", service_id: 102 },
+          { id: 5, type: "GR", service_id: 9999 },
         ],
         forces,
       ),
@@ -191,6 +192,8 @@ describe("recordingJikkyo", () => {
     ({
       service_id: 7,
       start_at: T,
+      end_at: T + 30 * 60_000,
+      record_to: null,
       ts_head: null,
       record_from: null,
       ...patch,
@@ -206,16 +209,19 @@ describe("recordingJikkyo", () => {
     expect(recordingJikkyo(recording({ ts_head: T - 9_000 }))).toEqual({
       channel: "jk6",
       head: T - 9_000,
+      end: T + 30 * 60_000 + config.endMargin,
     });
     expect(recordingJikkyo(recording({}))).toEqual({
       channel: "jk6",
       head: T - config.startMargin,
+      end: T + 30 * 60_000 + config.endMargin,
     });
     // 取り合いで頭を譲った録画は、使えた区間の頭
-    expect(recordingJikkyo(recording({ record_from: T + 60_000 }))).toEqual({
-      channel: "jk6",
-      head: T + 60_000,
-    });
+    expect(
+      recordingJikkyo(
+        recording({ record_from: T + 60_000, record_to: T + 20 * 60_000 }),
+      ),
+    ).toEqual({ channel: "jk6", head: T + 60_000, end: T + 20 * 60_000 });
   });
 
   test("実況の無い局は null", () => {

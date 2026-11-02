@@ -65,6 +65,28 @@ export const FOLLOW_BYTES_MOST = 120 * 1024 * 1024;
 /** デコーダが転んでも開き直す回数。**これより続けて転んだら諦める** (1コマでも描ければ数え直す) */
 const ERRORS_MOST = 3;
 
+/**
+ * 音のトラックを WASM (`wasm-audio.ts`) で開くときの形式。Opus は OpusHead を添える (dOps から組む)。
+ * **Opus でなければ AAC として開く。** OpusHead を組めなければ null
+ */
+export function audioCodec(
+  track: Fmp4Track,
+): { codec: "aac" | "opus"; config: Uint8Array | null } | null {
+  if (track.codec !== "opus") return { codec: "aac", config: null };
+  const config = opusHead(track.config);
+  return config === null ? null : { codec: "opus", config };
+}
+
+/** 音の1コマをデコーダへ渡す形にする。AAC は ADTS の頭を付ける (デコーダは ADTS として読む)。付けられなければ null */
+export function audioFrame(
+  track: Fmp4Track,
+  data: Uint8Array,
+): Uint8Array | null {
+  if (track.codec === "opus") return data;
+  const head = adtsHeader(track.config, data.length);
+  return head === null ? null : concatBytes([head, data]);
+}
+
 /** 音の1フレームを画面へ渡す関数 (WASM でデコードするのは worker.ts) */
 interface AudioSink {
   /** 開き直す。`opus` のときは OpusHead を渡す。**開けなければ false** */
@@ -92,6 +114,18 @@ interface Pending {
   data: Uint8Array;
 }
 
+/**
+ * 映像のコマの dts が、前のコマ (`expected` = 前の dts + 長さ) から飛んだか (90kHz)。1コマぶんまでは揺れとして許す。
+ * 飛んでいたら受け取る側はキーフレームまで捨てる (`Fmp4Video.queue`)
+ */
+export function jumped(
+  expected: number,
+  dts: number,
+  duration: number,
+): boolean {
+  return Math.abs(dts - expected) > duration + 2;
+}
+
 /** 90kHz に直す */
 function ticks(value: number, timescale: number): number {
   return Math.round((value * CLOCK) / timescale);
@@ -114,7 +148,7 @@ export class Fmp4Video {
   /** 渡した時刻 (µs → performance.now())。デコードするのに掛かった時間を測る */
   private readonly started = new Map<number, number>();
   private errors = 0;
-  /** 追っかけで抱えきれなくなったか。**次の init (リクエストし直し) まで、届いたものは捨てる** */
+  /** 追っかけで抱えきれなくなったか。**次の reset (リクエストし直し) まで、届いたものは捨てる** */
   private overflowed = false;
   /** 圧縮のまま持っているバイト数 (`FOLLOW_BYTES_MOST`) */
   private pendingBytes = 0;
@@ -188,12 +222,9 @@ export class Fmp4Video {
           key: sample.key,
           data: sample.data,
         });
-      } else if (track.codec === "opus") {
-        this.host.audio.push(sample.data, pts);
       } else {
-        const head = adtsHeader(track.config, sample.data.length);
-        if (head !== null)
-          this.host.audio.push(concatBytes([head, sample.data]), pts);
+        const frame = audioFrame(track, sample.data);
+        if (frame !== null) this.host.audio.push(frame, pts);
       }
     }
   }
@@ -204,12 +235,8 @@ export class Fmp4Video {
     const video = tracks.find((t) => t.kind === "video") ?? null;
     const audio = tracks.find((t) => t.kind === "audio") ?? null;
     if (audio !== null) {
-      const opus = audio.codec === "opus";
-      const config = opus ? opusHead(audio.config) : null;
-      if (
-        (opus && config === null) ||
-        !this.host.audio.open(opus ? "opus" : "aac", config)
-      ) {
+      const open = audioCodec(audio);
+      if (open === null || !this.host.audio.open(open.codec, open.config)) {
         this.host.fail("音声を再生できません");
         return;
       }
@@ -268,7 +295,7 @@ export class Fmp4Video {
     // 時刻が飛んだ (サーバが詰まって捨てた)。**次のキーフレームまで捨てる** (上の説明)
     if (
       this.expected !== null &&
-      Math.abs(item.dts - this.expected) > item.duration + 2
+      jumped(this.expected, item.dts, item.duration)
     )
       this.needKey = true;
     this.expected = item.dts + item.duration;
@@ -428,10 +455,19 @@ export class Fmp4Video {
       this.draw(this.frames.shift() as VideoFrame);
   }
 
-  /** 1コマ描いて閉じる。**大きさはフレームに合わせる** (見せる大きさ。縦横比はフレームが持っている) */
+  /**
+   * 1コマ描いて閉じる。**大きさは pasp を掛けた幅** (`Fmp4Track.displayWidth`)。無ければフレームに合わせる。
+   *
+   * **フレームの見せる大きさ (`displayWidth`) は当てにしない。** Safari の VideoDecoder は画素の数を
+   * そのまま返し、H.264 の SAR も、VideoDecoderConfig の `displayAspectWidth` も見ない (WebKit の
+   * `WebCodecsVideoDecoder.cpp`)。1440x1080 の放送が 4:3 に縮んで出る。AV1 は映像の中に SAR が無いので、
+   * どのブラウザでも pasp を読まないと分からない。MPEG-2 の経路も、見せる幅はこちらで出している (worker.ts)
+   */
   private draw(frame: VideoFrame): void {
-    const width = frame.displayWidth;
-    const height = frame.displayHeight;
+    const video = this.video;
+    const width = video?.displayWidth ?? frame.displayWidth;
+    const height =
+      video?.displayWidth === undefined ? frame.displayHeight : video.height;
     if (this.canvas.width !== width || this.canvas.height !== height) {
       this.canvas.width = width;
       this.canvas.height = height;
@@ -441,7 +477,7 @@ export class Fmp4Video {
     frame.close();
     if (this.lastPts !== null) {
       const gap = pts - this.lastPts;
-      if (gap > 0 && gap < 3 * FRAME * 2) this.frameTicks = gap;
+      if (gap > 0 && gap < 6 * FRAME) this.frameTicks = gap;
     }
     this.lastPts = pts;
     this.current = pts;

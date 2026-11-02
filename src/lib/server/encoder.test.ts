@@ -12,6 +12,8 @@ import { join } from "node:path";
 
 import {
   buildArgs,
+  combineProgress,
+  encodeOrder,
   encodeProgress,
   expectedFrames,
   failureReason,
@@ -20,6 +22,7 @@ import {
   inputSkip,
   readInputPos,
 } from "./encoder";
+import { hwBitrate } from "./hwenc";
 
 function argValue(args: string[], key: string): string | undefined {
   const i = args.indexOf(key);
@@ -37,15 +40,15 @@ describe("録画エンコードの引数", () => {
 
   // 上流の既定 preset はバージョンで変わる (encoder.videoArgs の実測)。書いてあることを守る。
   // **10 に戻さない** — M10 以上はシーンの変わり目でブロックノイズが出る
-  // (docs/encode.md「preset は 9・crf 35 (値は書いておく)」)
+  // (docs/encode.md「preset は 8・crf 37 (値は書いておく)」)
   test("AV1 の preset と crf は書いてある", () => {
     const args = buildArgs("/in.m2ts", "/out.mkv", 1, null);
-    expect(argValue(args, "-preset")).toBe("9");
-    expect(argValue(args, "-crf")).toBe("35");
+    expect(argValue(args, "-preset")).toBe("8");
+    expect(argValue(args, "-crf")).toBe("37");
   });
 
   /*
-   * **H.264 の crf は AV1 と同じ画質になる値。** 24 だった頃は、実写の忙しい
+   * **H.264 の crf は AV1 (前の preset 9・crf 35) と同じ画質になる値。** 24 だった頃は、実写の忙しい
    * ところで AV1 より 0.94dB 低く、そのぶん小さいだけだった。実測の表は docs/encode.md「H.264 は crf 23」
    */
   test("H.264 の crf は AV1 と同じ画質の 23", () => {
@@ -160,23 +163,23 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・頭�
     expect(args).toContain("-preset");
   });
 
-  test("GPU でエンコードするときはデバイスを先に開け、CPU で作った nv12 を渡す", () => {
-    // QSV は自分で上げるので hwupload は無い。画質は ICQ で、コーデックが違っても同じ 24
-    for (const codec of ["av1", "h264"] as const) {
+  test("GPU でエンコードするときはデバイスを先に開け、CPU で作った nv12 を GPU へ上げて渡す", () => {
+    // 画質は H.264 が CQP の qp 24、AV1 が ICQ 26。録画はどちらも品質寄りの段 (1)
+    for (const [codec, flag, value] of [
+      ["av1", "-global_quality:v", "26"],
+      ["h264", "-qp", "24"],
+      ["av1", "-compression_level:v", "1"],
+      ["h264", "-compression_level:v", "1"],
+    ] as const) {
       const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, codec, {
-        hardware: { device: "/dev/dri/renderD129", kind: "qsv" },
+        hardware: { device: "/dev/dri/renderD128", kind: "vaapi" },
       });
       expect(args.indexOf("-init_hw_device")).toBeLessThan(args.indexOf("-i"));
-      expect(argValue(args, "-init_hw_device")).toBe(
-        "qsv=hw:hw,child_device=/dev/dri/renderD129",
-      );
-      expect(args).toContain(`${codec}_qsv`);
-      expect(argValue(args, "-global_quality")).toBe("24");
-      expect(argValue(args, "-vf")).toBe("bwdif=mode=send_frame,format=nv12");
+      expect(args).toContain(`${codec}_vaapi`);
+      expect(argValue(args, flag)).toBe(value);
       expect(args).not.toContain("libx264");
       expect(args).not.toContain("libsvtav1");
     }
-    // VA-API は上げるところまで自分でやる
     const va = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
       hardware: { device: "/dev/dri/renderD128", kind: "vaapi" },
     });
@@ -188,11 +191,65 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・頭�
       "bwdif=mode=send_frame,format=nv12,hwupload",
     );
     expect(va).toContain("h264_vaapi");
-    expect(argValue(va, "-rc_mode")).toBe("ICQ");
+    expect(argValue(va, "-rc_mode")).toBe("CQP");
     // 渡さなければソフトウェア。GPU のデバイスも開けない
     expect(buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264")).not.toContain(
       "-init_hw_device",
     );
+  });
+
+  test("Rockchip MPP はデバイスを開けず、映像の高さとコマ数でビットレートを決める", () => {
+    const mpp = (height: number | undefined, smoothMotion: boolean) =>
+      buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
+        hardware: { device: "/dev/mpp_service", kind: "rkmpp" },
+        smoothMotion,
+        ...(height === undefined ? {} : { height }),
+        displaySize: { width: 1920, height: 1080 },
+      });
+    const hd = mpp(1080, false);
+    expect(hd).not.toContain("-init_hw_device");
+    expect(hd).toContain("h264_rkmpp");
+    expect(argValue(hd, "-rc")).toBe("avbr");
+    // インタレ解除と引き伸ばしは CPU のまま
+    expect(argValue(hd, "-vf")).toBe(
+      "bwdif=mode=send_frame,scale=1920:1080,setsar=1,format=nv12",
+    );
+    expect(argValue(hd, "-b:v")).toBe(
+      String(hwBitrate("h264", { height: 1080, smooth: false })),
+    );
+    expect(argValue(mpp(1080, true), "-b:v")).toBe(
+      String(hwBitrate("h264", { height: 1080, smooth: true })),
+    );
+    expect(argValue(mpp(480, true), "-b:v")).toBe(
+      String(hwBitrate("h264", { height: 480, smooth: true })),
+    );
+    // 高さが分からなければ 1080 の値
+    expect(argValue(mpp(undefined, false), "-b:v")).toBe(
+      String(hwBitrate("h264", { height: 1080, smooth: false })),
+    );
+  });
+
+  test("NVENC はデバイスを開けず GPU の番号で選び、映像の高さとコマ数でビットレートを決める", () => {
+    for (const codec of ["av1", "h264"] as const) {
+      const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, codec, {
+        hardware: { device: "/dev/nvidia1", kind: "nvenc", gpu: 1 },
+        smoothMotion: false,
+        height: 720,
+        displaySize: { width: 1280, height: 720 },
+      });
+      expect(args).not.toContain("-init_hw_device");
+      expect(args).toContain(`${codec}_nvenc`);
+      expect(argValue(args, "-gpu")).toBe("1");
+      // ICQ (-global_quality) は NVENC が断るので渡さない
+      expect(args).not.toContain("-global_quality:v");
+      expect(argValue(args, "-rc")).toBe("vbr");
+      expect(argValue(args, "-b:v")).toBe(
+        String(hwBitrate(codec, { height: 720, smooth: false })),
+      );
+      expect(argValue(args, "-vf")).toBe(
+        "bwdif=mode=send_frame,scale=1280:720,setsar=1,format=nv12",
+      );
+    }
   });
 
   test("字幕は1本だけ。入力も1回しか開かない", () => {
@@ -233,12 +290,13 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・頭�
     expect(argValue(args, "-c:s")).toBe("copy");
   });
 
-  test("チャプターだけならそれが2つ目の入力になる", () => {
+  test("チャプターはエンコードするときには入れない (エンコードしたあとに書き足す)", () => {
     const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
-      chaptersFile: "/tmp/c.txt",
+      keyframes: "scene",
     });
-    expect(args).toContain("/tmp/c.txt");
-    expect(argValue(args, "-map_chapters")).toBe("1");
+    expect(args).not.toContain("-map_chapters");
+    // 入力は録画の TS だけ
+    expect(args.filter((a) => a === "-i")).toHaveLength(1);
   });
 
   test("字幕は放送の ARIB 字幕を局で名指しして写す", () => {
@@ -299,7 +357,7 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・頭�
   });
 
   /**
-   * 地上波HDは 1440x1080 の横長画素で送られてくる。添え書きを見ない
+   * 地上波HDは 1440x1080 の横長画素で送られてくる。
    * 添え書きを見ないプレイヤー (実機の Android) では 4:3 に潰れるので、正方形に直して出す。
    * **大きさは測って渡す** — `iw*sar` と式で書くと、SAR が読めない素材で
    * 幅が 0 になって落ちる
@@ -547,17 +605,53 @@ describe("CM を切るときのキーフレーム", () => {
     expect(argValue(args, "-vf")).not.toContain("scdet");
   });
 
-  test("QSV は指定しないと IDR にならない", () => {
+  test("VA-API は印だけで IDR になるので、IDR の指定を足さない", () => {
     const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
       keyframes: "scene",
-      hardware: { kind: "qsv", device: "/dev/dri/renderD128" },
+      hardware: { kind: "vaapi", device: "/dev/dri/renderD128" },
     });
-    expect(argValue(args, "-forced_idr")).toBe("1");
+    expect(args).not.toContain("-forced_idr");
+    expect(args).not.toContain("-forced-idr");
+    /*
+     * B フレームのピラミッド (`-b_depth 2`) と一緒でも印は渡す。FFmpeg は印の付いたコマを IDR にし、
+     * その前で B の並びを閉じる (hwenc.hwArgs の説明)
+     */
+    expect(argValue(args, "-b_depth")).toBe("2");
+    expect(argValue(args, "-force_key_frames:v")).toBe("scd_metadata");
     // 印は GPU へ上げる前に付ける
     const filter = argValue(args, "-vf") ?? "";
     expect(filter.indexOf("scdet@key")).toBeLessThan(
       filter.indexOf("format=nv12"),
     );
+  });
+
+  test("NVENC は指定しないと IDR にならない", () => {
+    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
+      keyframes: [120.5],
+      hardware: { kind: "nvenc", device: "/dev/nvidia0", gpu: 0 },
+    });
+    expect(argValue(args, "-forced-idr")).toBe("1");
+  });
+
+  test("H.265 も同じ指定で境目にキーフレームを置く (NVENC は IDR の指定、VA-API は印だけ)", () => {
+    const nvenc = buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {
+      keyframes: "scene",
+      hardware: { kind: "nvenc", device: "/dev/nvidia0", gpu: 0 },
+    });
+    expect(nvenc).toContain("hevc_nvenc");
+    expect(argValue(nvenc, "-forced-idr")).toBe("1");
+    const vaapi = buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {
+      keyframes: [120.5],
+      hardware: { kind: "vaapi", device: "/dev/dri/renderD128" },
+    });
+    expect(vaapi).toContain("hevc_vaapi");
+    expect(argValue(vaapi, "-force_key_frames:v")).toBe("120.499");
+  });
+
+  test("H.265 はソフトウェアでエンコードしない (呼ぶ側の誤りなので投げる)", () => {
+    expect(() =>
+      buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {}),
+    ).toThrow();
   });
 
   test("切らないなら何も足さない", () => {
@@ -568,7 +662,6 @@ describe("CM を切るときのキーフレーム", () => {
 });
 
 /*
- *
  * 片方だけ「短いから捨てない」と判断すると、そのぶん字幕がずれる。
  * 判断そのものを1箇所に置いてある
  */
@@ -582,5 +675,79 @@ describe("頭から捨てる長さ", () => {
     expect(headSkip(0)).toBe(0);
     expect(headSkip(undefined)).toBe(0);
     expect(headSkip(Number.NaN)).toBe(0);
+  });
+});
+
+describe("encodeOrder", () => {
+  test("H.265 を選んでいれば1本目 (CM を探し、切れるかを決める)", () => {
+    expect(encodeOrder(["av1", "hevc", "h264"], true)).toEqual([
+      "hevc",
+      "av1",
+      "h264",
+    ]);
+  });
+
+  test("H.265 をエンコードできる GPU が無ければ外す", () => {
+    expect(encodeOrder(["av1", "hevc"], false)).toEqual(["av1"]);
+    expect(encodeOrder(["hevc"], false)).toEqual([]);
+  });
+
+  test("H.265 が無ければ選んだ順", () => {
+    expect(encodeOrder(["av1", "h264"], true)).toEqual(["av1", "h264"]);
+  });
+});
+
+describe("combineProgress", () => {
+  const part = (percent: number, etaMs: number | null, log = "frame: 1") => ({
+    percent,
+    etaMs,
+    log,
+  });
+
+  test("1本だけならそのまま", () => {
+    const one = part(0.4, 1000);
+    expect(combineProgress(new Map([["av1", one]]), 1)).toEqual(one);
+  });
+
+  test("同時に走るコーデックの平均。残り時間はいちばん遅いもの", () => {
+    const got = combineProgress(
+      new Map([
+        ["av1", part(0.2, 80_000)],
+        ["h264", part(0.6, 20_000)],
+      ]),
+      2,
+    );
+    expect(got.percent).toBeCloseTo(0.4);
+    expect(got.etaMs).toBe(80_000);
+    expect(got.log).toBe("AV1: frame: 1 / H.264: frame: 1");
+  });
+
+  test("エンコードし終えたものは 1 で数え、残り時間には入れない", () => {
+    const got = combineProgress(
+      new Map([
+        ["av1", part(0.5, 10_000)],
+        ["h264", part(1, null)],
+      ]),
+      2,
+    );
+    expect(got.percent).toBeCloseTo(0.75);
+    expect(got.etaMs).toBe(10_000);
+  });
+
+  test("まだ始まっていない (枠を待っている) ものは 0 で数え、残り時間は出さない", () => {
+    const got = combineProgress(new Map([["av1", part(0.6, 10_000)]]), 3);
+    expect(got.percent).toBeCloseTo(0.2);
+    expect(got.etaMs).toBeNull();
+  });
+
+  test("速さが読めないものがあれば残り時間は出さない", () => {
+    const got = combineProgress(
+      new Map([
+        ["av1", part(0.5, 10_000)],
+        ["h264", part(0.1, null)],
+      ]),
+      2,
+    );
+    expect(got.etaMs).toBeNull();
   });
 });

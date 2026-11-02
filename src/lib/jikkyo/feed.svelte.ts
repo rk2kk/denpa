@@ -1,0 +1,241 @@
+/**
+ * **流すコメントを、いまの放送時刻に合わせて出す** (ライブ・追っかけ・観る画面で同じ 1 つ)。
+ *
+ * 画面は放送時刻 `W` (いま映しているコマの放送時刻。ライブは `clock` の通知、録画は `ts_head` と再生位置から) を
+ * 渡して `take` を呼び、返ってきたものを流す (`JikkyoLayer`)。出し方は `cursor.ts`。
+ * コメントの出どころ (NX-Jikkyo・過去ログ API) と控えはここが持つ。どこから埋めるかは docs/watch.md の「実況のコメント」
+ */
+import { type PostStyle, postStyle } from "./command";
+import type { Comment } from "./comments";
+import { Cursor, type Take } from "./cursor";
+import { fetchKakolog, KAKOLOG_LAG } from "./kakolog";
+import { FORCE_SPAN, LIST_SPAN } from "./list";
+import { compileNg } from "./ng";
+import { NxJikkyo } from "./nx";
+import type { PostResult } from "./post";
+
+/** 過去ログ API が読めなかったとき、もう一度試すまで */
+const KAKOLOG_RETRY = 60_000;
+/** 過去ログにまだ入りきっていないところを取り足す間隔 (過去ログは 5 分おきに集めている) */
+const KAKOLOG_REFRESH = 5 * 60_000;
+
+/** 形式のずれは端末ごとに 1 回だけ言う (NX-Jikkyo や過去ログ API のバージョンが変わったときに気付けるように) */
+let warned = false;
+function warnShape(what: string): void {
+  if (warned) return;
+  warned = true;
+  console.warn(
+    `[jikkyo] ${what}。実況の取得先のバージョンが変わったかもしれません (読めたぶんだけ流します)`,
+  );
+}
+
+export class JikkyoFeed {
+  /** 読めないか。読めなくなったら ⚙ の行に「(いまは読めません)」を添える (通知は出さない) */
+  down = $state(false);
+
+  /** NG ワードを含むか (世帯の設定)。控えには残し、出すときに外す (語を変えたらすぐ効く。取り直さない) */
+  private ng: (text: string) => boolean = () => false;
+  /** 1 件ずつの NG の判定の控え。一覧は 0.25 秒ごとに同じものを読み直すので、そのたびに字をそろえ直さない */
+  private ngSeen = new WeakMap<Comment, boolean>();
+  private readonly cursor = new Cursor();
+  private nx: NxJikkyo | null = null;
+  private channel: string | null = null;
+  private active = false;
+  /** 読めなくなっている出どころ (`nx`・`kakolog`) */
+  private readonly failing = new Set<string>();
+  private kakologTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 過去ログの取得の回。止めたら進め、前の回の返事を捨てる */
+  private kakologRun = 0;
+
+  constructor(
+    /** NX-Jikkyo の WebSocket に繋ぐか (ライブと追っかけ) */
+    private readonly live: boolean,
+  ) {}
+
+  /**
+   * 局を替えた・オン/オフを替えた。替わったら繋ぎ直す。局が替わったら控えも捨てる。
+   * @param channel 実況のチャンネル。実況の無い局・世帯の設定がオフなら null
+   * @param on 流すか (端末の設定がオンのとき)
+   */
+  set(channel: string | null, on: boolean): void {
+    const active = on && channel !== null;
+    if (channel === this.channel && active === this.active) return;
+    if (channel !== this.channel) this.cursor.reset();
+    else this.cursor.pause();
+    this.channel = channel;
+    this.active = active;
+    this.stopSources();
+    if (!active || !this.live || channel === null) return;
+    this.nx = new NxJikkyo(channel, {
+      comments: (comments) => this.cursor.receive(comments),
+      state: (ok) => this.mark("nx", ok),
+      odd: warnShape,
+    });
+    this.nx.start();
+  }
+
+  /**
+   * NX-Jikkyo で 1 回だけ遡る (録画中の追っかけ)。いまの放送時刻 `w` が過去ログにまだ入っていない新しいところ
+   * (10 分以内) に来たときだけ
+   */
+  backfill(w: number, now = Date.now()): void {
+    if (w > now - KAKOLOG_LAG) this.nx?.backfill(now);
+  }
+
+  /**
+   * 過去ログ API から `from` から `to()` までを取る。録画は開いたときに 1 回 (`every` を省く)、録画中の追っかけは
+   * `every` ごとに新しいところを取り足す。取ったところは控えが覚えているので、同じ区間を 2 度訊かない。
+   * **10 分より新しいところは、取っても「埋めた」ことにしない** (過去ログにまだ入りきっていない)。録り終えてすぐ開いた録画は、
+   * そこが埋まるまで `KAKOLOG_REFRESH` ごとに取り足す。読めなければ「いまは読めない」にして、60 秒後にもう一度試す
+   */
+  kakolog(from: number, to: () => number, every?: number): void {
+    this.stopKakolog();
+    const channel = this.channel;
+    if (!this.active || channel === null) return;
+    const run = ++this.kakologRun;
+    const step = async (): Promise<void> => {
+      let ok = true;
+      const now = Date.now();
+      const end = Math.min(to(), now);
+      // ここより新しいところは、まだ過去ログに入りきっていない
+      const settled = now - KAKOLOG_LAG;
+      for (const [start, stop] of this.cursor.store.missing(from, end)) {
+        try {
+          const got = await fetchKakolog(channel, start, stop);
+          if (run !== this.kakologRun) return;
+          if (got.odd > 0) warnShape("過去ログの返事の形式が一部違います");
+          this.cursor.receive(got.comments, [start, Math.min(stop, settled)]);
+        } catch {
+          ok = false;
+          break;
+        }
+      }
+      if (run !== this.kakologRun) return;
+      this.mark("kakolog", ok);
+      const wait = !ok
+        ? KAKOLOG_RETRY
+        : (every ?? (end > settled ? KAKOLOG_REFRESH : undefined));
+      if (wait !== undefined)
+        this.kakologTimer = setTimeout(() => void step(), wait);
+    };
+    void step();
+  }
+
+  /** NX-Jikkyo に書き込めるか (繋がっていて、前の書き込みの返事を待っていない) */
+  get writable(): boolean {
+    return this.nx?.ready === true;
+  }
+
+  /**
+   * NX-Jikkyo に書き込む (確かめるのは呼ぶ側。`post.ts`)。送れたら、いまの放送時刻 `w` に置いてすぐ流す
+   * (戻ってきた同じものは `nx.ts` が 1 回だけ捨てる)。`w` は返事を受けたときに読み、読めなければ送ったときの値に置く
+   * (どちらも無いと、送れたものがどこにも流れない)
+   */
+  async post(
+    text: string,
+    style: PostStyle,
+    w: () => number | null,
+  ): Promise<PostResult> {
+    const nx = this.nx;
+    if (nx === null) return "closed";
+    const before = w();
+    const result = await nx.post(text, style);
+    const at = w() ?? before;
+    if (result === "sent" && nx === this.nx && at !== null) {
+      const own = postStyle(style);
+      this.cursor.receive([
+        Object.keys(own).length > 0
+          ? { at, text, style: own, mine: true }
+          : { at, text, mine: true },
+      ]);
+    }
+    return result;
+  }
+
+  /** 出どころが読めるか。どれかが読めなければ `down` */
+  private mark(source: string, ok: boolean): void {
+    if (ok) this.failing.delete(source);
+    else this.failing.add(source);
+    this.down = this.failing.size > 0;
+  }
+
+  /** 重ねるのを止めた (データ放送を出した・オフにした)。戻ったときに、止めていた間のぶんをまとめて流さない */
+  pause(): void {
+    this.cursor.pause();
+  }
+
+  /** NG ワードを替えた。次に出すものから効く */
+  setNg(words: readonly string[]): void {
+    this.ng = compileNg(words);
+    this.ngSeen = new WeakMap();
+  }
+
+  /**
+   * いまの放送時刻 `w` までに書かれたもののうち、まだ流していないもの。流していないときは何も返さない。
+   * 録画は枠の外から流し始めるぶん、`ahead` ms 先まで出す (`cursor.ts`)。NG ワードを含むものは外す (自分の書き込みも)
+   */
+  take(w: number, ahead = 0): Take {
+    if (!this.active) return { comments: [], jumped: false };
+    const take = this.cursor.take(w, ahead);
+    const comments = take.comments.filter((c) => !this.isNg(c));
+    return { comments, jumped: take.jumped };
+  }
+
+  /**
+   * コメントの一覧に並べるもの。いまの放送時刻 `w` までの `LIST_SPAN` に書かれたもののうち、新しいほうから `limit` 件
+   * (時刻の順)。`take` と違って何も消費しないので、何度読んでもよい。NG ワードを含むものは外す
+   */
+  recent(w: number, limit: number): Comment[] {
+    if (!this.active) return [];
+    return this.cursor.store.latest(
+      w - LIST_SPAN,
+      w,
+      limit,
+      (c) => !this.isNg(c),
+    );
+  }
+
+  /**
+   * コメントの一覧の「この先」(録画だけ)。いまの放送時刻 `w` より後、`until` までに書かれたもののうち、古いほうから `limit` 件。
+   * `recent` と同じく何も消費せず、NG ワードを含むものは外す
+   */
+  ahead(w: number, until: number, limit: number): Comment[] {
+    if (!this.active || until <= w) return [];
+    return this.cursor.store.earliest(w, until, limit, (c) => !this.isNg(c));
+  }
+
+  private isNg(comment: Comment): boolean {
+    let hit = this.ngSeen.get(comment);
+    if (hit === undefined) {
+      hit = this.ng(comment.text);
+      this.ngSeen.set(comment, hit);
+    }
+    return hit;
+  }
+
+  /** 勢い。いまの放送時刻 `w` までの 1 分に書かれたものの数 (NG ワードのものも数える) */
+  force(w: number): number {
+    if (!this.active) return 0;
+    return this.cursor.store.count(w - FORCE_SPAN, w);
+  }
+
+  /** 画面を閉じた。繋いでいるものを閉じる */
+  close(): void {
+    this.active = false;
+    this.stopSources();
+  }
+
+  private stopKakolog(): void {
+    this.kakologRun++;
+    if (this.kakologTimer !== null) clearTimeout(this.kakologTimer);
+    this.kakologTimer = null;
+  }
+
+  private stopSources(): void {
+    this.nx?.close();
+    this.nx = null;
+    this.stopKakolog();
+    this.failing.clear();
+    this.down = false;
+  }
+}

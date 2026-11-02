@@ -26,7 +26,7 @@ public class B25Tests
         public List<byte[]> Asked { get; } = [];
         public Func<byte[], Exception?> Fail { get; set; } = _ => null;
         public int Code { get; set; } = 0x0200;
-        /// <summary>覚えていた答えを返した・錠を待った、と言う (選局の内訳の記録)</summary>
+        /// <summary>覚えていた答えを返した・ロックを待った、と言う (選局の内訳の記録)</summary>
         public bool Cached { get; set; }
         public long WaitedMs { get; set; }
 
@@ -50,7 +50,6 @@ public class B25Tests
         private readonly Dictionary<int, int> _counters = [];
         public List<byte> Wire { get; } = [];
         public List<byte> Plain { get; } = [];
-        public int Scrambled { get; private set; }
 
         private byte Counter(int pid)
         {
@@ -134,7 +133,6 @@ public class B25Tests
                 cipher.SetKeys(Key(g, even: false), Key(g, even: true));
                 if (start < 188) cipher.Encrypt(even, packet.AsSpan(start));
                 packet[3] |= (byte)(even ? 0x80 : 0xC0);
-                Scrambled++;
             }
             Wire.AddRange(packet);
             return this;
@@ -232,10 +230,10 @@ public class B25Tests
 
     /// <summary>
     /// **カードに渡すのはセクションの頭 8 バイトと CRC を除いた中身。** libaribb25 と同じ切り方で、
-    /// 拠点を跨いで鍵を貰う線がこれを運んでいる。変わると古いエージェントと通じなくなる
+    /// 拠点を跨いで鍵を貰うときもこれを運ぶ。変わると古いエージェントと通じなくなる
     /// </summary>
     [Test]
-    public async Task カードに渡すのは節の頭とCRCを除いた中身()
+    public async Task カードに渡すのはセクションの頭とCRCを除いた中身()
     {
         var cards = new Cards();
         Run(new Descrambler(cards), Channel().Ecm(EcmPid, 3).Videos(3, 3).Wire.ToArray());
@@ -246,7 +244,7 @@ public class B25Tests
 
     /// <summary>セクションはパケットを跨ぐし、1つのパケットに2つ入ることもある (pointer_field の手前は前のセクションの尻尾)</summary>
     [Test]
-    public async Task パケットを跨ぐ節も_1つのパケットに並ぶ節も読む()
+    public async Task パケットを跨ぐセクションも_1つのパケットに並ぶセクションも読む()
     {
         // 1つ目の ECM (243 バイト) は2つのパケットを跨ぎ、2つ目のパケットにはその尻尾と2つ目の ECM が並ぶ
         byte[] body = [4, .. Enumerable.Range(0, 230).Select(i => (byte)i)];
@@ -371,8 +369,7 @@ public class B25Tests
     [Test]
     public async Task 鍵が来るまで溜めて_来たら頭から復号する()
     {
-        var before = Channel().Videos(30, 1);
-        var ts = before.Ecm(EcmPid, 1).Videos(5, 1);
+        var ts = Channel().Videos(30, 1).Ecm(EcmPid, 1).Videos(5, 1);
         var descrambler = new Descrambler(new Cards());
         var output = new ArrayBufferWriter<byte>();
 
@@ -608,7 +605,6 @@ public class B25Tests
         await Assert.That(descrambler.LastError!).Contains("0x8901");
     }
 
-
     /// <summary>**PMT より前に来た掛かったパケットも、溜めておいて、揃ったところで復号する**</summary>
     [Test]
     public async Task PMTより前に来たパケットも復号する()
@@ -752,7 +748,7 @@ public class B25Tests
     /// ワンセグを含む)。番組の PMT は B-CAS と別の方式の CA 記述子も持ち、その方式の ECM はカードが断る。
     ///
     /// <para>
-    /// 本番 (2026-10-26) では、先回りで拾ったその ECM をカードに聞き、断られるまでの 0.4 秒ほど止まっていた
+    /// 本番 (2026-10-26) では、先回りで読んだその ECM をカードに聞き、断られるまでの 0.4 秒ほど止まっていた
     /// (選局から送り出しまで毎回 1 秒ほど)。止まっている時間はパケットの数では見えないので、断る ECM を
     /// 聞かないことと、流し始める位置が前の決め方 (PAT → PMT → その後の ECM を聞く) より後ろにならないことを確かめる
     /// </para>
@@ -809,7 +805,7 @@ public class B25Tests
 
     /// <summary>
     /// **ES の PES の頭を ECM と取り違えない。** PES は <c>00 00 01</c> で始まるので、セクションとして読むと
-    /// pointer_field 0・table_id 0x00 になる。後ろに 0x82 が並んでいても拾わない
+    /// pointer_field 0・table_id 0x00 になる。後ろに 0x82 が並んでいても ECM として読まない
     /// </summary>
     [Test]
     public async Task 掛かっていないPESの頭をECMと読まない()
@@ -833,7 +829,7 @@ public class B25Tests
 
     /// <summary>
     /// **鍵の要らない利用者だけなら、カードに聞かず、溜めずにそのまま流す。** 番組表・ロゴ・スキャンが
-    /// ライブ視聴や録画とカードの錠を取り合わない
+    /// ライブ視聴や録画とカードのロックを取り合わない
     /// </summary>
     [Test]
     public async Task 鍵の要らない利用者だけならカードに聞かない()
@@ -890,7 +886,7 @@ public class B25Tests
 
     /// <summary>
     /// **溜めていた間の内訳を1行に出せる** (選局して最初に送り出したときの記録。docs/stream.md「本番の記録で割る」)。
-    /// そろった順と、鍵の相手に聞いた回数・覚えた答え・未契約・錠の待ち
+    /// そろった順と、鍵の相手に聞いた回数・覚えた答え・未契約・ロックの待ち
     /// </summary>
     [Test]
     public async Task 溜めていた間の内訳を数える()

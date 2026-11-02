@@ -1,8 +1,9 @@
 import { SKIP } from "#lib/ts/watch.js";
 
 /**
- * 再生画面のキー操作。**観る画面と追っかけで同じ割り当てにする** (観ているものは同じなので、
- * エンコードの前後で押し方を変えない)。
+ * 再生画面のキー操作。**3画面 (ライブ・追っかけ・観る画面) で同じ割り当てにする** (観ているものは同じなので、
+ * 画面やエンコードの前後で押し方を変えない)。その画面でできないことは、押しても何も起きない (速さはライブの
+ * 追っかけ中だけ、など。決めるのは画面のほう)。
  *
  * **修飾キー付きは取らない。** Ctrl+C (コピー) を `c` (字幕) として横取りして
  * いた頃は、観ながら番組名や URL を写せなかった。Ctrl+F (検索) → 全画面、
@@ -26,6 +27,8 @@ export interface PlayerKeys {
   stepSpeed?: (direction: number) => void;
   /** m */
   toggleMute?: () => void;
+  /** ↑ ↓ (音量。`volume.svelte.ts` の `step`) */
+  stepVolume?: (direction: number) => void;
 }
 
 export function playerKeys(
@@ -42,7 +45,7 @@ export function playerKeys(
     )
       return;
 
-    const { stepSpeed } = actions;
+    const { stepSpeed, stepVolume } = actions;
     const map: Record<string, (() => void) | undefined> = {
       " ": actions.togglePlay,
       k: actions.togglePlay,
@@ -54,6 +57,8 @@ export function playerKeys(
       ">": stepSpeed === undefined ? undefined : () => stepSpeed(1),
       "<": stepSpeed === undefined ? undefined : () => stepSpeed(-1),
       m: actions.toggleMute,
+      ArrowUp: stepVolume === undefined ? undefined : () => stepVolume(1),
+      ArrowDown: stepVolume === undefined ? undefined : () => stepVolume(-1),
     };
     const run = map[event.key];
     if (run === undefined) return;

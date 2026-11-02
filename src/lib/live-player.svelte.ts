@@ -33,7 +33,6 @@ import {
   wantsData,
 } from "#lib/components/player/data-receive.js";
 import { eachFrame } from "#lib/components/player/frames.js";
-import { denpaFontUrl } from "#lib/font.js";
 import { forget, read, write } from "#lib/keep.js";
 import {
   type CaptionTrack,
@@ -51,6 +50,7 @@ import {
 } from "#lib/live.js";
 import { RawEngine } from "#lib/raw/engine.js";
 import type { GrabSize, RawInput } from "#lib/raw/messages.js";
+import { NativeAudio } from "#lib/raw/native-audio.js";
 import {
   type CanvasSupport,
   canvasSupport,
@@ -78,6 +78,8 @@ import {
   STEADY,
   type Steering,
 } from "#lib/ts/pacing.js";
+import { retryWait } from "#lib/ts/playback.js";
+import { MAX_LEVEL } from "#lib/volume.js";
 
 type LiveState = "idle" | "connecting" | "playing" | "error";
 
@@ -132,15 +134,6 @@ const GRACE = 3_000;
  * 画面が残る。壊れているのに動いて見えるのがいちばん悪い
  */
 const HOLD_MOST = 6_000;
-/**
- * 接続が切れたときに待つ時間 (ms)。**倍々に伸ばして、この上限で頭打ち。**
- *
- * いちばん多いのは**サーバの入れ替え** (デプロイ)。コンテナごと作り直すので数十秒
- * 帰ってこないが、帰ってくることは分かっている。切れた時点で諦めていた頃は、
- * 観ている最中に「選んでください」に戻って**自分で選び直す**ことになっていた
- */
-const RETRY_FIRST = 1_000;
-const RETRY_MOST = 10_000;
 /** 番組が替わって作り直す (`restart`) のが、これより短い間に続いたら待つ (ms) */
 const RESTART_CALM = 30_000;
 /** 追っかけで作り直したあと、手元がこれ (秒) を切ったらリクエストし直す (`resumeChase`) */
@@ -233,6 +226,11 @@ interface LivePlayerOptions {
    * **まだ見せていない端末で、canvas で描く前に1回だけ呼ぶ。** 押されるまで再生を始めない
    */
   confirm?: () => Promise<void>;
+  /**
+   * `<video>` で観るとき、音を別に鳴らすか (`raw/native-audio.ts`。WebKit だけ。`native-audio-choice.ts`)。
+   * ライブ画面だけが渡す。渡さない画面 (追っかけ・観る画面) は従来のまま
+   */
+  separateAudio?: () => boolean;
 }
 
 export function livePlayer(options: LivePlayerOptions = {}) {
@@ -430,6 +428,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * (画面が決める。`background.svelte.ts`)
    */
   let playback = false;
+  /** 音量 (%。`#lib/volume.ts`)。canvas で描くときに RawEngine へ渡す。`<video>` のぶんは画面が持つ (`volume.svelte.ts`) */
+  let volume = MAX_LEVEL;
+  /** 音を別に鳴らしているとき (`separateAudio`)。`<video>` は消音にしてある */
+  let nativeAudio: NativeAudio | null = null;
   /** canvas で描く経路の刻み。貯まり・貯める量の決め直しを回す (`rawPace`) */
   let rawTimer: ReturnType<typeof setInterval> | null = null;
   /** canvas で描くとき、1コマデコードするのに掛かっている時間 (ms、95パーセンタイル)。**画面に出す** */
@@ -464,7 +466,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   let dropped = $state(0);
   /** `droppedVideoFrames` を最後に読んだ値 (`countDropped`)。Safari は飛ぶたびに 0 に戻すので差を足し上げる */
   let droppedSeen = 0;
-  /** 途中から入った流れの、最初のキーフレームまでを渡さない係 (`ts/key-gate.ts`)。**始める位置もここで決まる** */
+  /** 途中から入ったストリームの、最初のキーフレームまでを渡さない係 (`ts/key-gate.ts`)。**始める位置もここで決まる** */
   const keyGate = new KeyGate();
   /** 映した1枚が再生位置からどれだけ遅れているか (秒)。音と字幕は再生位置に乗るので、口の動きだけずれる (`unslip`) */
   let slip = $state(0);
@@ -1020,9 +1022,11 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * 鳴らす。断られたら音を諦めて映像だけ出す (前回の局で勝手に始めるので、開いた直後は自動再生として断られる)
    */
   async function play(video: HTMLVideoElement): Promise<void> {
-    video.muted = silenced;
+    nativeAudio?.setMuted(silenced);
+    video.muted = nativeAudio !== null || silenced;
     try {
       await video.play();
+      if (nativeAudio?.blocked) mute();
     } catch {
       video.muted = true;
       silenced = true;
@@ -1039,7 +1043,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     silenced = false;
     engine?.unmute();
     if (element === null || canvas) return;
-    element.muted = false;
+    nativeAudio?.setMuted(false);
+    element.muted = nativeAudio !== null;
     void element.play().catch(() => {
       /* 押したのに断られることはない */
     });
@@ -1049,6 +1054,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   function mute(): void {
     silenced = true;
     engine?.mute();
+    nativeAudio?.setMuted(true);
     if (element !== null) element.muted = true;
   }
 
@@ -1245,6 +1251,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * 必要は無い (`setAudio`)。MediaSource を作り直す `start` からも通る
    */
   function clear(): void {
+    nativeAudio?.destroy();
+    nativeAudio = null;
     buffer = null;
     source = null;
     running = false;
@@ -1381,8 +1389,9 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   }
 
   /**
-   * 待ってから繋ぎ直す (いちばん多いのはサーバの入れ替え)。待ちは倍々で `RETRY_MOST` まで。回数の上限は
-   * 置かない — 点けっぱなしで戻ってきたときに映っていてほしい
+   * 待ってから繋ぎ直す (いちばん多いのはサーバの入れ替え)。待ちは倍々で 10 秒まで (`retryWait`)。回数の上限は
+   * 置かない — 点けっぱなしで戻ってきたときに映っていてほしい。切れた時点で諦めていた頃は、
+   * 観ている最中に「選んでください」に戻って自分で選び直すことになっていた
    */
   function reconnect(): void {
     if (
@@ -1394,7 +1403,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       return;
     state = "connecting";
     message = "";
-    const wait = Math.min(RETRY_MOST, RETRY_FIRST * 2 ** attempts);
+    const wait = retryWait(attempts);
     attempts++;
     retry = setTimeout(() => {
       retry = null;
@@ -1547,7 +1556,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   ): void {
     still = frozen;
     painter?.close();
-    painter = new CaptionPainter(subtitles, denpaFontUrl());
+    painter = new CaptionPainter(subtitles);
     host = box;
   }
 
@@ -1712,7 +1721,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       }
       return true;
     }
-    // エンコードしたものはどちらも描けない。MPEG-2 なら描ける (覚えはしない — 互換モードを切れば元に戻る)。
+    // エンコードしたものはどちらも描けない。MPEG-2 なら描ける (覚えはしない — 互換モードをオフにすれば元に戻る)。
     // 追っかけに MPEG-2 は無い (サーバが変換せずには送らない)
     if (chase === null && rawProblem === null && !rawGaveUp && tuned !== null) {
       rawChosen = true;
@@ -1983,6 +1992,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
           // 途中から入ったら、最初のキーフレームまでは渡さない (`ts/key-gate.ts`)
           if (!keyGate.pass(body)) return;
         }
+        nativeAudio?.feed(body, kind === CHANNEL.videoInit);
         pending.push(body);
         drain();
         return;
@@ -2040,6 +2050,33 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     // エンコード方式が変われば太さも変わる。数え直す
     received = 0;
     receivedFrom = 0;
+    /*
+     * **音を別に鳴らせなくなっても再生は止めない。** `<video>` の音に戻す (音量のつまみは効かないが、
+     * 前と同じに観られる)。自動で選んだ経路なので、それが転んで観られなくなるのでは困る
+     */
+    const giveUpAudio = (reason: string): void => {
+      nativeAudio?.destroy();
+      nativeAudio = null;
+      video.muted = silenced;
+      warning = `音を別に鳴らせないため、音量のつまみは効きません (${reason})`;
+    };
+    if (options.separateAudio?.()) {
+      try {
+        const separate = new NativeAudio(
+          video,
+          (reason) => {
+            if (nativeAudio === separate) giveUpAudio(reason);
+          },
+          `${resolve("").replace(/\/$/, "")}/api/live/mpeg2`,
+        );
+        nativeAudio = separate;
+        separate.setVolume(volume);
+        separate.setMuted(silenced);
+        separate.setBackground(playback);
+      } catch (error) {
+        giveUpAudio(error instanceof Error ? error.message : String(error));
+      }
+    }
     const media = new picked.Source();
     source = media;
     /*
@@ -2158,6 +2195,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       video.style.opacity = "0";
       // 音を消していたなら、canvas で描くときも消したまま始める
       if (silenced) engine.mute();
+      engine.volume = volume;
     } else {
       engine.reset();
     }
@@ -2313,6 +2351,13 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     set playback(on: boolean) {
       playback = on;
       if (engine !== null) engine.background = on;
+      nativeAudio?.setBackground(on);
+    },
+    /** 音量 (%)。canvas で描くときの音に掛ける。`<video>` の音は画面が Web Audio に通して掛ける (`volume.svelte.ts`) */
+    set volume(level: number) {
+      volume = level;
+      if (engine !== null) engine.volume = level;
+      nativeAudio?.setVolume(level);
     },
     /** canvas で描くとき、1コマデコードするのに掛かっている時間 (ms、95パーセンタイル)。canvas で描いていなければ 0 */
     get decodeMs() {
@@ -2389,6 +2434,17 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     get rateChanges() {
       return rateChanges;
     },
+    /**
+     * **いま映しているコマの放送時刻** (unix ms、サーバの時計)。`clock` の通知と再生位置から出す
+     * (実況のコメントを合わせる。`JikkyoLayer`)。`clock` がまだ届いていなければ null
+     */
+    airTime(): number | null {
+      if (broadcast === null) return null;
+      const at =
+        engine !== null ? engine.position : (element?.currentTime ?? null);
+      if (at === null) return null;
+      return broadcast.unixMs + (at - broadcast.at) * 1000;
+    },
     /** 押して止めているか */
     get paused() {
       return paused;
@@ -2454,6 +2510,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     /** 字幕を出しているか */
     get captions() {
       return captions;
+    },
+    /** いま描いている字幕の1枚 (切り抜きに文字を添える)。出していなければ null */
+    get shownCaption(): CaptionPage | null {
+      return shown;
     },
     /** 放送が字幕を持っているか。**1枚も届いていなくても分かる** */
     get hasCaptions() {

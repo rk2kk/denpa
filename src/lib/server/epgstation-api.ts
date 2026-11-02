@@ -25,7 +25,7 @@ import {
   unknown,
 } from "#lib/shape.js";
 
-/** 待つ長さ。試験は短くする */
+/** 待つ長さと取り直し。テストでは短くする */
 export const timing = {
   /** 繋いでヘッダが返るまで */
   header: 10_000,
@@ -40,7 +40,7 @@ export const timing = {
 /** 一覧を1回に取る数。省くと本物は 24 件しか返さない */
 const PAGE = 100;
 
-export interface EpgstationSource {
+interface EpgstationSource {
   /** 資格情報を外した URL (末尾の `/` なし)。ログと画面に出してよいのはこれだけ */
   base: string;
   headers: Record<string, string>;
@@ -98,7 +98,7 @@ export function readVersion(text: string): EpgstationVersion | "v1" {
 const VERSION = object({ version: string });
 
 const CHANNEL = object({ id: number, name: string });
-export type EpgstationChannel = { id: number; name: string };
+type EpgstationChannel = { id: number; name: string };
 
 const SEARCH_TIME = object({
   start: optional(number),
@@ -226,9 +226,9 @@ export class EpgstationClient {
   constructor(
     readonly source: EpgstationSource,
     /** 形が違ったときの警告の出し先 */
-    private readonly warn: (message: string) => void = console.warn,
+    private readonly warn: (message: string) => void,
     /** 欠けた1件を飛ばしたときの出し先 */
-    private readonly skip: (message: string) => void = console.warn,
+    private readonly skip: (message: string) => void,
   ) {}
 
   url(path: string, params: Record<string, string | number> = {}): string {

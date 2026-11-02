@@ -51,7 +51,7 @@ export function nativeFullscreenElement(doc: object): Element | null {
 
 /**
  * 本物の全画面に入る。**失敗しても黙る** (押した直後でなくなった・許可が無いなど)。
- * 古い webkit は約束を返さないことがある
+ * 古い webkit は Promise を返さないことがある
  */
 export async function requestNative(
   element: object,
@@ -64,6 +64,42 @@ export async function requestNative(
   } catch {
     // 押せばまた入れる
   }
+}
+
+/**
+ * 全画面の間だけ横向きに固定する。非対応・拒否は表示に影響させない。
+ * 解除後に lock が完了しても固定を残さず、入り直した場合は新しい固定を保つ。
+ */
+export function landscapeLock(orientation?: object): (active: boolean) => void {
+  const api = orientation as
+    | { lock?: (value: "landscape") => Promise<void>; unlock?: () => void }
+    | undefined;
+  let active = false;
+  const unlock = () => {
+    try {
+      api?.unlock?.();
+    } catch {
+      // 向きの固定を使えない環境でも全画面は維持する
+    }
+  };
+  return (enabled) => {
+    if (active === enabled || typeof api?.lock !== "function") return;
+    active = enabled;
+    if (!active) {
+      unlock();
+      return;
+    }
+    try {
+      void api.lock("landscape").then(
+        () => {
+          if (!active) unlock();
+        },
+        () => {},
+      );
+    } catch {
+      // API があっても同期的に拒否される場合がある
+    }
+  };
 }
 
 /** 本物の全画面を出る。入っていなければ何もしない */

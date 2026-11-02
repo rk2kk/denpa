@@ -16,7 +16,7 @@ name: denpa
 
 services:
   # チューナーエージェント。**機材に触るのはここだけ。**
-  # 選局・B-CASカード・スクランブル解除を受け持ち、
+  # 選局・B-CASカード・スクランブルの復号を受け持ち、
   # 素のTSを denpa へ流す (番組表を読むのは denpa の仕事)
   tuner-agent:
     image: ghcr.io/danything/denpa-agent:latest
@@ -88,13 +88,26 @@ services:
       - denpa-library:/media/encoded
     ports:
       - "3000:3000"
-    # Intel の GPU でエンコードするなら /dev/dri を渡す (docs/encode.md「GPU でエンコードする」)。
-    # 見えれば起動時に見つけて使い、無ければソフトウェアでエンコードする
+    # GPU でエンコードするならデバイスを渡す。見えれば起動時に見つけて使い、無ければソフトウェアでエンコードする。
+    # ホストに無いデバイスを書くと起動できないので、使うものの行だけ残す:
+    # Intel・AMD は /dev/dri (docs/encode.md「GPU でエンコードする」)、Rockchip (RK3588 / RK3588S) は
+    # BSP カーネルの上で /dev/mpp_service と /dev/dma_heap (docs/encode.md「Rockchip (RK3588) でエンコードする」)
     # devices:
     #     - /dev/dri:/dev/dri
+    #     - /dev/mpp_service:/dev/mpp_service
+    #     - /dev/dma_heap:/dev/dma_heap
+    # NVIDIA は devices ではなく、ホストに NVIDIA Container Toolkit を入れて GPU を予約する
+    # (docs/encode.md「NVIDIA でエンコードする」。ドライバのライブラリと /dev/nvidia0 などは Toolkit が差し込む):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video, compute, utility]
 
 volumes:
   denpa-data:
-  # 元のTSの作業領域。エージェント側にも見せて、スクランブル解除をあちらにやらせる
+  # 元のTSの作業領域。エージェント側にも見せて、スクランブルの復号をあちらにやらせる
   denpa-recorded:
   denpa-library:

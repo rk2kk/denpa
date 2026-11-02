@@ -15,6 +15,7 @@ import { CLOCK } from "@danything/arib/pes";
 import {
   aitSection,
   aitSignallingDescriptor,
+  captionDescriptors,
   copyControlDescriptor,
   ddbSection,
   diiSection,
@@ -113,6 +114,14 @@ export interface Knobs {
    * 本物の電波は PAT・PMT を 100ms ごとに流すので、選局したては映像と音声が先に届く (`ServiceFilter` が取っておく)
    */
   tablesLate: boolean;
+  /**
+   * **PMT に字幕の ES を載せる。** denpa は ffmpeg を起こす前に PMT を読み、字幕が無ければ字幕の出口を
+   * 頼まない (`server/captions.ts` の `peekCaptions`)。
+   *
+   * **既定は載せない。** 部品タグの付いた ES があるとデータ放送の見張りが PMT を画面へ配り
+   * (`packages/arib/src/bml.ts`)、データ放送の E2E が手で流し込む PMT を上書きしてしまう
+   */
+  captions: boolean;
 }
 
 export const DEFAULT_KNOBS: Knobs = {
@@ -122,6 +131,7 @@ export const DEFAULT_KNOBS: Knobs = {
   eitCopyNever: [],
   pmtCopyNever: false,
   tablesLate: false,
+  captions: false,
 };
 
 /** その局の番組。つまみ (`eitCopyNever`) に入っている局なら、コピー禁止の印を付ける */
@@ -316,6 +326,8 @@ const pidsOf = (index: number) => ({
   audio: 0x1002 + index * 0x10,
   /** Hybridcast の在り処 (AIT)。載せている局だけ使う */
   ait: 0x1003 + index * 0x10,
+  /** 字幕。ES を PMT に載せるだけで、中身は流さない (字幕の有無は PMT で決まる) */
+  caption: 0x1004 + index * 0x10,
 });
 
 /**
@@ -334,6 +346,31 @@ const ENGINEERING = { service: 929, pmt: 0x1f0, es: 0x1f1 };
 
 function carouselPackets(services: FakeService[]): Uint8Array {
   /*
+   * **BS (ネットワーク4) は `LOGO-05`、CS は `CS_LOGO-05` に分け、DII も別々に流す。** 本物の BS15_0 も
+   * 2つのモジュールで流れてくる。1つにまとめていると、片方だけ揃った時点で読み切ったと決める
+   * 誤り (`DsmccLogoCollector.carouselRead`) がテストで見えない
+   */
+  // 載せる局が無くても両方流す (本物も CS の局を受けていない家に CS_LOGO-05 を流している)
+  return Uint8Array.from([
+    ...carouselModule(
+      services.filter((s) => s.networkId === 4),
+      "LOGO-05",
+      0x1234,
+    ),
+    ...carouselModule(
+      services.filter((s) => s.networkId !== 4),
+      "CS_LOGO-05",
+      0x1235,
+    ),
+  ]);
+}
+
+function carouselModule(
+  services: FakeService[],
+  name: string,
+  downloadId: number,
+): Uint8Array {
+  /*
    * テストは1枚を全局で使い回す。スクリーンショットを撮るときは局ごとに別の画像 (番組表に並ぶので見分けが付くように)
    */
   const module = logoModule(
@@ -344,27 +381,29 @@ function carouselPackets(services: FakeService[]): Uint8Array {
           services: [[s.networkId, s.serviceId] as [number, number]],
           data: logoOf(s, true),
         }))
-      : [
-          {
-            logoId: services[0]!.serviceId % 512,
-            services: services.map(
-              (s) => [s.networkId, s.serviceId] as [number, number],
-            ),
-            data: LOGO_PNG_LARGE,
-          },
-        ],
+      : services.length === 0
+        ? []
+        : [
+            {
+              logoId: services[0]!.serviceId % 512,
+              services: services.map(
+                (s) => [s.networkId, s.serviceId] as [number, number],
+              ),
+              data: LOGO_PNG_LARGE,
+            },
+          ],
   );
   return Uint8Array.from([
     ...packetize(
       ENGINEERING.es,
-      diiSection(0x1234, 4066, {
+      diiSection(downloadId, 4066, {
         moduleId: 1,
         moduleSize: module.length,
         moduleVersion: 1,
-        name: "LOGO-05",
+        name,
       }),
     ),
-    ...packetize(ENGINEERING.es, ddbSection(0x1234, 1, 1, 0, module)),
+    ...packetize(ENGINEERING.es, ddbSection(downloadId, 1, 1, 0, module)),
   ]);
 }
 
@@ -461,6 +500,13 @@ function tables(services: FakeService[], knobs: Knobs): Uint8Array {
     const streams: ([number, number] | [number, number, number[]])[] = [
       [0x02, pids.video],
       [0x0f, pids.audio],
+      ...(knobs.captions
+        ? ([[0x06, pids.caption, captionDescriptors()]] as [
+            number,
+            number,
+            number[],
+          ][])
+        : []),
       // **印が付いた ES があって初めて AIT を読みに行く** (`packages/arib/src/ait.ts`)
       ...(service.hybridcast === undefined
         ? []

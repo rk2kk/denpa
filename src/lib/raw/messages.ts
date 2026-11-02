@@ -25,7 +25,7 @@ export interface GrabSize {
 
 /**
  * `createImageBitmap` に渡す縮め方。**`VideoFrame` の無いブラウザで、画面の側で `<video>` を縮めるときだけ使う**
- * (worker の中は `downscale.ts`)。`high` で縮める — 低いほど 1920 から 32 へ点で拾い、写すたびに色が揺れる
+ * (worker の中は `downscale.ts`)。`high` で縮める — 低いほど 1920 から 32 へ点で間引き、写すたびに色が揺れる
  */
 export function shrink(size: GrabSize): ImageBitmapOptions {
   return {
@@ -51,7 +51,7 @@ export type ToWorker =
       follow: boolean;
     }
   /**
-   * 届いたもの (TS、または fMP4 の init・媒体1つ)。**頭の9バイト (多重化の頭) を飛ばした位置から**。
+   * 届いたもの (TS、fMP4 の init・媒体1つ、Matroska)。**頭の9バイト (多重化の頭) を飛ばした位置から**。
    * fMP4 は箱の切れ目で届く (サーバが割ってから送る。`ts/fmp4.ts` の `Fmp4Splitter`)
    */
   | { type: "data"; buffer: ArrayBuffer; offset: number }

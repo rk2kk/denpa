@@ -22,14 +22,13 @@ namespace Denpa.Agent;
 ///
 /// <para>
 /// 1つの実体は**1本のストリームからしか触らない**。鍵を書き換えている途中に別のストリームが
-/// 復号すると半端な鍵で復号してしまうが、ロックは掛けない (<see cref="Descrambler"/> が
-/// 1本のストリーム (デスクランブラ) の中で順に呼ぶ)。
+/// 復号すると半端な鍵で復号してしまうが、ロックは掛けない (<see cref="Descrambler"/> が順に呼ぶ)。
 /// </para>
 /// </summary>
 public sealed class Multi2
 {
     /// <summary>段数。放送は 4 (これ以外の値で送ってくる局は無い)</summary>
-    public const int Rounds = 4;
+    private const int Rounds = 4;
 
     [InlineArray(8)]
     private struct Words
@@ -232,7 +231,6 @@ public sealed class Multi2
         var at = 0;
         while (data.Length - at >= width * 8)
         {
-            // 幅の倍数に切り上げると余りのぶんまで回るが、そこは捨てる (書き戻さない)
             var blocks = Math.Min((data.Length - at) / 8, WideBlocks);
             var chunk = data.Slice(at, blocks * 8);
             for (var index = 0; index < blocks; index++)
@@ -241,6 +239,7 @@ public sealed class Multi2
                 rights[index] = BinaryPrimitives.ReadUInt32BigEndian(chunk[(index * 8 + 4)..]);
             }
 
+            // 幅の倍数に切り上げると余りのぶんまで回るが、そこは捨てる (書き戻さない)
             for (var index = 0; index + width <= WideBlocks && index < blocks; index += width)
             {
                 var l = Vector.LoadUnsafe(ref lefts[0], (nuint)index);

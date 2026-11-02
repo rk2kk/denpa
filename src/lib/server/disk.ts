@@ -73,7 +73,7 @@ export function checkDisk(): void {
  * たいていは同じパーティションに載っている。
  *
  * 時間は空き ÷ **最近の録画が1時間あたりに置いていった量**。エンコードしたもの・残した元のTS・
- * H.264 の控えを全部足す (設定で残すものが変わっても、実際に残った量で決まる)。
+ * H.265・H.264 の控えを全部足す (設定で残すものが変わっても、実際に残った量で決まる)。
  * 置き場が分かれているときも両方の量を少ないほうの空きで割るので、短めに出る —
  * 目安なので、外れるなら少なく見積もるほうにしておく。エンコードする前の録画は元のTSの大きさしか
  * 持たず、エンコードすると縮むので数えない。エンコードするジョブの無いもの (エンコードしない設定・エンコードするのに失敗したもの) は
@@ -108,6 +108,7 @@ export function measure(): Capacity | null {
       size: recordings.ts_size,
       ts: recordings.ts_path,
       library: recordings.library_path,
+      hevc: recordings.hevc_path,
       alt: recordings.alt_path,
     })
     .from(recordings)
@@ -133,7 +134,8 @@ export function measure(): Capacity | null {
     // `ts_size` はいま配っているもの (エンコードしていればエンコードしたもの) の大きさ。残した元のTSと控えは別に量る
     bytes += row.size;
     if (row.library !== null && row.ts !== null) bytes += fileSize(row.ts) ?? 0;
-    if (row.alt !== null) bytes += fileSize(row.alt) ?? 0;
+    for (const other of [row.hevc, row.alt])
+      if (other !== null) bytes += fileSize(other) ?? 0;
     ms += row.duration ?? 0;
   }
   const perHour = bytes / (ms / 3_600_000);

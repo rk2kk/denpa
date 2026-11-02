@@ -42,12 +42,12 @@ interface Candidate extends Reservation {
 }
 
 /**
- * チューナーの様子。**予約の割り振り (`assign`) とルール画面の下見 (`contentions`) が同じものを読む。**
+ * チューナーの様子。**予約の割り振り (`assign`) とルールの下見 (`rule-preview.ts`) が同じものを読む。**
  *
  * - `capacity`: 動いているチューナーを、エージェントが選ぶ順 (`rank`) に組にしたもの (`Capacity`)
  * - `busy`: 録画中の予約が、いまどのチューナーにいて、いつ離すか (tuner.ts の `recordingHolds`)
  *
- * エージェントに繋がらないときは空 (「制限なし」) を返し、予約を勝手に conflict にしない(実際に
+ * エージェントに繋がらないときは空 (「制限なし」) を返し、予約を勝手に conflict にしない (実際に
  * 録画が始まるときにあちらが弾くので、予約表を壊すより実行時に失敗させるほうが害が小さい)。
  */
 export async function tunerState(): Promise<{
@@ -221,12 +221,7 @@ export async function tick(): Promise<void> {
     stopped.push(recordingUse(id));
   }
 
-  /*
-   * **持ち主のいない「録画中」を畳む** (`failStrayRecordings`)。畳む間もなく殺されると
-   * (ノードごと落ちた等) DB の行だけが録画中で残り、予約の一覧に居座って録画の一覧には
-   * 出てこない。起動時の回収では、そのとき放送中だったものを録り直しに行った先で
-   * また殺されると畳めないので、定期チェックでも同じ片付けをする
-   */
+  // 持ち主のいない「録画中」を畳む。起動時の回収だけでは畳めない場合がある (`failStrayRecordings`)
   if (failStrayRecordings(at) > 0) {
     emit("recordings");
     emit("reservations");

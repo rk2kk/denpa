@@ -47,8 +47,8 @@
    * 表のマス。**外枠より後から届く** (`+page.ts`。`/api/guide`)。
    * 局名の行と時刻の列は外枠と一緒に届くので本物を先に出し、マスのところだけ骨組みにしておく。
    *
-   * **通知で読み直したときに骨組みへ戻さない。** 番組表は録画やエンコードの
-   * 通知が来るたびに読み直すので、そのたびマスが消えては現れるとちらつく。
+   * **読み直したときに骨組みへ戻さない。** 番組表は予約・取消のあとや画面に
+   * 戻ったときに読み直すので、そのたびマスが消えては現れるとちらつく。
    * 同じ日・同じ放送波なら前のものを出したままにして、届いたら差し替える
    * (`live-updates.svelte.ts` の `held` と同じ考え方)。
    * **別の日・別の放送波へ移ったときだけ**捨てる — 選び直したのに前のマスが
@@ -67,7 +67,7 @@
     void coming.then((next) => {
       if (stale) return;
       /*
-       * **一度きりの失敗で、見えている表を消さない。** 通知のたびに
+       * **一度きりの失敗で、見えている表を消さない。** 何度も
        * 読み直すので、そのうち1回が転んだだけで番組表が消えるのは割に
        * 合わない (`held` と同じ考え方)。まだ何も出していないときと、
        * 別の日・別の放送波へ移ったあと (`sheet` は null に戻してある) は、
@@ -178,8 +178,8 @@
   }
 
   /**
-   * **見えている表の差し替えは一度に。** 通知のたびに読み直すので、
-   * そのたび少しずつ描き直すとマスが消えて現れてちらつく
+   * **見えている表の差し替えは一度に。** 読み直すたびに少しずつ描き直すと、
+   * マスが消えて現れてちらつく
    */
   function drawAll(): void {
     cancelAnimationFrame(drawFrame);
@@ -286,6 +286,9 @@
       video_resolution: null,
       is_free: true,
       copy_never: program.copy_never,
+      series_episode: null,
+      series_last_episode: null,
+      series_repeat: null,
     };
     facts = seed;
     selected = program;
@@ -664,7 +667,7 @@
         入りきらない幅では、時刻のボタンを「⋯」に、さらに狭いと日付のメニューに移す
     -->
   <div class="toolbar guide-bar" data-testid="guide-toolbar">
-    <div role="group" class="types segmented" data-testid="type-tabs">
+    <div role="group" class="segmented" data-testid="type-tabs">
       {#each CHANNEL_TYPES as type (type)}
         <a
           class="button small {data.type === type ? '' : 'secondary outline'}"
@@ -672,7 +675,7 @@
           href={href({ type, start: String(data.start) })}
           data-testid="type-{type}"
         >
-          <span class="seg-label">{SERVICE_TYPE_LABEL[type]}</span>
+          {SERVICE_TYPE_LABEL[type]}
         </a>
       {/each}
     </div>
@@ -850,7 +853,7 @@
       <Menu
         side={menuSide}
         align="end"
-        class="guide-menu genre-menu"
+        class="guide-menu"
         testid="guide-genre-menu"
       >
         {#snippet trigger(props)}
@@ -1052,7 +1055,7 @@
 
         {#if nowSlots !== null}
           <!--
-                        「いま」の時刻 (ホームと同じ `NowLine` の `overlay`)。ホームのような一言は添えない。
+                        「いま」の時刻 (ホームと同じ `NowLine`。表に重ねる `overlay`)。ホームのような一言は添えない。
                         **時刻は時刻の列の中に置く** — 列の外へ出すと番組名に被る。同じ時の数字とは重なるが、
                         時刻のカプセルの面で隠す。`sticky` (`left: 0`) で横に流しても左端に残る
                         (`absolute` だと枠 `grid-column: 1 / -1` の左端に付いて流れていく)
@@ -1183,7 +1186,7 @@
   {/each}
 {/snippet}
 
-<!-- 番組の中身。**二段組の外に置く** (中に入れると巻き取る箱の中で開くことになる) -->
+<!-- 番組の中身。**表の外に置く** (中に入れると巻き取る箱の中で開くことになる) -->
 {#if selected && facts}
   {@const program = selected}
   <!-- 録れているなら、録画一覧へ戻らずここからそのまま観られるようにする (一覧の `hasFile` と同じ判定) -->
@@ -1536,7 +1539,7 @@
     /* 中の貼り付くもの (`z-index`) を箱の中に閉じ込め、上に重ねる操作の1行より下にする */
     isolation: isolate;
     /*
-     * 巻いた量をヘッダーへ渡す (`+layout.svelte` の `.navbar` と下の `.guide-bar` がこれで浮く)。
+     * 巻いた量をヘッダーへ渡す (`+layout.svelte` の `.navbar` と `app.css` の `.guide-bar` がこれで浮く)。
      * 横の巻いた量 `--guide-x` は、時の列と左上の角が浮くのに使う (下の `.corner`・`.hour::before`)
      */
     scroll-timeline:

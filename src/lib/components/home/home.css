@@ -324,11 +324,11 @@
  * ---- 1本の時間軸 ----
  *
  * **どの幅でもページごとスクロールする** (`+layout.svelte` の `FILLED` に入れない)。広い形では行が浮いたヘッダーの裏を流れ、
- * スクロールバーは窓の右端に出る。日付の見出しは上に、頭の1行 (絞り込みのチップ・「⋯」) は下のタブのすぐ上に貼り付く。
+ * スクロールバーは窓の右端に出る。日付の見出しは上に、操作の1行 (絞り込みのチップ・「⋯」) は下のタブのすぐ上に貼り付く。
  * 広い画面 (768px 以上) では左右と下を main の余白の外まで広げ、右のサイドバーを窓の右端と下端に付ける
  */
 .board {
-  /* 日付の見出しが貼り付く所の上の離れ (下の `.t-day`。頭の1行の下にも同じだけ空ける) */
+  /* 日付の見出しが貼り付く所の上の離れ (下の `.t-day`) */
   --t-day-gap: 0.5rem;
   display: flex;
   flex-direction: column;
@@ -338,7 +338,7 @@
     margin: 0 calc(-1 * var(--dp-gutter)) calc(-1 * var(--dp-gutter));
   }
   /*
-   * 足した行で読んでいる所が動かないように、位置合わせは自分でする (開いたときの `place`・`holdPlace`)。
+   * 足した行で読んでいる所が動かないように、位置合わせは自分でする (開いたときの `placeTimeline`・`holdPlace`)。
    * ブラウザにも合わせさせると、字が届いて行の高さが変わったときに窓が先に動き、自分で巻いたと見なして合わせ直さなくなる
    */
   html:has(.board) {
@@ -356,7 +356,7 @@
   min-width: 0;
 }
 /*
- * スマホの形の頭の1行。**細い1行 (44px)** に絞り込みのチップ (横に流せる) と、状態と表示の切り替えのメニューを開く「⋯」。
+ * スマホの形の操作の1行。**細い1行 (44px)** に絞り込みのチップ (横に流せる) と、状態と表示の切り替えのメニューを開く「⋯」。
  * 出すのはスマホの形だけで、下のタブのすぐ上に貼り付ける (下の「スマホの形」)
  */
 .board .t-toolbar {
@@ -435,7 +435,7 @@
  * (docs/design.md の「浮かせ方」)。地の色で塗ると、半透明のヘッダーの下で塗った所だけが浮いて見えた
  */
 .board .t-day {
-  /* 貼り付く位置。いちばん上の見出しの置かれた位置 (main の頭の空き・頭の1行の下) と同じにし、巻き始めても動かない (上端ではカプセルにならない) */
+  /* 貼り付く位置。いちばん上の見出しの置かれた位置 (main の頭の空き) と同じにし、巻き始めても動かない (上端ではカプセルにならない) */
   position: sticky;
   top: var(--t-day-gap);
   z-index: 3;
@@ -484,7 +484,7 @@
   font-weight: var(--dp-weight);
 }
 /*
- * **広い形 (スマホの形でないとき。`#lib/phone-form.ts`) では頭の1行を出さない** (絞り込みは右のサイドバー。下の「右のサイドバー」)。
+ * **広い形 (スマホの形でないとき。`#lib/phone-form.ts`) では操作の1行を出さない** (絞り込みは右のサイドバー。下の「右のサイドバー」)。
  * 日付の見出しは浮いたヘッダーの下に、操作の1行どうしと同じ隙間 (`--dp-bar-gap`) 離して貼り付ける
  */
 :where(html:not([data-phone])) .board {
@@ -494,9 +494,9 @@
   top: calc(var(--dp-header-bottom) + var(--t-day-gap));
 }
 /*
- * **スマホの形 (下のタブがある形) では、頭の1行を下のタブのすぐ上に貼り付ける。** 押すものは下に置く (指の届く所)。
+ * **スマホの形 (下のタブがある形) では、操作の1行を下のタブのすぐ上に貼り付ける。** 押すものは下に置く (指の届く所)。
  * 並びの上では一覧の後ろに回し (`order`)、下端に貼り付ける (`sticky` + `bottom`)。メニューは上に開く (`TimelineBar`)。
- * 頭の1行も操作の層なので、下のタブの上に同じ半透明のカプセルで浮かせる (縁の線は引かない)。
+ * この1行も操作の層なので、下のタブの上に同じ半透明のカプセルで浮かせる (縁の線は引かない)。
  * 日付の見出しは上の安全域 (ノッチ) の少し下に浮かべる
  */
 /* スマホの形 (`#lib/phone-form.ts`。`<html data-phone>`) */
@@ -525,7 +525,7 @@
 :where(html[data-phone]) .board .t-main {
   order: 1;
 }
-/* 一覧が短くても頭の1行が下のタブのすぐ上に来るよう、ページの高さいっぱいまで伸ばす (下の余白は打ち消す) */
+/* 一覧が短くても操作の1行が下のタブのすぐ上に来るよう、ページの高さいっぱいまで伸ばす (下の余白は打ち消す) */
 :where(html[data-phone]) .board {
   min-height: calc(
     100svh - env(safe-area-inset-top, 0px) - var(--dp-page-top, 0.5rem) -
@@ -796,8 +796,8 @@
 /*
  * ---- 右のサイドバー (`HomeAside`) ----
  * 広い形 (スマホの形でないとき。`#lib/phone-form.ts`) だけ。右の端まで寄せてヘッダーの下に貼り付き、一覧とは別に巻き取る。一覧とは線で分けず、地も同じ (件の面と余白で分かれる)。
- * 形は `app.css` のサイドバーの部品 (`.side-panel` など)。ここは幅と、出すかどうかだけ。この形では頭の1行は出さず、一覧はいちばん上から始まる。
- * テーブルトップは 1000px 以上でもスマホの形なので、幅ではなく `<html data-phone>` で分ける (下のタブの上に頭の1行を出す)
+ * 形は `app.css` のサイドバーの部品 (`.side-panel` など)。ここは幅と、出すかどうかだけ。この形では操作の1行は出さず、一覧はいちばん上から始まる。
+ * テーブルトップは 1000px 以上でもスマホの形なので、幅ではなく `<html data-phone>` で分ける (下のタブの上に操作の1行を出す)
  */
 .board .t-side {
   display: none;
@@ -858,118 +858,7 @@
   padding: 0 0.75rem;
   font-size: var(--dp-text-sm);
 }
-/*
- * サイドバーの月のカレンダー (`HomeCalendar`)。行は 48px にしない (升は 32px。幅は 7 等分で 40px ほどあるので、押す所は升いっぱい)。
- * 見出しはほかのグループと同じ太字で、右に ‹ ›。日の印は下の「日のマス」
- */
-.board .cal-head {
-  display: flex;
-  align-items: center;
-  margin-top: 1.75rem;
-}
-/* いちばん上に来たとき (日ごとに並べているときはいつも) は上を空けない */
+/* サイドバーの月のカレンダー (`HomeCalendar`。形は部品の中)。いちばん上に来たとき (日ごとに並べているときはいつも) は上を空けない */
 .board .t-side > .cal:first-child > .cal-head {
   margin-top: 0;
-}
-.board .cal-head .side-label {
-  flex: 1;
-  margin: 0;
-}
-.board .cal-step {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: var(--dp-radius);
-  background: transparent;
-  box-shadow: none;
-  color: var(--dp-fg);
-  transition: background-color var(--dp-duration);
-}
-.board .cal-step:hover:not(:disabled) {
-  background: var(--dp-hover-soft);
-}
-.board .cal-step:disabled {
-  background: transparent;
-  color: var(--dp-muted);
-  opacity: 0.4;
-}
-.board .cal-grid {
-  width: calc(100% - 0.75rem);
-  margin: 0.25rem 0 0 0.75rem;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-.board .cal-grid :is(th, td) {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  text-align: center;
-}
-.board .cal-grid th {
-  height: 1.5rem;
-  color: var(--dp-muted);
-  font-size: 0.6875rem;
-  font-weight: var(--dp-weight);
-}
-/*
- * 日のマス。**印は 1 つの意味に 1 つ** (docs/design.md):
- * - 行のある日は本文の字。行の無い日 (今日を除く) は押せず (読み上げには aria-disabled)、控えた字にして指を乗せても塗らない
- * - 今日は赤い点 (「いま」の線と同じ赤)
- * - 選んでいる日は主の色の下線と主の色の太字 (ほかの選んでいるものと同じ。塗らない)。下線が点の代わり
- */
-.board .cal-day {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 2rem;
-  margin: 0;
-  padding: 0 0 0.25rem;
-  border: 0;
-  border-radius: var(--dp-radius);
-  background: transparent;
-  box-shadow: none;
-  color: var(--dp-fg);
-  font-size: 0.8125rem;
-  font-weight: var(--dp-weight);
-  transition: background-color var(--dp-duration);
-}
-.board .cal-day[aria-disabled="true"] {
-  color: var(--dp-muted);
-  cursor: default;
-}
-.board .cal-day.today::after {
-  content: "";
-  position: absolute;
-  bottom: 0.3125rem;
-  left: 50%;
-  width: 0.25rem;
-  height: 0.25rem;
-  border-radius: 50%;
-  background: var(--dp-rec);
-  transform: translateX(-50%);
-}
-.board .cal-day:not([aria-disabled="true"]):hover {
-  background: var(--dp-hover-soft);
-}
-.board .cal-day.pinned {
-  color: var(--dp-primary-text);
-  font-weight: var(--dp-weight-bold);
-}
-.board .cal-day.pinned::after {
-  content: "";
-  position: absolute;
-  bottom: 0.25rem;
-  left: 50%;
-  width: 1rem;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--pico-primary);
-  transform: translateX(-50%);
 }

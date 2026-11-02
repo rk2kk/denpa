@@ -127,7 +127,7 @@ public sealed class RemoteCard(string url, int hops) : IKeySource
 {
     private readonly HttpClient _http = new(new SocketsHttpHandler
     {
-        // ルーターの先に置いた配り役は、TTL で SYN-ACK が戻らず黙る。待ち続けずに理由を出す
+        // ルーターの先に置いた配り役には TTL で届かず、答えが無いまま待たされる。待ち続けずに理由を出す
         ConnectTimeout = TimeSpan.FromSeconds(5),
         ConnectCallback = (context, cancel) => CardLan.Connect(context.DnsEndPoint, hops, cancel),
     })
@@ -135,22 +135,21 @@ public sealed class RemoteCard(string url, int hops) : IKeySource
         Timeout = TimeSpan.FromSeconds(10),
     };
 
-    private readonly string _url = url.TrimEnd('/');
     private CardInit? _init;
 
     /// <summary>配り役の URL (画面に出す)</summary>
-    public string Url => _url;
+    public string Url { get; } = url.TrimEnd('/');
 
     /// <summary>素は1回貰えば変わらない。**貰えなかったら次に要ったときにまた聞く**</summary>
     public CardInit Init() => _init ?? Check();
 
     /// <summary>いま配り役と話せるか。**覚えている素を使わずに聞き直す** (画面の「カードリーダー」行)</summary>
     public CardInit Check() =>
-        _init = CardWire.ReadInit(Send(new HttpRequestMessage(HttpMethod.Get, $"{_url}/denpa/card/init"), "カードの情報"));
+        _init = CardWire.ReadInit(Send(new HttpRequestMessage(HttpMethod.Get, $"{Url}/denpa/card/init"), "カードの情報"));
 
     public EcmAnswer Ecm(ReadOnlySpan<byte> ecm)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"{_url}/denpa/card/ecm")
+        var request = new HttpRequestMessage(HttpMethod.Post, $"{Url}/denpa/card/ecm")
         {
             Content = new ByteArrayContent(ecm.ToArray()),
         };
@@ -166,7 +165,7 @@ public sealed class RemoteCard(string url, int hops) : IKeySource
             using var response = _http.Send(request);
             var body = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
             if (response.IsSuccessStatusCode) return body;
-            throw new IOException(Refused(_url, (int)response.StatusCode, body, what));
+            throw new IOException(Refused(Url, (int)response.StatusCode, body, what));
         }
         catch (HttpRequestException error)
         {

@@ -25,26 +25,40 @@ import {
 
 import { fitRect } from "./paint";
 
-/** データ放送と同じ Denpa Font。手元の開発ではイメージに無いので、端末の丸ゴシックへ落ちる */
-const CAPTION_FONT = "denpa-caption";
-let fontLoading: Promise<void> | null = null;
+/**
+ * 字は画面の放送の字と同じ Denpa Font (`+layout.svelte` が読む CSS で名乗らせてある。`#lib/font.ts`)。
+ * 基本の字と JIS X 0213 で足された漢字の 2 つの woff2 に分かれていて、後のほうはその字が出たときだけ落ちてくる。
+ * **canvas は読み込みを待たずに端末の字で描いてしまう**ので、出す字幕の字を `document.fonts.load` に
+ * 渡して要るほうを読ませ、届いたら描き直す (`loadFor`)。手元の開発ではイメージに無いので、画面の字へ落ちる
+ */
+const CAPTION_FONT = '"Denpa Font"';
 
-/** 字を読み込む。**1回だけ** (`url` は `#lib/font.ts` の `denpaFontUrl()`) */
-function loadCaptionFont(url: string): Promise<void> {
-  if (fontLoading !== null) return fontLoading;
-  const face = new FontFace(
-    CAPTION_FONT,
-    `url('${url}') format('woff2'), local('Hiragino Maru Gothic ProN'), local('Meiryo')`,
+/** 読み込みをリクエストした字。同じ字で何度もリクエストしない */
+const asked = new Set<string>();
+
+/** その字を描く字を読み込む。リクエストするものが無ければ null、あればそれが済む (読めなくても済む) Promise */
+function loadFor(text: string): Promise<void> | null {
+  const chars = [...new Set(text)].filter((c) => !asked.has(c)).join("");
+  if (chars === "") return null;
+  for (const c of chars) asked.add(c);
+  return document.fonts.load(`16px ${CAPTION_FONT}`, chars).then(
+    () => {},
+    () => {}, // 無くても描く (端末の字になるだけ)
   );
-  fontLoading = face
-    .load()
-    .then((loaded) => {
-      document.fonts.add(loaded);
-    })
-    .catch(() => {
-      // 無くても描く (端末の字になるだけ)
-    });
-  return fontLoading;
+}
+
+let fallback: string | null = null;
+
+/**
+ * 字幕の字の指定。**Denpa Font に無い字は、画面の放送の字 (`--broadcast-font`、`app.css`) と同じ
+ * 並びへ落とす。** 何も並べないとブラウザの既定の字に落ち、端末によっては明朝になる
+ */
+function captionFont(px: number): string {
+  fallback ??=
+    getComputedStyle(document.documentElement)
+      .getPropertyValue("--pico-font-family-sans-serif")
+      .trim() || "sans-serif";
+  return `${px}px ${CAPTION_FONT}, ${fallback}`;
 }
 
 /** 絵文字の字体を持ちうる字。数字や # も入るので、ASCII は `textStyle` で除く */
@@ -72,14 +86,14 @@ let ink: Ink | null = null;
 
 function measureInk(ctx: CanvasRenderingContext2D): Ink {
   if (ink !== null) return ink;
-  ctx.font = `100px ${CAPTION_FONT}`;
+  ctx.font = captionFont(100);
   const m = ctx.measureText("永");
   const measured = {
     ascent: m.actualBoundingBoxAscent / 100,
     descent: m.actualBoundingBoxDescent / 100,
   };
   // 字がまだ無いうちは覚えない (端末の字で測ってしまう)
-  if (document.fonts.check(`100px ${CAPTION_FONT}`)) ink = measured;
+  if (document.fonts.check(`100px ${CAPTION_FONT}`, "永")) ink = measured;
   return measured;
 }
 
@@ -135,7 +149,7 @@ function flashes(page: CaptionPage | null): boolean {
 function drawPage(
   ctx: CanvasRenderingContext2D,
   page: CaptionPage,
-  now = 0,
+  now: number,
 ): void {
   const { width, height } = ctx.canvas;
   const sx = width / page.plane[0];
@@ -156,7 +170,8 @@ function drawRun(
   metrics: Ink,
   dark: boolean,
 ): void {
-  const chars = [...run.text];
+  // 区画ごとの字。`joined` なら text 全体で1区画 (か゚ などはフォントが1字に組む)
+  const chars = run.joined === true ? [run.text] : [...run.text];
   const fontPx = run.size * sy;
   const glyphW = run.size * run.scaleX * sx;
   const strokePx = STROKE_WIDTH * sx;
@@ -164,7 +179,7 @@ function drawRun(
   const baseline =
     (fontPx - (metrics.ascent + metrics.descent) * fontPx) / 2 +
     metrics.ascent * fontPx;
-  ctx.font = `${fontPx}px ${CAPTION_FONT}`;
+  ctx.font = captionFont(fontPx);
   chars.forEach((char, i) => {
     const left = (run.x + i * run.w) * sx;
     const top = run.y * sy;
@@ -275,11 +290,7 @@ export class CaptionPainter {
   /** いま canvas に何か描いてあるか。描いていなければ消しに行かない */
   private painted = false;
 
-  constructor(
-    private readonly canvas: HTMLCanvasElement,
-    /** 字の置き場 (`denpaFontUrl()`。バージョン付き) */
-    font: string,
-  ) {
+  constructor(private readonly canvas: HTMLCanvasElement) {
     this.resize =
       typeof ResizeObserver === "function"
         ? new ResizeObserver(this.rescale)
@@ -287,7 +298,8 @@ export class CaptionPainter {
     this.resize?.observe(canvas);
     // ブラウザのズーム (`devicePixelRatio` が変わる)
     window.addEventListener("resize", this.rescale);
-    void loadCaptionFont(font).then(() => {
+    // 基準線を測る「永」の字 (基本の字のファイル) を先に読ませる
+    void loadFor("永")?.then(() => {
       ink = null;
       this.draw();
     });
@@ -304,6 +316,14 @@ export class CaptionPainter {
       this.flashTimer = null;
     }
     this.draw();
+    // まだ読んでいない字 (JIS X 0213 で足された漢字の初めての1字など) があれば、届いてから描き直す
+    const text = page?.runs
+      .filter((run) => run.drcs === undefined)
+      .map((run) => run.text)
+      .join("");
+    void loadFor(text ?? "")?.then(() => {
+      if (this.page === page) this.draw();
+    });
   }
 
   /** 畳む。canvas は消して返す */

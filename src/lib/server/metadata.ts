@@ -35,7 +35,7 @@ function sidecarBase(videoPath: string): string {
   return videoPath.slice(0, videoPath.length - extname(videoPath).length);
 }
 
-/** サイドカーの接尾辞。片付けと孤児探し (files.ts) はこの一覧で見る。増やすときはここだけ */
+/** サイドカーの接尾辞。片付けと孤児探し (files.ts) はこの一覧で見る。増やすときは `sidecarPaths` と一緒に */
 export const SIDECAR_SUFFIXES = ["-poster.jpg", ".bml.jsonl"] as const;
 
 /**
@@ -45,7 +45,7 @@ export const SIDECAR_SUFFIXES = ["-poster.jpg", ".bml.jsonl"] as const;
 const THUMBNAIL_CANDIDATES = 450;
 
 /** サムネを取る位置 (読む入力の時刻) と、そこから読んでよい長さ */
-export interface ThumbnailPlace {
+interface ThumbnailPlace {
   at: number;
   limit?: number;
 }

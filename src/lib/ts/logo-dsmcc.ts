@@ -9,7 +9,7 @@
  * Mirakurun も同じ切り分けで、ネットワーク4 は DSM-CC を読みに行く
  * (`TSFilter.ts` の `_enableParseDSMCC`)。
  *
- * 道のりが長い。
+ * 手順が長い。
  *
  * 1. PAT から**サービス 929** (エンジニアリングサービス) の PMT を見つける
  * 2. その PMT で `stream_identifier_descriptor` の component_tag が
@@ -84,7 +84,7 @@ function parseLogoEsPids(
   return { serviceId: u16(section, 3), pids };
 }
 
-export interface ModuleLogo {
+interface ModuleLogo {
   logoId: number;
   logoType: number;
   /** そのロゴを使う局。ロゴのほうが「どの局か」を持っている (SDT を待たなくていい) */
@@ -160,52 +160,30 @@ function logoKey(logo: ModuleLogo): string {
 }
 
 /**
- * 衛星のロゴを集める。
+ * カルーセルの読みかけ。**開き直しても捨てない。**
  *
- * PAT → PMT → カルーセル、と辿る必要があるので、読む PID が動く。
- * `SectionAssembler` を必要になった時点で足していく。
+ * 衛星のロゴは十数分に一度まとめて流れてくるだけで (`server/logo.ts` の `SATELLITE_TIMEOUT`)、
+ * 開いている間にその一度が来るとは限らない。番組表集めやライブに譲って閉じるたびに
+ * 一から読み直していた頃は、衛星のチューナーが2台の環境では途中で取り上げられてばかりで、
+ * BS も CS も何日経っても揃わなかった。DII で知ったモジュールと受け取ったブロックを
+ * ここに残し、次に開いたときに続きを読む。
+ *
+ * 中継ごとに違う PAT・PMT の読み取りは持たない (それは `DsmccLogoCollector` が開くたびに作る)。
  */
-export class DsmccLogoCollector {
-  private readonly pat = new SectionAssembler(PID_PAT);
-  /** ESS の PMT。PAT を読んでから足す */
-  private pmt: SectionAssembler | null = null;
-  /** カルーセルが流れている ES。PMT を読んでから足す */
-  private readonly carousels = new Map<number, SectionAssembler>();
-
+export class CarouselProgress {
   /** 組み立て中のモジュール (downloadId + moduleId ごと) */
   private readonly downloads = new Map<string, ModuleBuilder>();
   /** 揃ったロゴ */
   private readonly logos = new Map<string, ModuleLogo>();
-  /** PAT を読んだか。読むまでは「この中継にロゴがあるか」を判断できない */
-  private sawPat = false;
-  private ess = false;
+  /**
+   * DII が知らせたロゴのモジュール (`downloadKey` → 名前) と、そのうち一度でも揃ったもの。
+   * 両方の名前が知らされて全部揃えば、カルーセルを1回ぶん読み切った (`carouselRead`)。
+   * 組み立て中と同じく数を限り、あふれたら両方とも捨てて数え直す
+   */
+  private readonly announced = new Map<string, string>();
+  private readonly completed = new Set<string>();
 
-  /** パケットを1つ食わせる */
-  feed(packet: Uint8Array): void {
-    for (const section of this.pat.feed(packet)) {
-      const pmtPid = parsePat(section).get(ESS_SERVICE_ID);
-      this.sawPat = true;
-      this.ess = pmtPid !== undefined;
-      if (pmtPid !== undefined && this.pmt === null)
-        this.pmt = new SectionAssembler(pmtPid);
-    }
-
-    for (const section of this.pmt?.feed(packet) ?? []) {
-      const found = parseLogoEsPids(section);
-      if (found === null || found.serviceId !== ESS_SERVICE_ID) continue;
-      for (const pid of found.pids) {
-        // DSM-CC は section_syntax_indicator が立たないことがある (`SectionAssembler` の `crc`)
-        if (!this.carousels.has(pid))
-          this.carousels.set(pid, new SectionAssembler(pid, "syntax"));
-      }
-    }
-
-    for (const carousel of this.carousels.values()) {
-      for (const section of carousel.feed(packet)) this.onSection(section);
-    }
-  }
-
-  private onSection(section: Uint8Array): void {
+  onSection(section: Uint8Array): void {
     if (section[0] === TABLE_DII) {
       const dii = parseDii(section);
       if (dii === null) return;
@@ -214,6 +192,16 @@ export class DsmccLogoCollector {
         if (module.name === null || !LOGO_MODULE_NAMES.has(module.name))
           continue;
         const key = downloadKey(dii.downloadId, module.moduleId);
+        if (
+          module.moduleSize <= MAX_LOGO_MODULE_SIZE &&
+          !this.announced.has(key)
+        ) {
+          if (this.announced.size >= MAX_LOGO_DOWNLOADS) {
+            this.announced.clear();
+            this.completed.clear();
+          }
+          this.announced.set(key, module.name);
+        }
         const building = this.downloads.get(key);
         // 組み立て中のものを作り直さない (受け取ったブロックが消える)
         if (
@@ -254,6 +242,7 @@ export class DsmccLogoCollector {
 
     // 揃った。次の DII でまた組み立て始める (同じバージョンなら同じロゴで上書きするだけ)
     this.downloads.delete(key);
+    if (this.announced.has(key)) this.completed.add(key);
     for (const logo of parseLogoModule(download.data)) {
       if (logo.data.length > 0) this.logos.set(logoKey(logo), logo);
     }
@@ -261,6 +250,80 @@ export class DsmccLogoCollector {
 
   collected(): ModuleLogo[] {
     return [...this.logos.values()];
+  }
+
+  /**
+   * **カルーセルを1回ぶん読み切ったか。** DII が `LOGO-05` と `CS_LOGO-05` の両方を知らせ、知らせた
+   * モジュールが全部一度は揃った。BS と CS が別々の DII で来ることもありうるので、片方の名前しか
+   * 知らされていないうちは読み切ったことにしない。ここまで来て持っていない局は、カルーセルに載っていない。
+   *
+   * 静かになったら読み切った、とみなしていた頃は、BS と CS のモジュールが別々の時刻に来ると、
+   * 片方が揃って静かになった時点で、もう片方の全局を「載っていない」と控えていた。
+   * 開き直しをまたいで数えてよい (揃ったモジュールは揃ったまま)
+   */
+  get carouselRead(): boolean {
+    const names = new Set(this.announced.values());
+    return (
+      [...LOGO_MODULE_NAMES].every((name) => names.has(name)) &&
+      [...this.announced.keys()].every((key) => this.completed.has(key))
+    );
+  }
+}
+
+/**
+ * 衛星のロゴを集める。
+ *
+ * PAT → PMT → カルーセル、と辿る必要があるので、読む PID が動く。
+ * `SectionAssembler` を必要になった時点で足していく。
+ */
+export class DsmccLogoCollector {
+  private readonly pat = new SectionAssembler(PID_PAT);
+  /** ESS の PMT。PAT を読んでから足す */
+  private pmt: SectionAssembler | null = null;
+  /** カルーセルが流れている ES。PMT を読んでから足す */
+  private readonly carousels = new Map<number, SectionAssembler>();
+  /** PAT を読んだか。読むまでは「この中継にロゴがあるか」を判断できない */
+  private sawPat = false;
+  private ess = false;
+
+  /**
+   * @param progress カルーセルの読みかけ。渡せば、前に開いたときの続きから組み立てる
+   */
+  constructor(private readonly progress = new CarouselProgress()) {}
+
+  /** パケットを1つ食わせる */
+  feed(packet: Uint8Array): void {
+    for (const section of this.pat.feed(packet)) {
+      const pmtPid = parsePat(section).get(ESS_SERVICE_ID);
+      this.sawPat = true;
+      this.ess = pmtPid !== undefined;
+      if (pmtPid !== undefined && this.pmt === null)
+        this.pmt = new SectionAssembler(pmtPid);
+    }
+
+    for (const section of this.pmt?.feed(packet) ?? []) {
+      const found = parseLogoEsPids(section);
+      if (found === null || found.serviceId !== ESS_SERVICE_ID) continue;
+      for (const pid of found.pids) {
+        // DSM-CC は section_syntax_indicator が立たないことがある (`SectionAssembler` の `crc`)
+        if (!this.carousels.has(pid))
+          this.carousels.set(pid, new SectionAssembler(pid, "syntax"));
+      }
+    }
+
+    for (const carousel of this.carousels.values()) {
+      for (const section of carousel.feed(packet))
+        this.progress.onSection(section);
+    }
+  }
+
+  collected(): ModuleLogo[] {
+    return this.progress.collected();
+  }
+
+  /** カルーセルを1回ぶん読み切ったか (`CarouselProgress.carouselRead`) */
+  get carouselRead(): boolean {
+    return this.progress.carouselRead;
   }
 
   /**

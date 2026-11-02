@@ -87,7 +87,7 @@ describe("B24CaptionDecoder", () => {
         0x50 | 0x04, // 背景を青
         ...encodeAribText("赤"),
         0x87, // WHF
-        ...csi("1;7", 0x63), // ORN 縁取り 黒 (組0の0)… p2 = 7 → 組0の7 (白)
+        ...csi("1;7", 0x63), // ORN 縁取り 組0の7 (白)
         0x97,
         0x4f, // HLC 四方
         0x9a, // STL
@@ -159,6 +159,59 @@ describe("B24CaptionDecoder", () => {
     ]);
   });
 
+  test("表で空いている点はゲタ (〓) にする (「�」はフォントに無い)", () => {
+    const page = decoder().decode(
+      text([
+        ...HEAD,
+        ...aps(0, 0),
+        // 漢字の表の 87区1点 (追加記号の空き)、8区63点 (JIS X 0213 にも無い点)
+        ...[0x77, 0x21, 0x28, 0x5f],
+        ...encodeAribText("字"),
+      ]),
+    );
+    expect(page?.runs.map((r) => r.text)).toEqual(["〓〓字"]);
+  });
+
+  test("JIS X 0213 の1面・2面を読む", () => {
+    const page = decoder().decode(
+      text([
+        ...HEAD,
+        ...aps(0, 0),
+        // 漢字集合の 3区1点 (JIS X 0213 にだけある字) と 85区1点 (追加漢字)
+        ...[0x23, 0x21, 0x75, 0x21],
+        // JIS互換漢字1面の 85区1点 (第3水準の漢字)
+        ...[0x1b, 0x24, 0x39, 0x75, 0x21],
+        // JIS互換漢字2面の 1区1点と 94区94点 (空き)
+        ...[0x1b, 0x24, 0x3a, 0x21, 0x21, 0x7e, 0x7e],
+      ]),
+    );
+    expect(page?.runs.map((r) => r.text)).toEqual(["▷㐂擄𠂉〓"]);
+  });
+
+  test("2つのコードポイントの字は1区画の run にする (joined)", () => {
+    const page = decoder().decode(
+      text([
+        ...HEAD,
+        ...aps(0, 0),
+        ...encodeAribText("字"),
+        // 4区87点 (か + 半濁点)・11区70点 (声調の組)
+        ...[0x24, 0x77, 0x2b, 0x66],
+        ...encodeAribText("字"),
+      ]),
+    );
+    const runs = page?.runs ?? [];
+    expect(runs.map((r) => [r.text, r.joined])).toEqual([
+      ["字", undefined],
+      ["か゚", true],
+      ["˥˩", true],
+      ["字", undefined],
+    ]);
+    // 区画は1つずつ右へ
+    expect(runs.map((r) => r.x - runs[0]!.x)).toEqual(
+      [0, 1, 2, 3].map((i) => i * runs[0]!.w),
+    );
+  });
+
   test("置き換えられない外字は画像で送る (なめらかにした濃淡。drcs-smooth.ts)", () => {
     const rows = [
       "#.......",
@@ -205,6 +258,8 @@ describe("B24CaptionDecoder", () => {
     expect(DRCS_REPLACE.get("c7b93e8e27f686cbeeb88e871c17327c")).toBe(0x300a);
     expect(DRCS_REPLACE.get("e806d1481cfa721da5f60413531f39bd")).toBe(0x1f4f1);
     expect(DRCS_REPLACE.get("d9b5d861024ce112c12fa5f155bb1af3")).toBe(0x1f50a);
+    expect(DRCS_REPLACE.get("d1e6371a34eaf49154ea6a4d0e9064ac")).toBe(0x1f50a);
+    expect(DRCS_REPLACE.get("22db8ff6ac75b60b76a15a6e9c42a5db")).toBe(0x1f4fa);
   });
 
   test("追加記号 (90区〜) は Unicode の字にする", () => {

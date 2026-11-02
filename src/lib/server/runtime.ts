@@ -179,7 +179,7 @@ export function start(): void {
    *
    * inotify (fs.watch) で消した瞬間に気づけないか試したが、この構成では
    * 最初の1件しかイベントが来ず当てにできなかったので定期実行にしてある。
-   * すぐ反映したいときは画面の「実体と照合」を押す。
+   * すぐ反映したいときは画面の「ファイルと照合」を押す。
    */
   nowAndEvery(config.reconcileInterval, "reconcile", reconcile);
 
@@ -221,7 +221,8 @@ export function start(): void {
 
   /*
    * 局ロゴ。放送波から取得するしかないので、持っていない局のぶんを少しずつ取得する。
-   * 開いている選局を共有するだけなので、チューナーは増えない
+   * ふだんは開いている選局を共有するので、チューナーは増えない (衛星のロゴが足りない間だけ、空いている
+   * チューナーで当たりの中継を開いて待つ。`logo.awaitCarousel`)
    *
    * 起動のたびに、印 (`has_logo`) とファイルを突き合わせ直す。置き場ごと
    * 消えることは実際にあり、印だけ残っていると番組表に壊れた画像が並ぶ
@@ -305,6 +306,8 @@ function stop(): void {
 
 /** 入口 (`server.js`) が見る名前。あちらと揃えること */
 const TAKE_OVER = "__denpaTakeOverSignals";
+/** 入口が読む `hold-signals.ts` が、起動の途中に来た合図を置く名前。あちらと揃えること */
+const HELD = "__denpaHeldSignal";
 
 /**
  * Pod の入れ替えなどで止められたときの後始末。
@@ -318,18 +321,25 @@ const TAKE_OVER = "__denpaTakeOverSignals";
  * Pod はどのみち残っているので、新しく待たせるものは無い。
  * エンコードは待たない (再起動でやり直せる)。
  *
- * 待つのをやめる上限が `SHUTDOWN_WAIT`。0 にすると今までどおりすぐ止まる。
+ * 待つのをやめる上限が `SHUTDOWN_WAIT`。0 にすると待たずに止まる。
  * **Kubernetes 側の `terminationGracePeriodSeconds` と docker compose の
  * `stop_grace_period` を、これ以上に伸ばしておくこと。** 伸ばさないと、
  * 待っている途中で SIGKILL され、居座った意味が無くなる。
  */
 function installShutdownHooks(): void {
   /*
+   * **畳むのは1度だけ。** 引き取りは2度ある (下) ので、`takeOverSignals` の中の印だけでは
+   * 1度目の引き取りのあとに受けた合図と、2度目のあとに受けた合図で2度畳みかねない
+   */
+  let draining = false;
+  /*
    * **落ちても降りる。** `drain` の中で投げると、`void` で捨てているぶん
    * 誰も受け止めず、**プロセスが生きたまま残る** = 入れ替えが止まる。
    * 受け止めて、使っているものだけ放して降りる
    */
   const onSignal = (signal: NodeJS.Signals) => {
+    if (draining) return;
+    draining = true;
     drain(signal).catch((error) => {
       console.warn(`[boot] 停止の途中で失敗しました: ${error}`);
       process.exit(0);
@@ -370,21 +380,35 @@ function installShutdownHooks(): void {
  * **2度目の合図でも落ちないようにする。** `once` にしていた頃は、1度目で
  * 自分の後始末が外れ、2度目は**誰も聞いていない**状態になっていた。そこへ
  * デプロイがもう一度走ると、既定どおりその場で終わる — 録画の途中でも。
+ *
+ * **自分を先に入れてから、ほかを外す。** 外してから入れると、そのすき間は誰も聞いていない。
+ * PID 1 (コンテナ) では、そこへ来た合図は捨てられる (`hold-signals.ts`)。
+ *
+ * **起動の途中に来た合図を受け直す。** 入口の `hold-signals.ts` が取っておいたものがあれば、
+ * 引き取ったところで受けたことにする。録画があれば待ち、無ければすぐ止まる (いつもと同じ)
  */
 export function takeOverSignals(
   onSignal: (signal: NodeJS.Signals) => void,
 ): number {
   let taken = 0;
   let draining = false;
+  const receive = (signal: NodeJS.Signals) => {
+    // もう畳んでいる最中。2度目からは受け取るだけで何もしない
+    if (draining) return;
+    draining = true;
+    onSignal(signal);
+  };
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    taken += process.listenerCount(signal);
-    process.removeAllListeners(signal);
-    process.on(signal, () => {
-      // もう畳んでいる最中。2度目からは受け取るだけで何もしない
-      if (draining) return;
-      draining = true;
-      onSignal(signal);
-    });
+    const others = process.listeners(signal);
+    process.on(signal, () => receive(signal));
+    for (const other of others) process.removeListener(signal, other);
+    taken += others.length;
+  }
+  const global = globalThis as Record<string, unknown>;
+  const held = global[HELD];
+  if (held === "SIGTERM" || held === "SIGINT") {
+    delete global[HELD];
+    receive(held);
   }
   return taken;
 }

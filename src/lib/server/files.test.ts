@@ -190,7 +190,7 @@ describe("古い履歴の片付け", () => {
  * 手で置いたものかもしれないので、数えるだけ。
  */
 describe("実体との照合", () => {
-  /** 置き場を作り直して、そこに置いたファイルの一覧を返す */
+  /** 元のTSの置き場にあるファイルの一覧 */
   function files(): string[] {
     return readdirSync(config.rawDir).sort();
   }
@@ -334,16 +334,16 @@ describe("実体との照合", () => {
     expect(existsSync(left)).toBe(false);
   });
 
-  test("切り出したばかりのTSは「実体だけ」に数えない", () => {
+  test("復号したばかりのTSは「実体だけ」に数えない", () => {
     fresh();
     put(config.rawDir, "番組.m2ts");
-    put(config.rawDir, "番組.m2ts.cut.m2ts", false);
+    put(config.rawDir, "番組.m2ts.decoded.m2ts", false);
 
-    // 元のTSのほうはDBに無いので1件。書きたての .cut.m2ts は数えない
+    // 元のTSのほうはDBに無いので1件。書きたての .decoded.m2ts は数えない
     expect(reconcile().strays).toBe(1);
   });
 
-  /** 両方のコーデックをエンコードした録画を1件入れる。返り値は {av1, h264} の実パス */
+  /** AV1 と H.264 の2つでエンコードした録画を1件入れる。返り値は {av1, h264} の実パス */
   function twoCodec(): { av1: string; h264: string } {
     const av1 = put(config.encodedDir, "二本立て/二本立て - 1.mkv");
     const h264 = put(config.encodedDir, "二本立て/二本立て - 1 [H264].mkv");
@@ -366,7 +366,7 @@ describe("実体との照合", () => {
   }
 
   /*
-   * **両方エンコードした録画の H.264 は「DBに無い動画」ではない。** known 集合に
+   * **AV1 と H.264 でエンコードした録画の H.264 は「DBに無い動画」ではない。** known 集合に
    * `alt_path` も入れておかないと、もう一方が野良動画として数えられてしまう
    */
   test("もう一方のコーデックは stray に数えない", () => {
@@ -411,5 +411,59 @@ describe("実体との照合", () => {
       .get()!;
     expect(row.lib).toBe(av1);
     expect(row.alt).toBeNull();
+  });
+
+  /** 3つのコーデックでエンコードした録画。返り値は実パス */
+  function threeCodec(): { av1: string; hevc: string; h264: string } {
+    const av1 = put(config.encodedDir, "三本立て/三本立て - 1.mkv");
+    const hevc = put(config.encodedDir, "三本立て/三本立て - 1 [H265].mkv");
+    const h264 = put(config.encodedDir, "三本立て/三本立て - 1 [H264].mkv");
+    orm()
+      .insert(recordings)
+      .values({
+        id: 10,
+        service_id: 1,
+        name: "三本立て",
+        start_at: 0,
+        end_at: 0,
+        finished_at: 0,
+        library_path: av1,
+        hevc_path: hevc,
+        alt_path: h264,
+        created_at: 0,
+        updated_at: 0,
+      })
+      .run();
+    return { av1, hevc, h264 };
+  }
+  const row10 = () =>
+    orm()
+      .select({
+        lib: recordings.library_path,
+        hevc: recordings.hevc_path,
+        alt: recordings.alt_path,
+      })
+      .from(recordings)
+      .where(eq(recordings.id, 10))
+      .get()!;
+
+  test("3本あるとき、H.265 も stray に数えず、主が消えたら H.265 を繰り上げる", () => {
+    fresh();
+    const { av1, hevc, h264 } = threeCodec();
+    expect(reconcile().strays).toBe(0);
+    rmSync(av1);
+    expect(reconcile().removed).toBe(0);
+    expect(row10()).toEqual({ lib: hevc, hevc: null, alt: h264 });
+  });
+
+  test("主と H.265 が消えたら H.264 を繰り上げる。H.265 だけ消えたら控えだけ外す", () => {
+    fresh();
+    const { av1, hevc, h264 } = threeCodec();
+    rmSync(hevc);
+    reconcile();
+    expect(row10()).toEqual({ lib: av1, hevc: null, alt: h264 });
+    rmSync(av1);
+    reconcile();
+    expect(row10()).toEqual({ lib: h264, hevc: null, alt: null });
   });
 });

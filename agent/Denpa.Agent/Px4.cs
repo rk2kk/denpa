@@ -74,18 +74,6 @@ public static class Px4Userland
     public static string Dir =>
         Environment.GetEnvironmentVariable("PX4_USERLAND_DIR") ?? "/opt/px4-userland";
 
-    /// <summary>
-    /// IT930x のファームウェア。**同梱してある** (Dockerfile)。
-    ///
-    /// <para>
-    /// 本体には入っておらず、挿すたびにホストから RAM へ流し込むもの。
-    /// px4-userland は受理するバージョンを SHA-256 で1つに固定していて、
-    /// 違うものを渡すと <c>FIRMWARE_REJECTED</c> で起動しない。
-    /// </para>
-    /// </summary>
-    public static string Firmware =>
-        Environment.GetEnvironmentVariable("PX4_FIRMWARE") ?? Path.Combine(Dir, "firmware", "it930x-firmware.bin");
-
     /// <summary>px4d / px4ctl の実行ファイル。Windows だけ <c>.exe</c> が付く (配布 zip の中身のまま)</summary>
     public static string Executable(string dir, string name) =>
         Path.Combine(dir, OperatingSystem.IsWindows() ? $"{name}.exe" : name);
@@ -448,8 +436,8 @@ public static class Px4Userland
         public int? Number(JsonObject obj, string key, string where, bool optional = false) =>
             Read(obj, key, where, optional, "整数", out int number) ? number : null;
 
-        public bool? Flag(JsonObject obj, string key, string where, bool optional = false) =>
-            Read(obj, key, where, optional, "真偽値", out bool flag) ? flag : null;
+        public bool? Flag(JsonObject obj, string key, string where) =>
+            Read(obj, key, where, false, "真偽値", out bool flag) ? flag : null;
 
         /// <summary>鍵の値を <typeparamref name="T"/> で読む。型が違えば「<paramref name="kind"/>ではない」と残す</summary>
         private bool Read<T>(JsonObject obj, string key, string where, bool optional, string kind, out T? result)
@@ -561,8 +549,14 @@ public static class Px4Userland
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (object Owner, string Text)> Notices =
         new(StringComparer.Ordinal);
 
+    /// <remarks>
+    /// ファームウェアを取ってこられなかったときは、px4-userland の受信機すべてにその理由を出す
+    /// (px4d を起こせず、どの受信機も使えない。<see cref="Px4Firmware.Problem"/>)
+    /// </remarks>
     public static string? Notice(string? device) =>
-        device is not null && Notices.TryGetValue(device, out var notice) ? notice.Text : null;
+        device?.StartsWith(Scheme, StringComparison.Ordinal) == true && Px4Firmware.Problem is { } firmware
+            ? firmware
+            : device is not null && Notices.TryGetValue(device, out var notice) ? notice.Text : null;
 
     internal static void SetNotice(string device, object owner, string text) => Notices[device] = (owner, text);
 
@@ -601,7 +595,7 @@ public static class Px4Userland
 /// <c>Lnb15v</c> は LNB に 15V を出せるか (<c>lnb_15v_supported</c>、px4-userland 0.1.9 から)。
 /// **分からなければ null** で、そのときは言われたとおり指定する (合わなければ px4d が断る)。
 /// <c>px4ctl list</c> には載らない (IPC の形式は変えないと SPEC 4.1 v0.26) ので、筐体の一覧から写す
-/// (<see cref="Px4Daemon.Ensure"/>)。
+/// (<see cref="Px4Daemon.WithLnb"/>)。
 /// </para>
 /// </summary>
 public sealed record Px4Receiver(int Index, bool Terrestrial, bool Satellite, bool? Lnb15v = null)
@@ -618,7 +612,6 @@ public sealed record Px4Receiver(int Index, bool Terrestrial, bool Satellite, bo
     /// <c>system</c> は <c>ISDB-T</c> / <c>ISDB-S</c> / <c>ISDB-T/S</c> (どちらも)。
     /// **知らない値は飛ばして続ける** — px4-userland が新しくなって方式が増えても、
     /// 分かる受信機は使えるように。飛ばしたことは <paramref name="warn"/> で残す。
-    /// 15V の可否はここには載らない (<see cref="Px4Daemon.WithLnb"/> が一覧から写す)。
     /// </para>
     /// </summary>
     public static List<Px4Receiver> ParseList(string output, Action<string> warn)
@@ -753,7 +746,7 @@ public abstract class UserlandDaemon(string name, string id)
 
     /// <summary>
     /// 起こして、<paramref name="ready"/> が通るまで待つ。<paramref name="runtimeDir"/> (ランタイムルート) は
-    /// 呼ぶ側が用意する決まり (常駐は下の階層しか作らない)
+    /// ここで作る (常駐は下の階層しか作らない決まり。Unix では本人だけが使えるようにする)
     /// </summary>
     /// <param name="stopByStdin">
     /// **標準入力で止める** (Windows の px4d。<c>--exit-on-stdin-eof</c>)。標準入力は何も書かずに開けたまま持ち、
@@ -918,20 +911,17 @@ public sealed class Px4Daemon(string id) : UserlandDaemon("px4d", id)
         {
             throw new IOException($"{Px4Userland.Label(Id)} の筐体が見つかりません (抜けたか、USB ポートを変えた?)");
         }
-        if (!File.Exists(Px4Userland.Firmware))
-        {
-            throw new IOException($"ファームウェアがありません: {Px4Userland.Firmware}"
-                + (OperatingSystem.IsWindows() ? " (install.ps1 を流し直すと切り出します)" : ""));
-        }
         var px4d = Px4Userland.Executable(Px4Userland.Dir, "px4d");
         if (!File.Exists(px4d)) throw new IOException($"px4-userland が入っていません: {px4d}");
         // ランタイムルートが px4d の決まりに合わなければ、px4d の分かりにくい INVALID_ARGUMENT の前に理由を言う
         if (Px4Userland.RuntimeProblem(Px4Userland.RuntimeDir, Id) is { } problem) throw new IOException(problem);
+        // イメージには入れていない。初めてなら取ってきて設定の置き場に置く (Px4Firmware.cs)
+        var firmware = Px4Firmware.Ensure();
 
         Launch(px4d,
             [
                 .. Select(enclosure),
-                "--firmware", Px4Userland.Firmware,
+                "--firmware", firmware,
                 "--runtime-dir", Px4Userland.RuntimeDir,
                 /*
                  * 15V を出してよいかのチェックは2段。ここは「指定されたら出す」で開けておき、
@@ -1007,7 +997,8 @@ public sealed class Px4Daemon(string id) : UserlandDaemon("px4d", id)
 /// <para>
 /// 最初の選局で <c>ACQUIRE → TUNE → START_STREAM → ATTACH_STREAM</c>、2回目からは
 /// <c>STOP_STREAM → TUNE → START_STREAM → ATTACH_STREAM</c> (px4-userland SPEC 6.3)。
-/// 返すのは <see cref="Dispose"/> (<c>RELEASE</c>) のときだけ (返すと px4d が電源を落とし、次の選局が遅くなる)。
+/// 返すのは <see cref="Dispose"/> (<c>RELEASE</c>) と、取ったままでは続けられない失敗のときだけ
+/// (<see cref="Keeps"/>。返すと px4d が電源を落とし、次の選局が遅くなる)。
 /// TS は <c>stream.sock</c> に来る (<see cref="Px4Stream"/>)。誰も読まなくなったら TS のストリームだけ畳み、
 /// 次の選局は同じ lease で選局し直す (<see cref="Tuned"/>)。docs/agent.md「px4-userland の作り」
 /// </para>
@@ -1045,6 +1036,31 @@ public sealed class Px4Tuner : ITuneDevice
     /// <summary>筐体が抜けたと言われたときに呼ぶ (px4d を止めて、次の選局で起こし直す。<see cref="Px4Daemon.Lost"/>)</summary>
     private readonly Action? _lost;
     private readonly Lock _gate = new();
+
+    /// <summary>
+    /// 筐体ごとの順番。**px4d に受信機の要求を送るのは、同じ筐体で1度に1つ。**
+    ///
+    /// <para>
+    /// px4d は同じブリッジの受信機の要求を1つのキューで順に片付ける (MLT5 系なら受信機 0〜3 が同じキュー)。
+    /// こちらの待つ上限 (TUNE なら 7 秒) は送ったときから数えるので、ほかの受信機の TUNE が
+    /// キューに並んでいると、その待ちまで上限に食われる。同期しない TUNE は1つ 5 秒かかり、
+    /// 複数のチューナーでスキャンすると後ろのほうが時間切れになっていた。時間切れを
+    /// 接続が切れたと見て受信機を返し、取り直しは前の lease が残っていて BUSY で断られ、
+    /// そのチャンネルが結果から落ちた (#1713)。こちらで1つずつ送れば、待つのは自分の処理のぶんだけ。
+    /// どうせ px4d が順に処理するので、選局が遅くなるわけではない。
+    /// </para>
+    /// <para>
+    /// 区切りは筐体 (制御ソケット) 単位。どの受信機が同じキューかは px4d の中の作りなので当てにしない
+    /// (Q3U4 のようにキューが2つある筐体でも、ブリッジをまたいだ選局が少し待つだけ)。
+    /// START_STREAM から ATTACH_STREAM までは px4d が 5 秒しか待たないので、その間も放さない。
+    /// 閉じるとき (<see cref="Dispose"/>) は並ばない — 答えが来なくても接続を閉じれば px4d が返すし、
+    /// <c>TunerPool</c> のロックを持ったまま呼ばれるので、ほかの受信機の選局を待つと取り合いごと止まる。
+    /// カード (Px4Card.cs) は px4d の別のキューなので入れない
+    /// </para>
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lock> Turns = new();
+
+    private readonly Lock _turn;
 
     /// <summary>受信機を取っている制御ソケット。null なら取っていない</summary>
     private Px4Control? _control;
@@ -1097,6 +1113,7 @@ public sealed class Px4Tuner : ITuneDevice
         _wire = wire ?? Px4Wire.Px4;
         _device = device ?? Px4Userland.Device(id, receiver);
         _name = name ?? $"px4-{Px4Userland.Tail(id)} #{receiver}";
+        _turn = Turns.GetOrAdd(Px4Control.Endpoint(runtimeDir, id, "control.sock", _wire), _ => new Lock());
     }
 
     /// <summary>読む側がいないまま溜めが空かなければ、この時間で TS のストリームを畳む</summary>
@@ -1171,14 +1188,17 @@ public sealed class Px4Tuner : ITuneDevice
             if (lnb != _lnb) WarnLnb();
             DropStream();
             var reused = _control is not null;
-            try
+            lock (_turn)
             {
-                Attempt(tuning, streamId, lnb);
-            }
-            catch (IOException error) when (reused && Lost(error))
-            {
-                Log.Write($"[{_name}] {_wire.Daemon} との接続が切れていたので、受信機を取り直します ({error.Message})");
-                Attempt(tuning, streamId, lnb);
+                try
+                {
+                    Attempt(tuning, streamId, lnb);
+                }
+                catch (IOException error) when (reused && Lost(error))
+                {
+                    Log.Write($"[{_name}] {_wire.Daemon} との接続が切れていたので、受信機を取り直します ({error.Message})");
+                    Attempt(tuning, streamId, lnb);
+                }
             }
         }
     }
@@ -1348,7 +1368,7 @@ public sealed class Px4Tuner : ITuneDevice
     }
 
     /// <summary>
-    /// STATS を1回聞く。**制御ソケットは選局と同じ錠の下で使う** (1本で同時に1つしか送れない)。
+    /// STATS を1回聞く。**制御ソケットは選局と同じロックの下で使う** (1本で同時に1つしか送れない)。
     /// 聞けなくても流れは止めない — 繋がりの不具合なら次の選局が見つける
     /// </summary>
     private void PollStats()
@@ -1358,7 +1378,7 @@ public sealed class Px4Tuner : ITuneDevice
             if (_control is not { } control || !_started || _stream is not { Ended: false } || _statsTimer is null) return;
             try
             {
-                Counted(control.Request(Px4Control.Stats, Lease(), RequestTimeout));
+                lock (_turn) Counted(control.Request(Px4Control.Stats, Lease(), RequestTimeout));
             }
             catch (IOException error)
             {
@@ -1463,7 +1483,7 @@ internal sealed class Px4StreamError(string message, bool keepsLease) : IOExcept
 /// <para>
 /// <c>stream.sock</c> に繋いで ATTACH_STREAM (lease と nonce) を送ると、あとは px4d が
 /// TS_DATA の枠を送り続け、止めると STREAM_END が来る (SPEC 6.3 / 6.4)。枠の中身はソケットから
-/// <see cref="Pipe"/> のメモリ (<see cref="PipeWriter.GetMemory"/>) へ直に受け、読み出し側はその読む側 (<see cref="DeviceStream"/>)。
+/// <see cref="Pipe"/> のメモリ (<see cref="PipeWriter.GetMemory"/>) へ直に受け、その読む側を読み出し側 (<see cref="DeviceStream"/>) に載せる。
 /// OS の pipe は使わない (Windows に poll が無く、深さも OS ごとに違った) ので、溜めの深さは <see cref="Depth"/> で決め打つ。
 /// </para>
 ///
@@ -1576,6 +1596,7 @@ internal sealed class Px4Stream
         catch (Exception error) when (error is IOException or SocketException)
         {
             socket.Dispose();
+            stream._first.Dispose();
             throw new Px4StreamError($"{wire.Daemon} から TS を受け取れません ({error.Message})", stream._attached);
         }
 
@@ -1621,21 +1642,25 @@ internal sealed class Px4Stream
                     }
                     var body = new byte[length];
                     Px4Control.Receive(_socket, body, _wire);
-                    if (type == Px4Control.StreamEnd && body.Length >= 68)
+                    if (type == Px4Control.StreamEnd && body.Length >= Px4Counters.Size + 4)
                     {
                         // final counters (u64 × 8) のあとに u32 error_code。**誤りがあれば数も残す** (途切れの切り分けに)
                         if (Px4Counters.Parse(body) is { } final && Px4Counters.Describe(null, final) is { } errors)
                         {
                             Log.Write($"[{_name}] {_wire.Daemon} の TS の数 (止まるまで): {errors}");
                         }
-                        var code = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(64));
+                        var code = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(Px4Counters.Size));
                         End(code == 0 ? $"{_wire.Daemon} が TS を止めました" : $"{_wire.Daemon} が TS を止めました ({Px4Control.Reason(code)})");
                         return;
                     }
+                    End(type == Px4Control.StreamEnd
+                        ? $"{_wire.Daemon} が TS を止めました (STREAM_END が短くて理由が読めません、{length} バイト)"
+                        : $"{_wire.Daemon} から知らない枠が来ました (型 0x{type:x4})");
+                    return;
                 }
-                if (type != Px4Control.TsData || flags != 0 || length < TsHeaderSize)
+                if (flags != 0 || length < TsHeaderSize)
                 {
-                    End($"{_wire.Daemon} から知らない枠が来ました (型 0x{type:x4})");
+                    End($"{_wire.Daemon} の TS_DATA の枠が崩れています (flags 0x{flags:x4}、{length} バイト)");
                     return;
                 }
                 // u64 sequence, u64 cumulative_drop_count, u32 byte_count, bytes
@@ -1762,6 +1787,8 @@ internal sealed class Px4Stream
             pump.Join(TimeSpan.FromSeconds(1));
         }
         _socket.Dispose();
+        // pump が降りてから閉じる。降りきれずに残っていると最後に Set するので、そのときは閉じない (GC に任せる)
+        if (_pump is not { IsAlive: true }) _first.Dispose();
         Output.WaitReaders(ChildTs.ReaderDrain - stopped.Elapsed);
         Output.Dispose();
         _ended = true;

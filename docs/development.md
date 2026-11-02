@@ -50,6 +50,15 @@ docker compose run --rm docs bun scripts/capture-docs.ts watch live   # 名前�
 ja-JP・Asia/Tokyo。動く画像も同じ広さで撮り、縮めずに 30fps で組む) は `scripts/capture-docs.ts` の頭に
 あります。見た目を変えたら撮り直してください (古い画像は README を見て入れた人を迷わせます)。
 
+## README の謝辞
+
+「謝辞」の節のうち `<!-- thanks:start -->` と `<!-- thanks:end -->` の間は、マージされた PR の作者と
+Issue・Discussion を立てた人を GitHub の履歴から並べたもので、`scripts/thanks.ts` が書きます (手で直さない)。
+Actions の **Thanks** (`.github/workflows/thanks.yml`) が週に 1 回回し、変わっていれば image marks と同じく
+PR を出して自分でマージします。急ぐときは Actions から手で走らせるか、手元で
+`GH_TOKEN=$(gh auth token) bun run thanks` (コンテナの中で) を回して PR にします。
+特別協賛と土台にしている仕事は印の外で、手で書きます。載せない人 (持ち主) は `EXCLUDE` にあります
+
 ## テストの方針
 
 **E2E が主で、単体テストは純粋関数の境界条件だけ。** 偽エージェント・偽の通知先・偽の EPGStation・偽の EpgTimerSrv・
@@ -150,16 +159,26 @@ JSON で持つ列 (ジャンル・音声の構成・ルールの対象の局な�
    使っていないもの・同じことを何か所にも書いたもの・回りくどい書き方を縮めます。範囲ごとに PR に分けて出します
 2. **画面を変えたなら、docs の画像を撮り直す** ([上](#readme-の画像))。Actions の **Screenshots** を main で走らせ、
    artifact の `shots` を `docs/images/` に写して PR にします
-3. main のイメージのビルドが通ったのを確かめて、リリースを作る:
+3. **`packages/arib/` が変わっていれば、その `version` を上げる** ([下](#danythingarib-を出す))。リリースといっしょに npm へ出ます
+4. main のイメージのビルドが通ったのを確かめて、リリースを作る:
    `gh release create vX.Y.Z --target main --generate-notes --title vX.Y.Z`。
    イメージは組み直さず、そのコミットのものにバージョンを貼り足します ([下](#イメージ))
 
 ### `@danything/arib` を出す
 
-`packages/arib/` は denpa のリリースとは別に npm へ出します。`packages/arib/package.json` の `version` を上げる PR を
-マージしてから、main のそのコミットにタグ `arib-v<バージョン>` を押します (`git tag arib-v0.2.0 <そのコミット> && git push origin arib-v0.2.0`)。
+`packages/arib/` はふだん denpa のリリースといっしょに npm へ出ます。前のタグ `arib-v*` から `packages/arib/` が
+変わっていれば、`.github/workflows/arib-publish.yml` が `packages/arib/package.json` の `version` で出して、
+リリースのコミットにタグ `arib-v<バージョン>` を付けます。変わっていなければ何もしません。
+上げる `version` は、互換が壊れるなら major、機能を足したなら minor、直しだけなら patch。
+上げ忘れるとリリースのときにこの workflow が止まります (勝手には上げない)。
+
+リリースを待たずに出すときは、`version` を上げる PR をマージしてから、main のそのコミットにタグを押します
+(`git tag arib-v1.0.1 <そのコミット> && git push origin arib-v1.0.1`)。
 **main の先頭には付けないこと。** マージのあとに `chore: bump image marks [skip ci]` が積まれることが多く、`[skip ci]` のコミットに付けたタグでは Actions が動きません。
-`.github/workflows/arib-publish.yml` がテストとビルドをして、Trusted Publishing で出します (トークンは持たない)。
+どちらもテストとビルドをしてから、Trusted Publishing (トークンは持たない) で **npm にステージまで置きます**。
+公開されるのは、npmjs.com のパッケージの画面 (または `npm stage approve <id>`) で確定したときです (2FA が要る)。
+乗っ取られた workflow から勝手に公開されないよう、npm 側ではこの workflow に `npm stage publish` だけを許しています。
+ステージに置いた時点で `arib-v<バージョン>` のタグが付くので、確定せずに却下したら、次は `version` を上げて出し直します。
 リポジトリの中では `exports` が TypeScript のまま (`src/*.ts`) を指していて、出すときだけ `scripts/manifest.ts` が
 組んだ `dist/` に向け直します
 
@@ -169,7 +188,7 @@ JSON で持つ列 (ジャンル・音声の構成・ルールの対象の局な�
 CI が両方をビルドして `deploy/` の印を書き戻します。**main は直接 push できない**
 (ruleset の必須チェック `check` / `agent` / `e2e (1)`〜`(5)` / `claude-review`) ので、
 書き戻しは bot が PR を出し、必須チェックの status を自分で付けてマージします
-(手順と理由は `.github/bump-pr.sh`。release の Chart.yaml の書き戻しも同じ)。
+(手順と理由は `.github/bump-pr.sh`。release の Chart.yaml の書き戻しと README の謝辞の一覧も同じ)。
 release は組み直さず、main で組んだイメージにバージョンを 1 層足します
 (`.github/release.Dockerfile`。タグの決め方と理由は [architecture.md](architecture.md#イメージのタグ)、
 出し方は `.github/image-tags.sh`)。
@@ -177,8 +196,8 @@ release は組み直さず、main で組んだイメージにバージョンを 
 **イメージは amd64 と arm64 の2つ**で、同じタグに束ねてあります (理由と組み方は
 [architecture.md](architecture.md#イメージのタグ))。Dockerfile は BuildKit の `TARGETARCH`
 で配布物 (px4-userland / siano-ts) の名前と .NET の RID を読み替え、
-Intel の QSV (libvpl・libmfx-gen・intel-media-va-driver) は amd64 だけに入れます
-(Debian の arm64 には無い)。Dockerfile やそこへ入るもの (`agent/`・`patches/`・依存) を
+Intel と AMD の VA-API ドライバは amd64 だけに入れます
+(Debian の arm64 には Intel のドライバが無く、AMD の GPU を載せた arm の機械はまず無い)。Dockerfile やそこへ入るもの (`agent/`・`patches/`・依存) を
 触った PR では、`Docker build check` が両方の arch を本物のランナーで組みます
 (push はしない。必須チェックではない)。手元で arm64 を組むなら
 `docker buildx build --platform linux/arm64 -f agent/Dockerfile .` (amd64 の機械では
@@ -188,9 +207,9 @@ QEMU が要り、ffmpeg や AOT はかなり遅い)。
 
 ### イメージの土台は distroless
 
-**本体もエージェントも土台は distroless** (`gcr.io/distroless/cc-debian13`) で、シェルも apt も
+**本体もエージェントも土台は distroless** (本体は libssl の無い `gcr.io/distroless/base-nossl-debian13`、エージェントは `gcr.io/distroless/cc-debian13`) で、シェルも apt も
 coreutils もありません。どちらも root で動きます。本体の ffmpeg が使うライブラリ
-(libva・Intel の VA-API ドライバ・QSV のランタイムなど) は、Dockerfile の `runtime-libs` 段で
+(libva・Intel と AMD の VA-API ドライバなど) は、Dockerfile の `runtime-libs` 段で
 Debian のパッケージを入れてから要るファイルだけを写しています (dlopen で読むドライバはディレクトリごと)。
 足りないものが無いかは `.github/image-smoke.sh` が ld.so に依存を解かせて確かめます。
 
@@ -204,8 +223,8 @@ denpa が起こすのは ffmpeg / ffprobe だけで、シェルを通しませ�
 
 ffmpeg・SVT-AV1・emsdk・Denpa Font・px4-userland / siano-userland / asicen-userland は、どれも
 `ARG` / `ENV` にバージョン (タグかコミット) を書いてから取ってきます。同じコミットからビルドすれば同じ中身になります。
-バージョンの無い PLEX のドライバの zip (IT930x のファームウェアを切り出す元) は、取ったものの SHA-256 を確かめ、
-中身が変わっていればビルドを止めます。
+バージョンの無い PLEX のドライバの zip (IT930x のファームウェアを切り出す元) はイメージに入れず、エージェントが使う人の
+機械で取ってきます。取ったものの SHA-256 を確かめ、中身が変わっていれば使いません (`Px4Firmware.cs`)。
 
 **土台のイメージと GitHub Actions は digest で留めます。** Dockerfile の `FROM`・`COPY --from=` は
 `名前:タグ@sha256:…`、ワークフローの `uses:` は `@<コミットの SHA> # vX.Y.Z` の形にします。

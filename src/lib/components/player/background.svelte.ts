@@ -3,6 +3,7 @@ import { untrack } from "svelte";
 import { read, write } from "#lib/keep.js";
 
 import { BACKGROUND_KEY, step, storedBackground } from "./background";
+import { nativeBackgroundRecovery } from "./native-background";
 
 /**
  * バックグラウンド再生。**3画面 (ライブ・追っかけ・観る画面) で同じもの。既定はオフ。**
@@ -25,14 +26,18 @@ import { BACKGROUND_KEY, step, storedBackground } from "./background";
  * 止めない。canvas で描くときの音は「再生する音」として鳴らし (Safari は Audio Session を `playback`、ほかは
  * `<audio>` を通す。Web Audio のままだと裏で止めるブラウザがある)、OS が勝手に小窓にするのも許す。
  *
- * **端末ごとに覚える** (`keep.ts`。速さ・CM 飛ばしと同じ) — 手元のスマホでは裏で
+ * **端末ごとに覚える** (`keep.ts`。速さ・CMスキップと同じ) — 手元のスマホでは裏で
  * 聴きたいが、居間のテレビでは要らない、のように端末で変わる
  */
 interface Options {
+  /** `<video>` で観ているときの要素。canvas に描いているときは null (iOS で止められたら戻す: `native-background.ts`) */
+  nativeVideo: () => HTMLVideoElement | null;
   /** 押して開いた小窓を出しているか (`pip.active`) */
   pip: () => boolean;
   /** 止めているか */
   paused: () => boolean;
+  /** 消音にしているか。音を `<video>` と別に鳴らす画面 (ライブ) だけ渡す — `<video>` はわざと消音にしてある */
+  muted?: () => boolean;
   /** 裏に回ったので止める */
   pause: () => void;
   /** 戻ってきたので再開する */
@@ -90,6 +95,32 @@ export function backgroundPlayback(options: Options): Background {
       window.removeEventListener("pagehide", hide);
       window.removeEventListener("pageshow", show);
     };
+  });
+
+  // オンで `<video>` で観ている間、iOS がホーム画面へ戻るときに止めたら 1 回だけ戻す
+  $effect(() => {
+    const video = options.nativeVideo();
+    if (!on || video === null) return;
+    return untrack(() =>
+      nativeBackgroundRecovery({
+        video,
+        page: window,
+        visibility: document,
+        media: navigator.mediaSession,
+        enabled: () => on && !options.pip() && options.nativeVideo() === video,
+        userPaused: options.paused,
+        audible: () => !(options.muted?.() ?? video.muted),
+        pause: options.pause,
+        resume: options.resume,
+        interrupted: () =>
+          (
+            navigator as Navigator & {
+              audioSession?: { state?: string };
+            }
+          ).audioSession?.state === "interrupted",
+        now: () => performance.now(),
+      }),
+    );
   });
 
   // 小窓を閉じた時点でまだ裏なら、そこで止める

@@ -1,5 +1,5 @@
 /**
- * CM の境目を決める (純粋な計算)。材料は `server/cm-scan.ts` が1回の復号で取ったもの。
+ * CM の境目を決める (純粋な計算)。材料は `server/cm-scan.ts` が1回のデコードで取ったもの。
  *
  * 秒はどれも ffmpeg の時刻 (入れ物の頭を 0)。
  */
@@ -30,7 +30,7 @@ export interface CmInput {
 }
 
 /** 境目の候補。無音1つにつき、その中の切れ目 (無ければ真ん中) */
-export interface Boundary {
+interface Boundary {
   /** 無音 */
   silence: Range;
   /** 切れ目 (新しい場面の1コマ目の秒)。強い順 */
@@ -192,7 +192,7 @@ const EDGE = 1;
 /**
  * 番組の置き場所を番組表どおりの頭からずらすときの減点 (1 秒ずらすごとに、ロゴの出ている秒で)。
  *
- * **ロゴの秒数だけで比べると、尻の次の番組に引っぱられる。** 実機のテレ東のアニメで、頭のロゴが 7.6 秒しか拾えず
+ * **ロゴの秒数だけで比べると、尻の次の番組に引っぱられる。** 実機のテレ東のアニメで、頭のロゴが 7.6 秒しか取れず
  * (アバンの途中でロゴを見失った)、尻に入った次の番組のロゴが 10 秒あったため、窓を 13 秒後ろへずらして
  * 番組の頭の 30 秒を CM にしていた。番組表の頭はふつう数秒しか外れない。大きくずれた放送 (延長など) は、
  * ずらしたぶんだけロゴが入るので、この減点を上回る
@@ -548,7 +548,7 @@ const UNSEEN_MIN = 2;
 /**
  * 見えないまま持ち越された所として扱う最長 (秒。CM 1 本ぶん)。**これより長いのは番組のまま。** 本番の録画 32 本を通すと、
  * オープニングの 90 秒 (ロゴの点が 87 秒 0 のまま区間に入っていた) を CM にした録画が 2 本あった。CM は 15 秒ごとに
- * 絵が替わるので、見えない後ろが何本も続くことは少ない
+ * 映像が替わるので、見えない後ろが何本も続くことは少ない
  */
 const UNSEEN_MAX = 15 + CM_TOLERANCE;
 
@@ -680,7 +680,7 @@ function byLogo(input: CmInput, logo: Range[]): Range[] {
   const value = Array.from({ length: n }, () =>
     new Float64Array(STATES).fill(Number.NEGATIVE_INFINITY),
   );
-  /** 戻り道: 前の候補 × STATES + 前の状態 */
+  /** たどる元: 前の候補 × STATES + 前の状態 */
   const from = Array.from({ length: n }, () => new Int32Array(STATES).fill(-1));
   const relax = (j: number, s: State, v: number, i: number, prev: State) => {
     if (v > value[j]![s]!) {
@@ -688,7 +688,7 @@ function byLogo(input: CmInput, logo: Range[]): Range[] {
       from[j]![s] = i * STATES + prev;
     }
   };
-  /** いま終わった提供 (候補 `i` で終わった状態 `s`) のうちロゴの無い割合。頭は戻り道から引く */
+  /** いま終わった提供 (候補 `i` で終わった状態 `s`) のうちロゴの無い割合。頭は `from` から引く */
   const creditBare = (i: number, s: State) => {
     const start = nodes[Math.floor(from[i]![s]! / STATES)]!.at;
     const end = nodes[i]!.at;

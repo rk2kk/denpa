@@ -6,7 +6,7 @@ namespace Denpa.Agent.Tests;
 /*
  * 画面の「カードリーダー」の表 (Card.cs の Local / Remote / Report)。
  *
- * 本物のリーダーは無い。INT と IDI に答える線を置き、**使っているリーダーを
+ * 本物のリーダーは無い。INT と IDI に答える接続を置き、**使っているリーダーを
  * 開き直さない**ことと、予備・カードなし・壊れたリーダーがそれぞれの行になることを確かめる。
  */
 public class CardStatusTests
@@ -14,7 +14,7 @@ public class CardStatusTests
     // カードの番号は必ず架空のものにする (本物のカードの番号を載せない)
     private static readonly CardInit Using = new(new byte[32], new byte[8], 5, [1234567890]);
 
-    /// <summary>INT (返り値 0x2100) と IDI (番号 <paramref name="id"/>) に答える線</summary>
+    /// <summary>INT (返り値 0x2100) と IDI (番号 <paramref name="id"/>) に答える接続</summary>
     private sealed class FakeLink(string name, long id) : ICardLink
     {
         public string Name { get; } = name;
@@ -172,15 +172,15 @@ public class CardStatusTests
     [Test]
     public async Task 配り役から貰っているときはその相手と番号を返す()
     {
-        var report = Card.Report(Card.Remote("http://card:25252", () => Using), ["PT3-T1"]);
+        var report = Card.Report(Card.Remote("http://card:25253", () => Using), ["PT3-T1"]);
         await Assert.That(report["source"]!.GetValue<string>()).IsEqualTo("remote");
-        await Assert.That(report["remote"]!.GetValue<string>()).IsEqualTo("http://card:25252");
+        await Assert.That(report["remote"]!.GetValue<string>()).IsEqualTo("http://card:25253");
         await Assert.That(report["ok"]!.GetValue<bool>()).IsTrue();
         await Assert.That(report["ids"]![0]!.GetValue<string>()).IsEqualTo("0000001234567890");
         await Assert.That(report["tuners"]![0]!.GetValue<string>()).IsEqualTo("PT3-T1");
         await Assert.That(report["readers"]!.AsArray().Count).IsEqualTo(0);
 
-        var down = Card.Remote("http://card:25252", () => throw new IOException("鍵を配る拠点からカードの情報を受け取れません (503)"));
+        var down = Card.Remote("http://card:25253", () => throw new IOException("鍵を配る拠点からカードの情報を受け取れません (503)"));
         await Assert.That(down.Ok).IsFalse();
         await Assert.That(down.Message).Contains("503");
     }

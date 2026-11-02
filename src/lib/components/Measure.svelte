@@ -193,7 +193,7 @@
     // 二段組にする線。ここを越えているかで、土台に当たる決まりが変わる
     wide = matchMedia("(min-width: 1000px)").matches;
 
-    // 土台は印 (`data-root`) で探す。形で採っていた頃は、別のものの数を土台として報せていた
+    // 土台は印 (`data-root`) で探す。形で採っていた頃は、別のものの数を土台として出していた
     const root = document.querySelector("[data-root]");
     if (root === null) {
       base = "土台が見つからない";
@@ -212,11 +212,10 @@
     take();
 
     /*
-     * **測り続ける。** 1回だけ撮っていた頃は、組み上がる前の姿 (字が届く前・一覧が伸びる前) を報せていた。
+     * **測り続ける。** 1回だけ撮っていた頃は、組み上がる前の姿 (字が届く前・一覧が伸びる前) を出していた。
      * 形が変わったら (`ResizeObserver`) と中身が入れ替わったら (`MutationObserver`) 測り直す。
      * どちらもコマに束ねてから測る — 測ること自体が組み直しを呼ぶので、そのままだと止まらない
      */
-    const again = () => take();
     let waiting = 0;
     const later = () => {
       if (waiting !== 0) return;
@@ -226,9 +225,9 @@
       });
     };
 
-    window.addEventListener("resize", again);
-    window.addEventListener("scroll", again, { passive: true });
-    window.visualViewport?.addEventListener("resize", again);
+    window.addEventListener("resize", take);
+    window.addEventListener("scroll", take, { passive: true });
+    window.visualViewport?.addEventListener("resize", take);
 
     /*
      * **見張るのは土台の中だけ。** この表示も body の中にいるので、body ごと
@@ -251,9 +250,9 @@
 
     return () => {
       if (waiting !== 0) cancelAnimationFrame(waiting);
-      window.removeEventListener("resize", again);
-      window.removeEventListener("scroll", again);
-      window.visualViewport?.removeEventListener("resize", again);
+      window.removeEventListener("resize", take);
+      window.removeEventListener("scroll", take);
+      window.visualViewport?.removeEventListener("resize", take);
       sizes.disconnect();
       changes.disconnect();
     };

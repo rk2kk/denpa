@@ -13,7 +13,7 @@
                                                     └─→ テレビのアプリ (denpa-tv)
 ```
 
-メディアサーバは置きません。エンコードしたもの (AV1/H.264 + Opus の mkv) はブラウザが
+メディアサーバは置きません。エンコードしたもの (AV1・H.265・H.264 + Opus の mkv) はブラウザが
 そのまま読むので `/watch` で観られ、テレビのアプリへは denpa がファイルを配ります。
 ブラウザが読めない元のTS (MPEG-2) や違うコーデックは、denpa がその場で詰め替え・変換して流すか、
 ブラウザが WebAssembly でデコードします ([library.md](library.md#何で観るかはサーバが出せるものから画面が選ぶ))。
@@ -113,9 +113,9 @@ arch ごとにその arch のランナー (amd64 は `ubuntu-latest`、arm64 は
 組んで digest だけで push し、最後に両方を束ねた索引へ名前を付けます
 (`.github/workflows/build-and-deploy.yml`)。QEMU で arm64 を組むと ffmpeg と Native AOT が
 何倍も掛かるので使いません。片方の arch が落ちたら名前は付けません (片方だけの
-`develop` が出ていくより、前のものが残るほうがいい)。中身の違いは Intel の GPU の部品 (QSV と
-VA-API のドライバ) だけで、Debian では amd64 にしか無いので arm64 のイメージには入れていません
-([encode.md](encode.md#gpu-でエンコードする-intel-qsv--va-api))。
+`develop` が出ていくより、前のものが残るほうがいい)。中身の違いは GPU の部品だけで、Intel・AMD の VA-API のドライバ・
+NVIDIA の NVENC は amd64 に、Rockchip の MPP は arm64 にだけ入れています
+([encode.md](encode.md#gpu-でエンコードする-va-api))。
 
 `denpa-aio` (本体とエージェントを1つにしたもの) も同じ名前で出ます。組み直さず、束ねた2つを
 写すだけです (`.github/aio.Dockerfile`)。main では `develop` と `<denpa の sha>-<agent の sha>`、
@@ -192,7 +192,7 @@ JS として動き**、ログインの控えで API を呼べることになる�
 | `script-src-attr`          | `'none'`                                                                | `onclick="…"` などの属性のハンドラを止める (上の穴そのもの)                                                                                                                                                                                                                                                                         |
 | `style-src`                | `'self' 'unsafe-inline'`                                                | 下の「スタイルは止めない」                                                                                                                                                                                                                                                                                                          |
 | `img-src`                  | `'self' data: blob:`                                                    | 局ロゴ・ポスターは自分。データ放送の画像と DRCS (外字) は作り直して blob:。data: は CSS に埋めたアイコン                                                                                                                                                                                                                            |
-| `font-src`                 | `'self' data: blob:`                                                    | Denpa Font は自分 (`/api/font/denpa-font.woff2`)                                                                                                                                                                                                                                                                                    |
+| `font-src`                 | `'self' data: blob:`                                                    | Denpa Font は自分 (`/api/font/`。woff2 の 2 つ)                                                                                                                                                                                                                                                                                     |
 | `media-src`                | `'self' blob:`                                                          | 録画は自分。ライブの MSE と端末に保存した録画は blob:                                                                                                                                                                                                                                                                               |
 | `connect-src`              | `'self' wss://nx-jikkyo.tsukumijima.net https://jikkyo.tsukumijima.net` | fetch・SSE・データ放送の双方向の中継 (`/api/bml/…`)・ライブの WebSocket。`'self'` は同じ host の `ws:` / `wss:` も含む。外の 2 つは実況のコメント (下の「端末が外へ繋ぐもの」)。ホストまで書き、世帯の設定がオフでも許したまま (CSP は組むときに決まる。繋ぐかどうかは画面が設定を見て決める)                                       |
 | `worker-src`               | `'self'`                                                                | 変換せずに観る経路の worker (`src/lib/raw/worker.ts`) と PWA の ServiceWorker                                                                                                                                                                                                                                                       |
@@ -235,8 +235,9 @@ HTML は小さく、重いもの (`_app/immutable/`) は永く持たせたまま
 CSS で抜き出して困る秘密 (属性に入った鍵など) はありません。
 
 **この「外へは出られない」は `img-src` / `font-src` を自分・data:・blob: に絞っているから**
-成り立っています。外のサーバの画像や字を許すと、BML の CSS (属性セレクタ + `url()`) で
-画面の中身を外へ送れるようになるので、そのときはスタイルも絞り直します。
+成り立っています。外のサーバの画像や字を許すと、差し込まれた CSS (属性セレクタ + `url()`) で
+画面の中身を外へ送れるようになるので、そのときはスタイルも絞り直します。データ放送の CSS はブラウザの CSS に
+渡さず、エンジンが読んで確かめた値だけを `element.style` に書く (`src/lib/bml/css.ts`) ので、この経路にはなりません。
 `connect-src` に外を足しても、CSS からは `connect-src` を使えないので、ここは崩れません。
 
 ### 増やすとき
@@ -248,7 +249,7 @@ BML の `onclick` を押しても動かないことを見ています。
 
 ## 端末が外へ繋ぐもの (実況のコメント)
 
-**ふだんの画面は denpa のサーバにしか繋ぎません。外へ繋ぐのは、実況のコメントを流すときだけです。**
+**ふだんの画面は denpa のサーバにしか繋ぎません。外へ繋ぐのは、実況のコメントを流す・書き込むときだけです。**
 世帯の設定 (連携の「実況」) と端末の ⚙ の「実況」の両方がオンの端末が、denpa のサーバを通さずに次の 2 か所へ繋ぎます
 (宛先は `src/lib/jikkyo/endpoints.ts`。CSP の `connect-src` に同じものを書いています)。
 
@@ -269,8 +270,10 @@ BML の `onclick` を押しても動かないことを見ています。
 | どの局をいつ観ているか            | 見える (繋いだチャンネルと時刻)                 | 見える (どの局のどの時間を取ったか) |
 | Cookie・ニコニコのアカウント      | 送らない (ログインしない)                       | 送らない                            |
 
-- **denpa のサーバ・世帯のほかの端末・録画の一覧・ログインの情報は出ません。** 出るのは、その端末で何を観ているかだけです
-- 受けたコメントは本文と時刻だけにして、利用者の ID などはその場で捨てます。コメントは端末のメモリにだけ置き、画面を閉じれば消えます
+- **denpa のサーバ・世帯のほかの端末・録画の一覧・ログインの情報は出ません。** 出るのは、その端末で何を観ているか (と、書き込んだもの) だけです
+- 受けたコメントは本文と時刻と流し方 (色・位置・大きさ) だけにして、利用者の ID などはその場で捨てます。コメントは端末のメモリにだけ置き、画面を閉じれば消えます
 - **局の勢い (ライブの「実況」タブ) だけはサーバが中継します。** NX-Jikkyo の REST は CORS を許していないためです
   (`GET /api/jikkyo/ranking`。呼ばれたときだけ読み、30 秒だけメモリに持つ)。NX-Jikkyo に見えるのは denpa のサーバの IP です
-- 書き込みはしません
+- **ライブでは、端末から NX-Jikkyo に書き込めます** (同じ視聴の WS に `postComment` を送る。denpa のサーバは通しません。CSP も同じ宛先のまま)。
+  書いた中身は公開され、消せません。ニコニコのアカウントは使わず匿名 (184) ですが、書き込みには NX-Jikkyo が端末の IP とブラウザの種類などから作る ID が付き、
+  誰でも読めます。**同じ端末から書いたものは、その ID で結び付けられます** (IP やブラウザが変わると ID も変わります)。決まりは [watch.md](watch.md#実況に書き込む)

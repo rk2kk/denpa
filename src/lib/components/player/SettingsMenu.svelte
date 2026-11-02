@@ -12,27 +12,33 @@
     SettingRow,
     SettingToggle,
   } from "./settings";
+  import VolumeSlider from "./VolumeSlider.svelte";
 
   /**
    * 再生の設定 (⚙。3画面で同じ)。何を並べるかは `StageTail`、振る舞いは docs/player.md。上の並びは切り替えが先で
    * その場で変わり (`menuitemcheckbox`)、選ぶものは押すと選択肢の並びに入る (先頭が「戻る」、選ぶと閉じる。
-   * `menuitemradio`。Esc か ← で戻る)。狭い枠では操作バーから畳んだもの (`head`) を頭に置き、余白で分ける。
+   * `menuitemradio`。Esc か ← で戻る)。操作バーから畳んだもの (`head`。`PlayerStage` の `fold`) は頭に置き、余白で分ける。
+   * 音量のつまみ (`volume`) は畳んだものの次、切り替えの前に置き、行の幅の横のカプセル (`VolumeSlider`) にする。←→ で動かし、
+   * ↑↓ はほかの行と同じく行を移る。渡されるのは音のボタンがつまみを出せないときだけ (`StageTail`)。
    *
    * testid: ボタンは `{prefix}-settings`、枠は `{prefix}-settings-menu`、行は `{prefix}-{id}`、
-   * 選択肢は `{prefix}-{id}-option` に `data-{id}={key}` (例: `data-codec="av1"`)
+   * 選択肢は `{prefix}-{id}-option` に `data-{id}={key}` (例: `data-codec="av1"`)、音量のつまみは `{prefix}-volume`
    */
   let {
     prefix,
     head = [],
     toggles,
     choices,
+    volume,
   }: {
     /** testid の頭 (`watch` / `chase` / `live`) */
     prefix: string;
-    /** 狭い枠で操作バーから畳んだもの。上の並びの頭に置く */
+    /** 操作バーから畳んだもの (狭い枠か、一段に収まらないとき)。上の並びの頭に置く */
     head?: SettingRow[];
     toggles: SettingToggle[];
     choices: SettingChoice[];
+    /** 音量 (%。`volume.svelte.ts`)。省くとつまみを置かない */
+    volume?: { level: number; set: (level: number) => void } | undefined;
   } = $props();
 
   let open = $state(false);
@@ -125,13 +131,21 @@
     role="menuitemcheckbox"
     class="menu-item setting"
     aria-checked={item.on}
+    aria-disabled={item.disabled === true ? "true" : undefined}
+    data-disabled={item.disabled === true ? "" : undefined}
     data-keep-open={item.closes === true ? undefined : ""}
     data-setting={item.id}
     data-testid="{prefix}-{item.id}"
-    onclick={() => item.toggle()}
+    onclick={() => {
+      if (item.disabled !== true) item.toggle();
+    }}
   >
     <Icon icon={item.icon} />
-    <span class="label">{item.label}</span>
+    <span class="label"
+      >{item.label}{#if item.note !== undefined}<span class="note">
+          ({item.note})</span
+        >{/if}</span
+    >
     <span class="switch" data-on={item.on ? "" : undefined} aria-hidden="true"
     ></span>
   </button>
@@ -186,6 +200,21 @@
       {/each}
       <!-- 畳んだものといつもの行の境目。線は引かず、上下を空ける (app.css の `.menu hr`) -->
       {#if head.length > 0}<hr />{/if}
+      {#if volume !== undefined}
+        <!--
+          音量。行そのものを横のカプセルにし、中にアイコン・名前・値 (変えている間だけ) をほかの行と同じ並びで置く。
+          ↑↓ で行を移るために、つまみ自身を項目 (`menu-item`) にする。押しても閉じない
+        -->
+        <div class="volume">
+          <VolumeSlider
+            level={volume.level}
+            set={volume.set}
+            label
+            item
+            testid="{prefix}-volume"
+          />
+        </div>
+      {/if}
       {#each toggles as item (item.id)}
         {@render toggle(item)}
       {/each}
@@ -266,8 +295,19 @@
     text-align: right;
     color: var(--dp-muted);
   }
+  /* 注記は値と同じく色だけ控える (押せない形式の「(再生できません)」と同じ言い方) */
+  .note {
+    color: var(--dp-muted);
+  }
   .back {
     margin-bottom: 0.375rem;
+  }
+  /*
+     * 音量の行。カプセルは行の幅いっぱいで、中のアイコンと名前はほかの行と同じ位置に来る (左の余白が `.menu-item` と同じ)。
+     * 高さ 44px (車のタブレットで指でつまめる)。上下は項目の間より少し空ける
+     */
+  .volume {
+    margin: 0.125rem 0 0.25rem;
   }
   /* オン/オフのスイッチ。状態は行の `aria-checked` で読ませ、これは見た目だけ */
   .switch {

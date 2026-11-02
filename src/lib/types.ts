@@ -20,7 +20,7 @@ export const CHANNEL_TYPES: readonly ChannelType[] = ["GR", "BS", "CS"];
  * 出演者やあらすじ (`extended`)、音声 (`audios`)、ジャンルの中分類
  * (`genre_detail`) は詳細を開いたときにしか使わないのに、BS の 24 時間ぶん
  * (2,171 件) で応答 1.43 MB のうち 41% を占めていた。しかも前日・翌日の先読みが
- * 同じ形の応答をもう 2 つ取る。詳細は開いた 1 件だけ `/api/programs/<id>` で取る
+ * 同じ形式の応答をもう 2 つ取る。詳細は開いた 1 件だけ `/api/programs/<id>` で取る
  * (予約・録画の一覧と同じ経路)
  */
 export interface GridProgram extends Pick<
@@ -71,6 +71,10 @@ export interface ProgramDetail {
   is_free: boolean;
   /** コピー禁止の番組か。禁止の番組は録らない (`format.COPY_NEVER_REASON`) */
   copy_never: boolean;
+  /** シリーズの話数・全何話・再放送の印 (`programs` の同じ名前の列)。載せない局は NULL */
+  series_episode: number | null;
+  series_last_episode: number | null;
+  series_repeat: number | null;
 }
 
 /**
@@ -85,14 +89,15 @@ export type CmMode = "off" | "chapter" | "cut";
  * 録画をどう出すか。
  *
  * av1  : 既定。同じ画質でファイルが小さいが、エンコードに時間がかかる
+ * hevc : H.265。**GPU でだけエンコードする** (`#lib/hw.ts` の `SOFTWARE_CODECS`)。AV1 をデコードできない端末向けに H.264 より小さく
  * h264 : エンコードが速く、非力なマシンや古いクライアント向け
  * none : **エンコードしない。** 元のTSのまま保存先へ置く
  *
- * 両方エンコードするときもこの型は主のほうだけ (一覧は `Settings.codecs`)。
+ * いくつもエンコードするときもこの型は主のほうだけ (一覧は `Settings.codecs`)。
  * 別に「エンコードする」のチェックを持っていた頃は、外したときにコーデックの
  * 選択だけが残って、どちらが効いているのか画面から読めなかった。それで `none` もここに入れる
  */
-export type VideoCodec = "av1" | "h264" | "none";
+export type VideoCodec = "av1" | "hevc" | "h264" | "none";
 
 /*
  * **行の型はテーブルの定義から導く** (`server/schema.ts`)。

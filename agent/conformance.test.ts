@@ -152,7 +152,7 @@ async function open(query: string): Promise<Opened> {
   return { status: res.status, reader: res.body.getReader(), close };
 }
 
-/** 読み終わるまで待つ。チューナーを取り上げられたときは reason が入る */
+/** 読み終わるまで待つ。チューナーを取り上げられたときは error が入る */
 async function drain(
   reader: ReadableStreamDefaultReader,
 ): Promise<{ bytes: number; error: string | null }> {
@@ -1221,7 +1221,7 @@ describe("止まれと言われたとき", () => {
 
   /*
    * **録画が無ければすぐ落ちる。** 通知を開きっぱなしにされると、Kestrel が 30 秒 (既定の ShutdownTimeout)
-   * 受け口だけ閉じて待っていた。そのぶん入れ替えの隙間が伸び、実機では録画の頭が約 35 秒欠けた
+   * 待ち受けだけ閉じて待っていた。そのぶん入れ替えの隙間が伸び、実機では録画の頭が約 35 秒欠けた
    */
   test("録画が無ければ、通知や番組表の選局が開いていてもすぐ落ちる", async () => {
     const { other, stop } = await spawnOther();

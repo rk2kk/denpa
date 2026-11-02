@@ -43,7 +43,7 @@ export function zoneOf(x: number, width: number): Zone {
   return "center";
 }
 
-export type TapAction =
+type TapAction =
   /** 送る・戻す。`undo` が true なら、直前に切り替えた再生/一時停止も戻す */
   | { kind: "seek"; by: number; undo: boolean }
   /** 再生/一時停止 */
@@ -326,6 +326,28 @@ export function toTsTime(at: number, ruler: Ruler | null): number {
     rest -= length;
   }
   return kept.at(-1)!.end;
+}
+
+/**
+ * 元の TS の物差しの位置 (秒) が、`ruler` の物差しのどこで観られるか (コメントの一覧の時刻)。
+ * `fromTsTime` と違って寄せない: 観られる所より前は `"before"`、切った CM の中 (と残した区間の後) は `"cut"`
+ */
+export function playbackAt(
+  at: number,
+  ruler: Ruler | null,
+): number | "before" | "cut" {
+  if (at < 0) return "before";
+  if (ruler === null) return at;
+  const kept = keptOf(ruler);
+  if (kept.length === 0) return at < ruler.skip ? "before" : at - ruler.skip;
+  if (at < kept[0]!.start) return "before";
+  let sum = 0;
+  for (const range of kept) {
+    if (at < range.start) return "cut";
+    if (at < range.end) return sum + (at - range.start);
+    sum += range.end - range.start;
+  }
+  return "cut";
 }
 
 /** 末尾のここから先は「観終えた」とみなす (秒) */

@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
-import { Fmp4Splitter } from "#lib/ts/fmp4.js";
+import {
+  Fmp4Splitter,
+  type Fmp4Track,
+  readFragment,
+  readInit,
+} from "#lib/ts/fmp4.js";
 
-import { type Fmp4Host, Fmp4Video } from "./fmp4";
+import { audioCodec, audioFrame, type Fmp4Host, Fmp4Video } from "./fmp4";
 
 /**
  * **追っかけで抱えきれなくなったとき** (`follow`)。圧縮のまま持つのが上限を超えたら、受け取るのを
@@ -13,9 +18,15 @@ import { type Fmp4Host, Fmp4Video } from "./fmp4";
  * 流すのは E2E と同じ作り置き (本物の ffmpeg が書いた AV1 + Opus。`tests/fake/fmp4-loop.ts`)
  */
 
+/** いちばん新しく作ったデコーダの出口。描く大きさを見るテストで、フレームを手で出す */
+let output: VideoFrameOutputCallback | null = null;
+
 class FakeDecoder {
   state = "unconfigured";
   decodeQueueSize = 0;
+  constructor(init: VideoDecoderInit) {
+    output = init.output;
+  }
   configure(): void {
     this.state = "configured";
   }
@@ -95,5 +106,121 @@ describe("Fmp4Video (追っかけで抱えきれないとき)", () => {
     video.feed(init);
     feedRounds(video, 50);
     expect(seen.full).toBe(0);
+  });
+});
+
+/*
+ * **描く大きさは pasp を掛けた幅** (`Fmp4Track.displayWidth`)。Safari のフレームは画素の数 (1440) を、
+ * Chrome は H.264 の SAR を掛けた幅 (1920) を返す。どちらでも同じ大きさで描き、二重に掛けない
+ */
+describe("Fmp4Video (描く大きさ)", () => {
+  const track = (displayWidth?: number): Fmp4Track => ({
+    id: 1,
+    kind: "video",
+    timescale: 90000,
+    codec: "avc1.640029",
+    config: new Uint8Array(),
+    width: 1440,
+    height: 1080,
+    ...(displayWidth === undefined ? {} : { displayWidth }),
+    channels: 0,
+    sampleRate: 0,
+    defaults: { duration: 1500, size: 0, flags: 0 },
+  });
+
+  for (const [name, shown, returned, size] of [
+    [
+      "pasp があればフレームが画素の数を返しても 1920",
+      1920,
+      1440,
+      [1920, 1080],
+    ],
+    [
+      "pasp があればフレームが SAR を掛けて返しても 1920",
+      1920,
+      1920,
+      [1920, 1080],
+    ],
+    ["pasp が無ければフレームに合わせる", undefined, 1440, [1440, 1080]],
+  ] as const) {
+    test(name, () => {
+      const drawn: number[][] = [];
+      const canvas = {
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage: (_: unknown, ...at: number[]) => drawn.push(at),
+        }),
+      };
+      const host: Fmp4Host = {
+        audio: { open: () => true, push: () => {} },
+        drew: () => {},
+        fail: (reason) => {
+          throw new Error(reason);
+        },
+        record: () => {},
+        full: () => {},
+      };
+      const video = new Fmp4Video(canvas as unknown as OffscreenCanvas, host);
+      video.configure([track(shown)]);
+      let closed = false;
+      output!({
+        displayWidth: returned,
+        displayHeight: 1080,
+        timestamp: 0,
+        close: () => {
+          closed = true;
+        },
+      } as unknown as VideoFrame);
+      video.tick(null);
+      expect([canvas.width, canvas.height]).toEqual([...size]);
+      expect(drawn).toEqual([[0, 0, ...size]]);
+      expect(closed).toBe(true);
+    });
+  }
+});
+
+/**
+ * **音の開き方と1コマの形** (`audioCodec`・`audioFrame`)。canvas に描く worker とライブの音だけの worker が
+ * 同じものを使う。作り置きの H.264 は AAC、AV1 は Opus (本物の ffmpeg が書いたもの)
+ */
+describe("audioCodec・audioFrame", () => {
+  const audioOf = (name: string) => {
+    const bytes = new Uint8Array(
+      readFileSync(new URL(`../../../tests/fake/${name}`, import.meta.url)),
+    );
+    const tracks = readInit(bytes);
+    const track = tracks.find((t) => t.kind === "audio")!;
+    const sample = readFragment(bytes, tracks).find(
+      (s) => s.track === track.id,
+    )!;
+    return { track, sample };
+  };
+
+  test("AAC は設定なしで開き、1コマに ADTS の頭 (7バイト。長さは頭を含む) を付ける", () => {
+    const { track, sample } = audioOf("live-h264.mp4");
+    expect(audioCodec(track)).toEqual({ codec: "aac", config: null });
+    const frame = audioFrame(track, sample.data)!;
+    expect(frame.length).toBe(sample.data.length + 7);
+    expect([frame[0], frame[1]! & 0xf6]).toEqual([0xff, 0xf0]);
+    expect(((frame[3]! & 3) << 11) | (frame[4]! << 3) | (frame[5]! >> 5)).toBe(
+      frame.length,
+    );
+    expect(frame.subarray(7)).toEqual(sample.data);
+  });
+
+  test("Opus は OpusHead を添えて開き、1コマはそのまま渡す", () => {
+    const { track, sample } = audioOf("live-av1.mp4");
+    const open = audioCodec(track)!;
+    expect(open.codec).toBe("opus");
+    expect(new TextDecoder().decode(open.config!.subarray(0, 8))).toBe(
+      "OpusHead",
+    );
+    expect(audioFrame(track, sample.data)).toBe(sample.data);
+  });
+
+  test("OpusHead を組めない Opus は開かない", () => {
+    const { track } = audioOf("live-av1.mp4");
+    expect(audioCodec({ ...track, config: new Uint8Array(2) })).toBeNull();
   });
 });

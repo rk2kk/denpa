@@ -10,13 +10,11 @@
  * 何度実行しても二重にはならない。ルールと履歴は `source` (`edcb:<ID>`・`edcb:recinfo:<キー>` など) で見分ける。
  * 値は設定フォルダのファイルを読んでいたころと同じなので、そのころ取り込んだものも飛ぶ
  */
-import { eq } from "drizzle-orm";
-
 import { parseSearchFields } from "#lib/search.js";
 
 import { toHalfWidth } from "../fold";
 import type { Slot } from "../rule-time";
-import { now, orm } from "./db";
+import { now } from "./db";
 import {
   EdcbClient,
   type EdcbDate,
@@ -28,6 +26,7 @@ import {
 import {
   addHistory,
   counts,
+  importReservation,
   insertRule,
   type MigrateOptions,
   record,
@@ -39,8 +38,6 @@ import {
   SlotWindows,
   track,
 } from "./migrate";
-import { reserve } from "./reservations";
-import { programs } from "./schema";
 import { programKey, serviceKey } from "./tuner";
 
 /**
@@ -60,7 +57,7 @@ export function genreOf(value: number): string | null {
 }
 
 /** 時間帯と曜日を写した結果 ({@link parseDateList}) */
-export type DateListResult =
+type DateListResult =
   | {
       slot: Slot;
       /** 日をまたぐ時間帯で、次の日の曜日も足した (当たる番組が増える) */
@@ -159,7 +156,7 @@ function wordsOf(text: string): string[] {
 const PER_WORD = /^(::|:(title|event|genre|video|audio):)/;
 
 /** ルールに入れる値 ({@link convertRule}) */
-export interface EdcbRuleValues {
+interface EdcbRuleValues {
   name: string;
   keyword: string;
   ignore_keyword: string;
@@ -173,7 +170,7 @@ export interface EdcbRuleValues {
   dedupe: boolean;
 }
 
-export type ConvertedRule =
+type ConvertedRule =
   { values: EdcbRuleValues; notes: string[] } | { skip: string };
 
 /**
@@ -353,32 +350,11 @@ export async function importEdcbReservations(
       tally.skipped++;
       continue;
     }
-    const program = orm()
-      .select({ id: programs.id })
-      .from(programs)
-      .where(
-        eq(programs.id, programKey(row.networkId, row.serviceId, row.eventId)),
-      )
-      .get();
-    if (program === undefined) {
-      // 番組表を集める前だと出る。集めてからもう一度実行すれば入る
-      record(`番組表に無いので取り込めません: ${row.title}`);
-      tally.skipped++;
-      continue;
-    }
-    if (options.apply) {
-      try {
-        await reserve(program.id);
-      } catch (error) {
-        record(
-          `予約できません: ${row.title} (${error instanceof Error ? error.message : String(error)})`,
-        );
-        tally.skipped++;
-        continue;
-      }
-    }
-    recordPlan(options, "予約", row.title);
-    tally.imported++;
+    await importReservation(
+      programKey(row.networkId, row.serviceId, row.eventId),
+      row.title,
+      options,
+    );
   }
 }
 

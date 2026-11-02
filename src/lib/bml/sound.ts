@@ -12,7 +12,7 @@ import { ascii } from "@danything/arib/bytes";
 /** [周波数 Hz, 長さ 秒] の並び */
 type Tune = [number, number][];
 
-// 1つの音を1行に
+// 1 つの音を 1 行に
 // prettier-ignore
 const TUNES: Record<number, Tune> = {
   0: [[1318, 0.35], [1046, 0.5]],
@@ -64,7 +64,7 @@ export class Sound {
     return true;
   }
 
-  /** AIFF を鳴らす。読めなければ null。止める関数と、鳴り終わりの通知を返す */
+  /** AIFF を鳴らす。読めなければ null。止める関数を返す (鳴り終わったら `ended` を呼ぶ) */
   aiff(data: Uint8Array, ended: () => void): (() => void) | null {
     const pcm = decodeAiff(data);
     const context = pcm === null ? null : this.audio();

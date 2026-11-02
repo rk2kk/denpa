@@ -22,11 +22,11 @@
   /**
    * データ放送を映像の上に重ねる。**描くのはエンジン** (`src/lib/bml/`)。
    *
-   * denpa が作った `ResponseMessage` をそのまま食べさせるだけで、**映像は denpa のまま**。
+   * denpa が作った `ResponseMessage` をそのまま渡すだけで、**映像は denpa のまま**。
    * エンジンは映像の object の場所を教えるだけで、映像の入れ物をそこへ寄せるのはこちら
    * (`placeVideo`。[docs/stream.md](../../../../docs/stream.md#データ放送の統合))。
    *
-   * エンジンは押されてから `import()` で取得する (どのみちカルーセルが一周するのを待つので紛れる)。
+   * エンジンは押されてから (常に受信なら開く前から) `import()` で取得する (どのみちカルーセルが一周するのを待つので紛れる)。
    * エンジンの外でやるのは、d を聞いている文書へ届ける (`knock`)・映像の入れ物を小窓へ寄せる (`placeVideo`)・
    * 960x540 を枠に合わせて伸ばす (`fit`)・「データ取得中」を出す (`receiving`)・郵便番号を渡す (`receiver`)
    */
@@ -300,7 +300,7 @@
   let dueD = false;
   /** 何回押したか。**返事が無いときだけ増える** (`TAP_MOST`) */
   let taps = 0;
-  /** 次に押す約束 */
+  /** 次に押すタイマー */
   let knocking: ReturnType<typeof setTimeout> | null = null;
   /** 枠の大きさを見張る。全画面にすると変わる */
   let watcher: ResizeObserver | null = null;
@@ -311,7 +311,8 @@
   /** 映像の入れ物の元の style。小窓へ寄せる前に覚えて、隠れたら戻す */
   let mediaStyle: string | null = null;
   /**
-   * 丸ゴシック。字幕と同じ Denpa Font (等幅・丸ゴシック・ARIB の外字を1つで満たす)。
+   * 丸ゴシック。字幕と同じ Denpa Font (等幅・丸ゴシック・ARIB の外字を1つで満たす)。読むのは基本の字の
+   * ファイルだけ (データ放送は EUC-JP の字と追加記号しか描かないので、JIS X 0213 で足された漢字は出てこない)。
    * 角ゴシックは端末のものに任せる (丸で代用すると放送の「ここは角」が消える)
    */
   let roundFont: FontFace | null = null;
@@ -383,14 +384,14 @@
   };
 
   /**
-   * BML の画面 (960x540 など。エンジンは原寸で描く) を枠いっぱいに伸ばす。縦横は別々に —
-   * 枠を埋めている映像と同じだけ伸びていないと位置がずれる
+   * BML の画面 (960x540 など。エンジンは原寸で描く) を放送の縦横比で枠内に収める。
+   * 映像の小窓も同じ面の座標で配置する
    */
   function fit(): void {
     if (mount === null || host === null || plane === null) return;
     const box = host.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return;
-    // 4:3 の面 (720x480 の display-aspect-ratio: 4v3) は高さを合わせて左右の真ん中 (`planeArea`)
+
     const area = planeArea(box, plane);
     mount.style.left = `${area.left}px`;
     mount.style.top = `${area.top}px`;
@@ -398,7 +399,7 @@
     mount.style.height = `${plane.height}px`;
     mount.style.transform = `scale(${area.width / plane.width}, ${area.height / plane.height})`;
     // 枠いっぱいでない面では、映像を寄せる先も枠の大きさで変わる
-    if (engine !== null && plane.aspect === "4:3") placeVideo(visible);
+    if (engine !== null) placeVideo(visible);
   }
 
   /** 出すかどうかを決め直し、映像の入れ物を寄せる/戻す */
@@ -448,7 +449,7 @@
       mediaStyle ??= media.style.cssText;
       // 字幕を操作バーの上へ持ち上げない印 (`PlayerStage`。小窓の中は操作バーと重ならない)
       media.dataset["bmlWindow"] = "";
-      // 面の中の場所を、枠の中の割合に (4:3 の面は枠の真ん中に置いてある。`fit`)
+      // 面の中の場所を、枠の中の割合に (面は縦横比を保って枠の真ん中に置いてある。`fit`)
       const box = host?.getBoundingClientRect() ?? { width: 1, height: 1 };
       const area = planeArea(box, plane);
       const left = box.width > 0 ? area.left / box.width : 0;

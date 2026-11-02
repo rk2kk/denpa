@@ -141,6 +141,34 @@
       "when": 1793149777117,
       "tag": "0019_recording-ts-head",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1793372974469,
+      "tag": "0020_clips",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1793412193659,
+      "tag": "0021_clip-layers",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1793415739835,
+      "tag": "0022_series",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1793427097155,
+      "tag": "0023_recording-hevc",
+      "breakpoints": true
     }
   ]
 }

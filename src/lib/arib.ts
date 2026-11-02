@@ -2,7 +2,7 @@
  * ARIB の符号を人が読める言葉に直す。
  *
  * EPG が持っているジャンルも音声の種別も番号でしかない。番組表の詳細で
- * 「アニメ／特撮 > 国内アニメ」「ステレオ (日本語)」と出すためだけの対応表。
+ * 「アニメ／特撮 > 国内アニメ」「ステレオ (日本語)」と出すための対応表と、選べる音声の組み立て (`audioTracks`・`pickTrack`)。
  *
  * ブラウザ側でも使うのでサーバの機能には触れない。
  * 出典は ARIB STD-B10 第2部 (content_nibble / component_type)。
@@ -167,16 +167,13 @@ export const GENRE_TREE: {
 /**
  * ルールの条件の値を人が読める名前に。`"7-0"` → 「アニメ／特撮 > 国内アニメ」。
  *
- * 中分類が無いときは大分類だけを返す。「7」のように - が無い値は split の2つ目が undefined で、
- * `Number.isNaN(undefined)` は false なので、要素数で見る。
+ * 中分類が無いときは大分類だけを返す。
  */
 export function genreName(value: string | number): string {
   const parts = String(value).split("-");
   const lv1 = Number(parts[0]);
   const head = GENRE_LV1[lv1];
   if (head === undefined) return String(value);
-  if (parts.length < 2) return head;
-
   const lv2 = Number(parts[1]);
   if (Number.isNaN(lv2)) return head;
   return `${head} > ${GENRE_LV2[lv1]?.[lv2] ?? lv2}`;
@@ -426,4 +423,35 @@ export function videoLabel(
 ): string {
   const parts = [resolution, type === null ? null : (VIDEO_TYPE[type] ?? type)];
   return parts.filter((part) => part !== null && part !== "").join(" ");
+}
+
+/**
+ * シリーズ記述子から出す言葉 (`programs.series_*`)。**「第3話 (全12話)」「最終回」「再放送」。**
+ *
+ * - 話数が全何話と同じなら、(全12話) の代わりに「最終回」
+ * - 「再放送」は再放送の印が 0 でないときだけ。0 は初回とは限らない (`programs.series_repeat`)
+ * - 何話目かを言わない局もある。全何話かだけ分かれば「全12話」
+ */
+export function seriesLabels(series: {
+  series_episode: number | null;
+  series_last_episode: number | null;
+  series_repeat: number | null;
+}): string[] {
+  const {
+    series_episode: episode,
+    series_last_episode: last,
+    series_repeat: repeat,
+  } = series;
+  const labels: string[] = [];
+  if (episode !== null) {
+    const final = episode === last;
+    labels.push(
+      last === null || final || last < episode
+        ? `第${episode}話`
+        : `第${episode}話 (全${last}話)`,
+    );
+    if (final) labels.push("最終回");
+  } else if (last !== null) labels.push(`全${last}話`);
+  if (repeat !== null && repeat !== 0) labels.push("再放送");
+  return labels;
 }

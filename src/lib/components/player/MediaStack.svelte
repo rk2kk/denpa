@@ -1,12 +1,16 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
+
   /**
    * 映像と重ねものの束 (ライブ・追っかけ)。録画視聴は video の配線が
-   * まるで違う (src 再生・続き・CM飛ばし) ので、こちらは使わない。
+   * まるで違う (src 再生・続き・CMスキップ) ので、こちらは使わない。
    *
    * - `video` … 映像。**備え付けの操作 (`controls`) は出さない** — あれの
    *   再生位置は「持っている範囲」を尺として描くので絶えず動く
    * - `still` … 切り替えの間、前の映像を貼っておく canvas (`live-player` の freeze)。
    *   映像より上 (黒を隠す)、字幕より下 (切り替え中も字幕は見えていてほしい)
+   * - `under` … 前の映像と字幕の間に重ねるもの (実況のコメント。`JikkyoLayer`)。
+   *   実況と字幕は操作列の影より上に出す (段の数は `ControlBar`)
    * - `overlay` … 放送の字幕。放送の位置・背景の箱・外字のまま描くので canvas に重ねる。
    *   `object-fit` は描く係 (`CaptionPainter`) が `fill` / `contain` に切り替える
    * - 入れ物 (`box`) … データ放送が小窓へ寄せる先 (`DataBroadcast` の `placeVideo`)。
@@ -24,6 +28,7 @@
     still?: HTMLCanvasElement | null;
     overlay?: HTMLCanvasElement | null;
     box?: HTMLElement | null;
+    under?: Snippet | undefined;
   }
   let {
     holding,
@@ -34,6 +39,7 @@
     still = $bindable(null),
     overlay = $bindable(null),
     box = $bindable(null),
+    under,
   }: Props = $props();
 </script>
 
@@ -54,9 +60,10 @@
     data-holding={holding}
     aria-hidden="true"
   ></canvas>
+  {@render under?.()}
   <canvas
     bind:this={overlay}
-    class="layer"
+    class="layer captions"
     data-testid="{prefix}-captions"
     data-on={captionsOn}
     aria-hidden="true"
@@ -85,5 +92,9 @@
   }
   .still {
     transition: opacity var(--dp-duration);
+  }
+  /* 字幕は実況 (8) より上、操作列のボタン (10) より下 (`ControlBar`) */
+  .captions {
+    z-index: 9;
   }
 </style>

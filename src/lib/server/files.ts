@@ -25,8 +25,15 @@ import type { Recording } from "../types";
 import { config } from "./config";
 import { affected, now, orm } from "./db";
 import { pruneEmptyDirs, removeIfExists } from "./fsx";
+import { encodedPaths } from "./library";
 import { removeSidecars, SIDECAR_SUFFIXES } from "./metadata";
-import { cmMaterials, encodeJobs, recordings, reservations } from "./schema";
+import {
+  clips,
+  cmMaterials,
+  encodeJobs,
+  recordings,
+  reservations,
+} from "./schema";
 
 const SIDECAR_ORPHAN = new RegExp(
   `^(.+?)(?:${SIDECAR_SUFFIXES.map((suffix) => suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`,
@@ -44,9 +51,8 @@ export function deleteRecordingFiles(
   recording: Recording,
   reason: string,
 ): void {
-  // 両方のコーデックをエンコードしていれば2本ある。どちらもサイドカーごと消す
-  for (const path of [recording.library_path, recording.alt_path]) {
-    if (path === null) continue;
+  // いくつものコーデックでエンコードしていれば最大3本ある。どれもサイドカーごと消す
+  for (const path of encodedPaths(recording)) {
     removeIfExists(path);
     // サイドカー (ポスター・データ放送) も一緒に。取り残すと片付かないゴミになる
     removeSidecars(path);
@@ -60,6 +66,7 @@ export function deleteRecordingFiles(
     .set({
       deleted_at: now(),
       library_path: null,
+      hevc_path: null,
       alt_path: null,
       ts_path: null,
       error: sql`COALESCE(NULLIF(${recordings.error}, ''), ${reason})`,
@@ -67,10 +74,16 @@ export function deleteRecordingFiles(
     })
     .where(eq(recordings.id, recording.id))
     .run();
+  // 切り抜きは残す (撮ったときの番組名を持っている)。録画への行き先だけ外す
+  orm()
+    .update(clips)
+    .set({ recording_id: null })
+    .where(eq(clips.recording_id, recording.id))
+    .run();
 }
 
 /**
- * その置き場所を**他の録画**が現に使っているか (`library_path` / `alt_path`)。
+ * その置き場所を**他の録画**が現に使っているか (`library_path` / `hevc_path` / `alt_path`)。
  * はぐれファイルを片付けるとき、万一の同名衝突で他の録画を巻き添えにしないために見る
  */
 export function usedByOther(path: string, recordingId: number): boolean {
@@ -80,7 +93,11 @@ export function usedByOther(path: string, recordingId: number): boolean {
       .from(recordings)
       .where(
         and(
-          or(eq(recordings.library_path, path), eq(recordings.alt_path, path)),
+          or(
+            eq(recordings.library_path, path),
+            eq(recordings.hevc_path, path),
+            eq(recordings.alt_path, path),
+          ),
           ne(recordings.id, recordingId),
         ),
       )
@@ -116,30 +133,40 @@ export function reconcile(): {
 
   let removed = 0;
   for (const recording of placed) {
-    // もう一方 (H.264) だけが外から消えたら、その控えだけ外す。主は無事なので録画は残る
-    if (recording.alt_path !== null && !existsSync(recording.alt_path)) {
+    // 主でないもの (H.265・H.264) だけが外から消えたら、その控えだけ外す。主は無事なので録画は残る
+    let hevc = recording.hevc_path;
+    let alt = recording.alt_path;
+    for (const [column, path] of [
+      ["hevc_path", hevc],
+      ["alt_path", alt],
+    ] as const) {
+      if (path === null || existsSync(path)) continue;
       orm()
         .update(recordings)
-        .set({ alt_path: null, updated_at: now() })
+        .set({ [column]: null, updated_at: now() })
         .where(eq(recordings.id, recording.id))
         .run();
-      removeSidecars(recording.alt_path);
+      removeSidecars(path);
+      if (column === "hevc_path") hevc = null;
+      else alt = null;
       console.log(
         `[files] もう一方が消えていたので控えを外しました: ${recording.name}`,
       );
     }
     if (existsSync(recording.library_path!)) continue;
     /*
-     * **主が外から消えても、もう一方が残っていれば繰り上げる。** 両方の
-     * コーデックをエンコードした録画で、外からAV1のほうだけ消されたときに録画ごと
-     * 消してしまわないため。もう一方も無ければ、いつもどおり削除済みに倒す
+     * **主が外から消えても、もう一方が残っていれば繰り上げる** (H.265 が先、無ければ H.264。小さいほうを主にする
+     * 順と同じ)。いくつものコーデックでエンコードした録画で、外から AV1 のほうだけ消されたときに録画ごと
+     * 消してしまわないため。どれも無ければ、いつもどおり削除済みに倒す
      */
-    if (recording.alt_path !== null && existsSync(recording.alt_path)) {
+    const next = hevc ?? alt;
+    if (next !== null) {
       orm()
         .update(recordings)
         .set({
-          library_path: recording.alt_path,
-          alt_path: null,
+          library_path: next,
+          hevc_path: next === hevc ? null : hevc,
+          alt_path: next === alt ? null : alt,
           updated_at: now(),
         })
         .where(eq(recordings.id, recording.id))
@@ -206,12 +233,15 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
       .select({
         ts_path: recordings.ts_path,
         library_path: recordings.library_path,
+        hevc_path: recordings.hevc_path,
         alt_path: recordings.alt_path,
       })
       .from(recordings)
       .all()
-      .flatMap((row) => [row.ts_path, row.library_path, row.alt_path])
-      .filter((path): path is string => path !== null),
+      .flatMap((row) => [
+        ...(row.ts_path === null ? [] : [row.ts_path]),
+        ...encodedPaths(row),
+      ]),
   );
 
   const at = now();
@@ -222,7 +252,7 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
     const videos = new Set(files.filter((path) => VIDEO.test(path)));
     for (const path of videos) {
       // 動画は消さない。手で置いたものかもしれないので、数えるだけ。
-      // エンコードしている途中の切り出し (`<入力>.cut.m2ts`) を数に入れないよう、書きたては飛ばす
+      // エンコードの途中で作る復号したTS (`<入力>.decoded.m2ts`) を数に入れないよう、書きたては飛ばす
       if (!known.has(path) && !settling(path, at)) strays++;
     }
     for (const path of files) {

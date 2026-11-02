@@ -128,6 +128,10 @@ function createRecording(reservation: Reservation): Recording {
       genre_detail: program?.genre_detail ?? null,
       // エンコードしたものの音声トラックに番組表と同じ名前を入れるのに要る (`audioTitles`)
       audios: program?.audios ?? null,
+      // 番組詳細の「第N話」と、同じ回の見分け (`episode.episodeOf`) に要る。番組表の行は24時間で消える
+      series_episode: program?.series_episode ?? null,
+      series_last_episode: program?.series_last_episode ?? null,
+      series_repeat: program?.series_repeat ?? null,
       created_at: at,
       updated_at: at,
     })
@@ -619,7 +623,7 @@ const STRAY_GRACE = 60_000;
  * 起動時にも同じ片付けをするが (`recoverOrphanedRecordings`)、そのとき**まだ放送中なら
  * 録り直しに行く**ので、再開した先でまた殺されると次の起動まで誰も畳まない。
  *
- * 畳まれない行は**予約の一覧に居座り、録画の一覧には出てこない** — どちらの振り分けも
+ * 畳まれない行は**一覧の予約の側に居座り、録画の側には出てこない** — どちらの振り分けも
  * `recordings.state = 'recording'` で決まっている (`routes/+page.server.ts`)。放送は
  * とうに終わっているのに「録画中」と出たままで、取り消す以外に消す手が無い。
  *

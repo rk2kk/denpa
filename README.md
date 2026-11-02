@@ -22,7 +22,7 @@ Mirakurun や EDCB、メディアサーバは要りません。番組表から�
   </tr>
 </table>
 
-ほかの画面 (番組表・検索・ルール・設定) は [docs/screens.md](docs/screens.md)。
+ほかの画面 (番組表・切り抜き・検索・ルール・設定) は [docs/screens.md](docs/screens.md)。
 
 ## 使ってよい範囲
 
@@ -33,16 +33,17 @@ denpa は、**自分の B-CAS カードで、自分の世帯の中で、私的�
 - カードを書き換えない
 
 端末 (ブラウザ) が外のサービスに直接繋ぐのは、設定でオンにしたときの実況のコメントだけです。NX-Jikkyo とニコニコ実況 過去ログ API に繋ぎ、相手には端末の IP とどの局をいつ観ているかが見えます ([docs/architecture.md](docs/architecture.md#端末が外へ繋ぐもの-実況のコメント))。
+ライブでは NX-Jikkyo に書き込めます。書いたものは公開され、消せません ([docs/watch.md](docs/watch.md#実況に書き込む))。
 
 考え方は [Discussion #760](https://github.com/danything/denpa/discussions/760) にまとめています (法律相談ではなく、議論のための整理です)。
 
 ## できること
 
 - **予約** — 番組表から押すか、検索から作るルールで自動で。同じ回は最初の放送だけ録る
-- **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする。字幕は放送の ARIB 字幕のまま入れる。Intel の GPU があれば使う
+- **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする (GPU があれば H.265 も)。字幕は放送の ARIB 字幕のまま入れる。GPU (Intel・AMD・NVIDIA・Rockchip) があれば使う
 - **ライブ** — 放送から 1 秒ほどで。止めれば追っかけ、二カ国語・解説放送も選べる ([docs/watch.md](docs/watch.md#ライブ))
 - **データ放送** — テレビと同じ BML がブラウザで動く (d ボタン)。ライブでも録画でも
-- **観る** — 行を押せばその場で再生。CM は1コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕ごと PNG)
+- **観る** — 行を押せばその場で再生。CM は1コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存)
 - **字幕と放送の字** — 字幕は放送どおりの位置に描き、番組名・局名も含めて Denpa Font で外字まで崩さない
 - **端末に保存して観る** — 電波の無いところでも ([docs/offline.md](docs/offline.md))
 - **EPGStation・EDCB から引き継ぐ** — ルール・予約・録画 (EDCB は録画の履歴) ([docs/migrate.md](docs/migrate.md))
@@ -100,6 +101,7 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 - [docs/install.md](docs/install.md) — **立てる** (入れ方の選択肢・1コンテナ・Helm・前段の後ろに置く)
 - [docs/install-mac.md](docs/install-mac.md) — Mac に入れる
 - [docs/install-windows.md](docs/install-windows.md) — Windows に入れる
+- [docs/install-talos.md](docs/install-talos.md) — Talos Linux の 1 台に、OS の設定から 1 行で入れる (PT3。実機で確かめていない)
 - [docs/screens.md](docs/screens.md) — 画面 (実機のスクリーンショット)
 - [docs/faq.md](docs/faq.md) — よくある質問
 - [docs/v2.md](docs/v2.md) — 2.0 で変わったこと
@@ -134,7 +136,6 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 **仕組み**
 
 - [docs/architecture.md](docs/architecture.md) — **なぜこの作りなのか** (決めたこと・踏んだ落とし穴・画面で動いてよいもの (CSP))
-- [docs/app.md](docs/app.md) — **どこに何があるか** (ファイル・画面・状態遷移・テスト)
 - [docs/agent.md](docs/agent.md) — **チューナーエージェント** (取り合い・共有・選局・設定ファイル・B25・鍵の配布)
 - [docs/data.md](docs/data.md) — エージェントに都度聞くもの / denpa が持つもの
 - [docs/stream.md](docs/stream.md) — ライブの仕組み ([経緯](docs/stream-history.md))
@@ -142,7 +143,11 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 - [docs/encode.md](docs/encode.md) — エンコード (字幕・AV1・GPU)
 - [docs/cm.md](docs/cm.md) — CM 検出
 - [docs/logo.md](docs/logo.md) — 局ロゴ (番組表の PNG と CM検出用に覚えたロゴ)
+
+**手を入れる**
+
 - [docs/development.md](docs/development.md) — **手を入れるとき** (開発環境・テスト)
+- [docs/app.md](docs/app.md) — **どこに何があるか** (ファイル・画面・状態遷移・テスト)
 - [docs/writing.md](docs/writing.md) — 書き方 (画面・docs・コメントの言葉)
 - [docs/design.md](docs/design.md) — 見た目の決まり
 - [docs/licenses.md](docs/licenses.md) — 借りているもの
@@ -151,12 +156,36 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 
 ## 謝辞
 
+**特別協賛**:
+
+<a href="https://github.com/eggplants"><img src="https://github.com/eggplants.png?size=192" alt="@eggplants" width="96" height="96"></a>
+
+[**@eggplants**](https://github.com/eggplants) (haruna) さんが、GitHub Sponsors で denpa を大きく支えてくれました。本当にありがとうございます。
+
+<!-- 下の印の間は scripts/thanks.ts が履歴から書く。手で直さない -->
+<!-- thanks:start -->
+
 **手を入れてくれた人** (ありがとうございます):
 
-- [@Khronos31](https://github.com/Khronos31) — px4-userland / siano-userland で選局できなかったのを、PX-Q3U4 の実機で見つけて直してくれました (#188)。ほかにも不具合を報告してくれました (#195 #376 #377)
-- [@unlimish](https://github.com/unlimish) — ライブ・追っかけ・観る画面に小窓 (PiP) を足してくれました (#431)。非力な機材で複数のライブを観るときの詰まりを実測つきで報告してくれ、ライブを GPU でエンコードできるようになりました (#417)
-- [@fetburner](https://github.com/fetburner) — ルール画面の下見でチューナーの取り合いを数えるところを、時刻順に1回なぞるやり方にして、全件で 20 倍ほど速くしてくれました (#662)
-- [@sirius128](https://github.com/sirius128) — 古い Intel の内蔵 GPU (Haswell など) でも GPU でエンコードできるように、イメージに i965 のドライバを足してくれました。Pentium G3250 と PT3 の実機で確かめてくれています (#775)
+- [@Khronos31](https://github.com/Khronos31) ([#188](https://github.com/danything/denpa/issues/188))
+- [@unlimish](https://github.com/unlimish) ([#431](https://github.com/danything/denpa/issues/431) [#1843](https://github.com/danything/denpa/issues/1843))
+- [@fetburner](https://github.com/fetburner) ([#662](https://github.com/danything/denpa/issues/662))
+- [@sirius128](https://github.com/sirius128) ([#775](https://github.com/danything/denpa/issues/775))
+- [@chiroru27](https://github.com/chiroru27) ([#1681](https://github.com/danything/denpa/issues/1681) [#1724](https://github.com/danything/denpa/issues/1724) [#1822](https://github.com/danything/denpa/issues/1822) [#1838](https://github.com/danything/denpa/issues/1838))
+- [@minetaro12](https://github.com/minetaro12) ([#1850](https://github.com/danything/denpa/issues/1850))
+
+**報告や提案をくれた人** (ありがとうございます):
+
+- [@Khronos31](https://github.com/Khronos31) ([#184](https://github.com/danything/denpa/issues/184) [#195](https://github.com/danything/denpa/issues/195) [#376](https://github.com/danything/denpa/issues/376) [#377](https://github.com/danything/denpa/issues/377))
+- [@unlimish](https://github.com/unlimish) ([#417](https://github.com/danything/denpa/issues/417) [#1834](https://github.com/danything/denpa/issues/1834))
+- [@kametani-mikihiro](https://github.com/kametani-mikihiro) ([#437](https://github.com/danything/denpa/issues/437) [#471](https://github.com/danything/denpa/issues/471) [#480](https://github.com/danything/denpa/issues/480) [#481](https://github.com/danything/denpa/issues/481) [#503](https://github.com/danything/denpa/issues/503) [#505](https://github.com/danything/denpa/issues/505) [#509](https://github.com/danything/denpa/issues/509))
+- [@fetburner](https://github.com/fetburner) ([#668](https://github.com/danything/denpa/issues/668))
+- [@shino-zxc](https://github.com/shino-zxc) ([#1210](https://github.com/danything/denpa/issues/1210) [#1713](https://github.com/danything/denpa/issues/1713))
+- [@eggplants](https://github.com/eggplants) ([#1617](https://github.com/danything/denpa/issues/1617) [#1709](https://github.com/danything/denpa/issues/1709))
+- [@ogatomo21](https://github.com/ogatomo21) ([#1708](https://github.com/danything/denpa/issues/1708))
+- [@yuki-untitled](https://github.com/yuki-untitled) ([#1806](https://github.com/danything/denpa/issues/1806))
+
+<!-- thanks:end -->
 
 **土台にしている仕事**:
 

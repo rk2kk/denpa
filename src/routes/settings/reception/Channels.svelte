@@ -10,10 +10,7 @@
   import Lead from "#lib/components/Lead.svelte";
   import LogoZoom from "#lib/components/LogoZoom.svelte";
   import ServiceLogo from "#lib/components/ServiceLogo.svelte";
-  import {
-    SERVICE_TYPE_LABEL,
-    STATE_LABEL as SHARED_STATE_LABEL,
-  } from "#lib/format.js";
+  import { SERVICE_TYPE_LABEL, stateLabel } from "#lib/format.js";
 
   import type { PageData } from "./$types";
 
@@ -64,13 +61,6 @@
     { value: "CS", label: SERVICE_TYPE_LABEL["CS"] },
     { value: "GR,BS,CS", label: "すべて" },
   ];
-  /** スキャンの状態の呼び名。共通のものに、スキャンだけの2つを足す */
-  const STATE_LABEL: Record<string, string> = {
-    ...SHARED_STATE_LABEL,
-    canceled: "中断",
-    idle: "待機中",
-  };
-
   /*
    * 物理チャンネルと、そこに入っている局。**denpa 自身のDBから来る。**
    * エージェントにも控えはあるが、聞きに行かない (`channels.server.ts`)
@@ -126,9 +116,9 @@
         <div class="cluster section-bar" data-testid="channel-actions">
           {@render scanControl()}
           <!--
-                        入れたばかりのとき用。普段の周回は録画にもスキャンにもロゴにも
+                        入れたばかりのとき用。普段の周回は録画にもスキャンにも
                         譲るので、何か動いていると番組表がなかなか埋まらない。
-                        押されている間は録画以外には譲らせて、全チューナーで回る
+                        押されている間は録画とライブ視聴以外には譲らせて、全チューナーで回る
                     -->
           <ActionButton
             action="?/collectNow"
@@ -204,6 +194,21 @@
           (1週間後にまた確かめます)
         </div>
       {/if}
+      {#if data.logos.satellite.missing > 0 && !data.logoSweep.running}
+        <!--
+                    衛星のロゴは十数分に一度しか流れてこず、揃うまで何回か開き直すことがある。
+                    いつ続きを読むのかを言わないと、止まっているように見える (logo.awaitCarousel)
+                -->
+        <div class="tiny muted" data-testid="logo-satellite-waiting">
+          BS・CS の <span class="num">{data.logos.satellite.missing}</span>
+          局は、{#if data.logos.satellite.carrier !== null}
+            {data.logos.satellite.carrier} に十数分おきにまとめて流れてくるのを待っています。
+            番組表集めがこの中継を開いたときと、チューナーが空いているときに、続きから読みます
+          {:else}
+            ロゴを流している中継をまだ探しています。チューナーが空いているときと、番組表集めが衛星の中継を開いたときに確かめます
+          {/if}
+        </div>
+      {/if}
     {/if}
 
     <!-- ロゴの取得は1チャンネルに数分かかる。出さないと押しても何も起きていないように見える -->
@@ -232,7 +237,7 @@
       <div class="progress-block" data-state={scan.state}>
         <div class="cluster small">
           <span class="tag" data-testid="scan-state"
-            >{STATE_LABEL[scan.state]}</span
+            >{scan.state === "canceled" ? "中断" : stateLabel(scan.state)}</span
           >
           {#if scan.phase}
             <span class="muted">{scan.phase}</span>

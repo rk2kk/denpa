@@ -10,6 +10,7 @@
     PLAYER_CONTROLS,
     PLAYER_STAGE,
     type PlayerControls,
+    STAGE_OUTSIDE,
   } from "./controls.svelte";
   import FoldReflection from "./FoldReflection.svelte";
   import type { StageFullscreen } from "./fullscreen.svelte.js";
@@ -36,7 +37,8 @@
     /**
      * アンビエントモード (`ambient.svelte.ts`)。渡すと、映像の周りの地に映像の色を敷く (`AmbientGlow`)。
      * 色は枠の外に出るだけで、枠の中 (映像・字幕・データ放送・操作列・通知) には重ならない。
-     * テーブルトップ (`TABLETOP`) の間は、光の代わりに下の段へ映像の色の反射 (`FoldReflection`) を敷く
+     * テーブルトップ (`TABLETOP`) の間は、光の代わりに下の段へ映像の色の反射 (`FoldReflection`) を敷く。
+     * 光が見えている間は、実況のコメントも枠の外を流れる (下の `outside`)
      */
     ambient?: Ambient;
   }
@@ -54,13 +56,41 @@
     ambient,
   }: Props = $props();
 
-  // 中のメニュー (`SpeedMenu`・`SettingsMenu`) が「開いている間は操作列を残せ」と言う先。取り手で渡す (props は差し替わりうる)
+  // 中のメニュー (`stageMenu`) が「開いている間は操作列を残せ」と言う先。取り手で渡す (props は差し替わりうる)
   setContext(PLAYER_CONTROLS, () => controls);
   /** テーブルトップか (`#lib/phone-form.ts` の `TABLETOP`)。並べ方は CSS、ここは光と反射のどちらを置くかだけ */
   const tabletop = new MediaQuery(TABLETOP);
 
   // メニューを枠の中に収める先 (`SpeedMenu`・`SettingsMenu`)。bind で入るので取り手で渡す
   setContext(PLAYER_STAGE, () => element);
+
+  /**
+   * **枠の外で実況のコメントを流す所** (`STAGE_OUTSIDE`)。光を枠の外に出している間だけ置く (テーブルトップの反射・全画面では置かない)。
+   * 縦は置き場 (`.room`) の中 (見出しには掛からない)、横は窓の左の端から右の端まで (光と同じく右の列の上も通る)。
+   * 右の列の中身より上に描くが、押すものは何も受けない (`pointer-events: none`)。二段組のときだけ出す (下の style)
+   */
+  let glowing = $state(false);
+  let room = $state<HTMLElement | null>(null);
+  let outside = $state<HTMLElement | null>(null);
+  setContext(STAGE_OUTSIDE, () => outside);
+  // 横の位置は窓に合わせる (置き場は `<main>` の余白の内側にあり、右の列は置き場の外なので CSS では届かない)
+  $effect(() => {
+    const target = outside;
+    const box = room;
+    if (target === null || box === null) return;
+    const place = () => {
+      target.style.left = `${-box.getBoundingClientRect().left}px`;
+      target.style.width = `${document.documentElement.clientWidth}px`;
+    };
+    place();
+    const sizes = new ResizeObserver(place);
+    sizes.observe(box);
+    window.addEventListener("resize", place);
+    return () => {
+      sizes.disconnect();
+      window.removeEventListener("resize", place);
+    };
+  });
 
   /**
    * 枠の大きさで操作列の詰め方を変える (操作列は 48px の丸を横に9個並べる作りで、狭い枠では折れて映像を覆った)。
@@ -137,6 +167,44 @@
       target.removeEventListener("resize", read, true);
       target.removeEventListener("loadedmetadata", read, true);
       changes.disconnect();
+    };
+  });
+
+  /**
+   * 下の操作バーの中身の高さ (px。上の影の余白は除く)。右端の縦の列はこの上で止め、入りきらないぶんは
+   * 左へもう1列に並べる (`ControlBar` の `.side`)。スマホの縦では列に4つ並ぶと全画面のボタンに重なっていた
+   */
+  let barHeight = $state(0);
+  $effect(() => {
+    const target = element;
+    if (target === null) return;
+    let bar: HTMLElement | null = null;
+    const measure = () => {
+      barHeight =
+        bar === null
+          ? 0
+          : Math.ceil(
+              bar.offsetHeight - parseFloat(getComputedStyle(bar).paddingTop),
+            );
+    };
+    const sizes = new ResizeObserver(measure);
+    const attach = () => {
+      const next = target.querySelector<HTMLElement>(
+        ":scope > [data-stage-bar]",
+      );
+      if (next === bar) return;
+      if (bar !== null) sizes.unobserve(bar);
+      bar = next;
+      if (bar !== null) sizes.observe(bar);
+      measure();
+    };
+    // 操作バーそのものが出入りする (ライブは選局するまで出さない)
+    const outer = new MutationObserver(attach);
+    outer.observe(target, { childList: true });
+    attach();
+    return () => {
+      sizes.disconnect();
+      outer.disconnect();
     };
   });
 
@@ -289,16 +357,26 @@
     testid="{testid}-reflection"
   />
 {:else if ambient}
-  <!-- 光は枠より前 (兄弟) に置く。位置を持つ枠のほうが後ろなので、光の上に描かれる -->
+  <!-- 光は枠の置き場より前に置く。位置を持つ枠のほうが後ろなので、光の上に描かれる -->
   <AmbientGlow
     {ambient}
     stage={element}
     fullscreen={fullscreen.active}
+    bind:shown={glowing}
     testid="{testid}-ambient"
   />
 {/if}
 <!-- 枠の置き場。二段組では、枠が使える広さをここで測る (下の style の `container-type`) -->
-<div class="room">
+<div class="room" bind:this={room}>
+  {#if ambient && !tabletop.current && glowing}
+    <!-- 枠より前に置く。位置を持つ枠のほうが後ろなので、外を流れるコメントは枠の下・光の上になる -->
+    <div
+      bind:this={outside}
+      class="outside"
+      aria-hidden="true"
+      data-testid="{testid}-outside"
+    ></div>
+  {/if}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!--
     映像の周りは黒 (letterbox の帯にテーマ色を出さない)。低くしすぎない (224px) — 上下と右に重ねる操作バーどうしが重なる
@@ -307,6 +385,7 @@
     bind:this={element}
     class="stage"
     style:--dp-aspect={aspect}
+    style:--stage-bar="{barHeight}px"
     class:quiet={!controls.shown}
     data-compact={compact ? "" : undefined}
     data-fold={fold ? "" : undefined}
@@ -345,6 +424,13 @@
     display: contents;
   }
   /*
+   * 枠の外を流れるコメントの所 (`outside`)。二段組 (下) のほかでは出さない — 縦に積むときは枠が窓の幅いっぱいで外が無く、
+   * 置き場が箱を持たないので、置くと窓の別の所に出る
+   */
+  .outside {
+    display: none;
+  }
+  /*
      * 二段組では、枠を映像の形にして使える広さに収める (上の `aspect`)。幅は列の幅 (`100cqw`) と
      * 「高さ × 縦横比」(`100cqh`) の小さいほう。上に寄せて横は真ん中 (E2E の `expectSideFrame`)。
      * 測る箱は `.room` — `<main>` の列にすると `position: absolute` の基準になり、`AmbientGlow` の位置がずれる
@@ -362,6 +448,26 @@
     .stage {
       aspect-ratio: var(--dp-aspect, 16 / 9);
       width: min(100cqw, max(100cqh, 14rem) * var(--dp-aspect, 16 / 9));
+    }
+    /*
+     * 枠の外を流れるコメント (上の `outside`)。縦は置き場の中、横は窓の端から端まで (左と幅は上の `place` が書く)。
+     * はみ出したぶんは切る。右の列 (位置を持つ。`AmbientGlow`) より上に描くため `z-index: 1` にし、
+     * 枠も同じ 1 にして文書の順で上に保つ (外のコメントは枠の下)
+     */
+    .room {
+      position: relative;
+    }
+    .stage {
+      z-index: 1;
+    }
+    .outside {
+      display: block;
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      z-index: 1;
+      overflow: hidden;
+      pointer-events: none;
     }
   }
   /*

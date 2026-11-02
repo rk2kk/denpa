@@ -1,7 +1,8 @@
 /**
  * 操作列を出しておくか消すかの決め方 (3画面で同じ。DOM も映像も触らない)。触っていない間は引っ込める。
  * 止めていても引っ込める — 一時停止はたいてい映像の中の文字を見るためで、押さないと消せないほうが邪魔だった。
- * 残すのはキーボードで触っている間 (映像を押して出し直す手が無い) と、メニューを開いている間だけ (`stageMenu`)
+ * 残すのはキーボードで触っている間 (映像を押して出し直す手が無い) と、メニューを開いている間 (`stageMenu`)、
+ * 映像の上に実況に書き込む 1 行を開いている間だけ (`writing`。一覧の下の 1 行は映像の外なので残さない)
  */
 
 import { getContext } from "svelte";
@@ -21,6 +22,12 @@ export const PLAYER_CONTROLS = Symbol("player-controls");
 /** 舞台の枠そのもの。**メニューを枠の中に収める**のに使う (`stageMenu`) */
 export const PLAYER_STAGE = Symbol("player-stage");
 
+/**
+ * 枠の外で実況のコメントを流す所 (`PlayerStage` の `.outside`)。アンビエントの光を枠の外に出している間だけあり、
+ * 無ければ null。枠の下・光と右の列の上に重なる。横は窓の端から端まで、縦は置き場 (`.room`) の中 (見出しには掛からない)
+ */
+export const STAGE_OUTSIDE = Symbol("stage-outside");
+
 export interface PlayerControls {
   /** いま出ているか */
   readonly shown: boolean;
@@ -32,6 +39,8 @@ export interface PlayerControls {
   keyboard: boolean;
   /** メニューが開いている間は残す。**選んでいる最中に消えては選べない** */
   hold: boolean;
+  /** 実況に書き込む 1 行を開いている間は残す (打っている最中に消えない) */
+  writing: boolean;
   /** その場で出し直す (ボタンを押した直後など) */
   stir: () => void;
   /** その場で消す (指で1回押して引っ込めるとき) */
@@ -52,12 +61,13 @@ export function playerControls(): PlayerControls {
   let wasShown = false;
   let keyboard = $state(false);
   let hold = $state(false);
+  let writing = $state(false);
   /** 前にいた場所。**動いていない `pointermove` を捨てる**のに使う (`wake`) */
   let lastX = Number.NaN;
   let lastY = Number.NaN;
 
-  // 見るのは「触ったか」だけ (キーボードと開いているメニューを除く。再生の状態は混ぜない)
-  const shown = $derived(keyboard || hold || now - touched < LINGER);
+  // 見るのは「触ったか」だけ (キーボード・開いているメニュー・書き込む 1 行を除く。再生の状態は混ぜない)
+  const shown = $derived(keyboard || hold || writing || now - touched < LINGER);
 
   $effect(() => {
     if (!shown) return;
@@ -90,6 +100,12 @@ export function playerControls(): PlayerControls {
     },
     set hold(value: boolean) {
       hold = value;
+    },
+    get writing(): boolean {
+      return writing;
+    },
+    set writing(value: boolean) {
+      writing = value;
     },
     /**
      * 指は押したときだけ出す (滑らせただけでは何もしない)。マウスは本当に動いたときだけ出す — 止まったカーソルの
@@ -124,7 +140,7 @@ export function playerControls(): PlayerControls {
 }
 
 /**
- * 舞台の中のメニュー (`SpeedMenu`・`SettingsMenu`) の決まり。**部品の初めに呼ぶ** (context と `$effect` を使う)。
+ * 舞台の中のメニュー (`SpeedMenu`・`SettingsMenu`・`SoundButton` の音量のつまみ) の決まり。**部品の初めに呼ぶ** (context と `$effect` を使う)。
  *
  * - **開いている間は操作列を残す。** 操作列は触らなくなって 2.5 秒で引っ込むが、メニューは
  *   操作列の中にあるので、選んでいる最中に**メニューごと消えて**いた。舞台の外では何もしない

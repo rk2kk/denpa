@@ -6,6 +6,7 @@
   import { onMount } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import CalendarDays from "~icons/lucide/calendar-days";
+  import Camera from "~icons/lucide/camera";
   import Ellipsis from "~icons/lucide/ellipsis";
   import ExternalLink from "~icons/lucide/external-link";
   import ListChecks from "~icons/lucide/list-checks";
@@ -23,7 +24,7 @@
   import Menu from "#lib/components/Menu.svelte";
   import Icon from "#lib/components/player/Icon.svelte";
   import SearchField from "#lib/components/SearchField.svelte";
-  import { denpaFontUrl } from "#lib/font.js";
+  import { denpaFontCssUrl } from "#lib/font.js";
   import { markLite } from "#lib/lite.js";
   import { measure } from "#lib/measure.svelte.js";
   import { startOffline } from "#lib/offline.svelte.js";
@@ -224,6 +225,7 @@
     { href: "/", label: "録画" },
     { href: "/guide", label: "番組表" },
     { href: "/live", label: "ライブ" },
+    { href: "/clips", label: "切り抜き" },
     { href: "/rules", label: "ルール" },
     { href: "/settings", label: "設定" },
   ] as const;
@@ -288,7 +290,7 @@
    * - **番組表** … 表が画面の残りをぜんぶ使う。`max-height: 75vh` で切っていた頃は、
    *   **画面の下に余白があるのに表のほうが先に終わって**いた
    *
-   * **一覧の画面 (録画・ルール・設定・検索) は入れない** (ページごと巻く。docs/design.md の「浮かせ方」)。
+   * **一覧の画面 (録画・切り抜き・ルール・設定・検索) は入れない** (ページごと巻く。docs/design.md の「浮かせ方」)。
    * 窓ごと巻けば、戻ったときに見ていた位置へも帰る。
    * 二段組にしない幅 (1000px 未満。横にしたスマホは下) では画面ぴったりにせず (下の style)、映像の画面もページごと巻く (番組表は外枠が自分で高さを採る。`app.css` の `.guide-frame`)。
    *
@@ -316,8 +318,8 @@
    * 項目を横に並べると、スマートフォンの幅ではヘッダーそのものが画面より
    * 広くなり、ページ全体が横スクロールしていた (実測で 390px の端末に対して
    * 420px)。上のハンバーガーに畳んでいた頃は、画面を移るたびに2回押していた。
-   * 640px 未満はよく開く 3 画面と検索をタブに、残り (ルール・設定) は「その他」の `Menu` (popover) に。
-   * 640px からはルール・設定もタブに出し (`wide`。6 つ並ぶ)、「その他」は出さない (中身が無くなる)。
+   * 640px 未満はよく開く 3 画面と検索をタブに、残り (切り抜き・ルール・設定) は「その他」の `Menu` (popover) に。
+   * 640px からは切り抜き・ルール・設定もタブに出し (`wide`。7 つ並ぶ。並びはヘッダーと同じ)、「その他」は出さない (中身が無くなる)。
    * テーマは設定の「この端末」、新しいバージョンは設定の「バージョンと環境」にあり、設定の入口に点で知らせる (下の `fresh`)。
    * ヘッダー (検索の欄) を隠すので、検索はタブから入る
    */
@@ -325,16 +327,17 @@
     { href: "/", label: "録画", icon: ListVideo, wide: false },
     { href: "/guide", label: "番組表", icon: CalendarDays, wide: false },
     { href: "/live", label: "ライブ", icon: Tv, wide: false },
+    { href: "/clips", label: "切り抜き", icon: Camera, wide: true },
     { href: "/rules", label: "ルール", icon: ListChecks, wide: true },
     { href: SEARCH.href, label: SEARCH.label, icon: Search, wide: false },
     { href: "/settings", label: "設定", icon: Settings, wide: true },
   ] as const;
   /**
-   * ルール・設定もタブに出している幅か。**下の style の `@media (min-width: 640px)` と同じ線**。
+   * 切り抜き・ルール・設定もタブに出している幅か。**下の style の `@media (min-width: 640px)` と同じ線**。
    * その幅では「その他」を隠すので、印も付けない (隠れたタブに印が付くと、下線がそこへ滑っていく)
    */
   const wideTabbar = new MediaQuery("(min-width: 640px)", false);
-  /** 「その他」の中身。640px 未満で隠れるタブ (ルール・設定) */
+  /** 「その他」の中身。640px 未満で隠れるタブ (切り抜き・ルール・設定) */
   const moreLinks = tabs.filter((tab) => tab.wide);
   const moreCurrent = $derived(
     !wideTabbar.current && moreLinks.some((link) => link.href === here),
@@ -345,7 +348,7 @@
    * 「その他」とその中の「設定」、広い形はヘッダーの「設定」
    */
   const fresh = $derived(data.update !== null);
-  /** タブを出すのはナビの 5 画面と検索 (設定はその下の節も) だけ (観る画面・追っかけ・ログイン・ペアリングには出さない) */
+  /** タブを出すのはナビの画面 (切り抜きも) と検索 (設定はその下の節も) だけ (観る画面・追っかけ・ログイン・ペアリングには出さない) */
   const showTabbar = $derived(here !== null);
   /**
    * テーブルトップ (`#lib/phone-form.ts`) のライブでは、下のタブは下の段 (舞台の中。黒い地) の下端に浮く。
@@ -401,18 +404,19 @@
   }
 
   /**
-   * **放送の字 (Denpa Font) をここで名乗らせる** (使うのは `app.css` の `.broadcast`)。
+   * **放送の字 (Denpa Font) をここで名乗らせる** (使うのは `app.css` の `.broadcast` と字幕)。
    * バージョン付きの URL は組むときに決まるので、`app.css` には書けない (`#lib/font.ts`)。
-   * 使う字が画面に出たときだけ落ちてくる。届くまでは画面の字で出しておく (`swap`)
+   * 名乗らせる CSS は基本の字と JIS X 0213 で足された漢字の 2 つの woff2 を `unicode-range` で分けて書いてあり、
+   * どちらも使う字が画面に出たときだけ落ちてくる。届くまでは画面の字で出しておく (`swap`)
    */
-  const fontFace = `<style>@font-face{font-family:"Denpa Font";src:url("${denpaFontUrl()}") format("woff2");font-display:swap}</style>`;
+  const fontCss = denpaFontCssUrl();
 </script>
 
 <svelte:window onkeydown={searchShortcut} />
 
 <svelte:head>
   <title>{title}</title>
-  {@html fontFace}
+  <link rel="stylesheet" href={fontCss} />
 </svelte:head>
 
 <!--
@@ -778,8 +782,7 @@
     gap: 0.125rem;
     padding: 0 0.25rem;
   }
-  /* ヘッダーの押すものは高さ 40px。小さい字のままでも指で外さない */
-  .actions :global(button),
+  /* ヘッダーのリンクは高さ 40px。小さい字のままでも指で外さない */
   .actions :global(a.button) {
     min-height: 2.5rem;
   }
@@ -1060,7 +1063,7 @@
     padding-top: var(--dp-page-top);
   }
   /*
-   * **640px からはルール・設定もタブに出し、「その他」を隠す** (6 つ。上の `wideTabbar` と同じ線)。字はアイコンの下のまま一段大きく。
+   * **640px からは切り抜き・ルール・設定もタブに出し、「その他」を隠す** (7 つ。上の `wideTabbar` と同じ線)。字はアイコンの下のまま一段大きく。
    * 640px 未満は 5 つ (録画・番組表・ライブ・検索・その他)。タブの幅はどれも等分 (`.tabbar` の `grid-auto-flow`)
    */
   .tabbar .tab.wide {
@@ -1164,7 +1167,7 @@
   /*
        * **上端では平ら、巻くと浮く。** 裏に中身が無いうちは浮かせる理由が無いので、地に馴染ませる
        * (docs/design.md の「浮かせ方」)。巻いた量に合わせて面と影が出る (`animation-timeline: scroll()`。JS は使わない)。
-       * 窓が巻けない画面のうち、観る画面は時間の軸が止まったままなので、いつも平ら (アンビエントの色もそのまま届く)。番組表は表の巻いた量で浮く (下の 1000px から)。
+       * 窓が巻けない画面のうち、映像の画面 (ライブ・観る画面・追っかけ) はアニメーションごと外して、いつも平ら (アンビエントの色もそのまま届く)。番組表は表の巻いた量で浮く (下の 1000px から)。
        * 知らないブラウザと、動きを減らす設定の端末 (Pico がアニメーションをすぐ終わらせる) は、いつも浮いた形
        */
   @supports (animation-timeline: scroll()) {
@@ -1240,14 +1243,20 @@
     /*
          * **番組表は表をヘッダーの裏まで伸ばすので、ヘッダーは表の巻いた量で浮かせる** (窓は巻けない)。
          * 表の箱が名前付きの時間の軸 `--guide` を出し (`guide/+page.svelte`)、ここで外枠まで見えるようにする
-         * (`timeline-scope`)。軸の無い画面 (観る画面) では軸が止まったままなので、ヘッダーは今までどおり平ら
+         * (`timeline-scope`)。
+         *
+         * **映像の画面 (ライブ・観る画面・追っかけ) はアニメーションごと外す。** 軸の無い画面に同じアニメーションを残すと、
+         * 軸が止まり、Chrome は止まる前の値を残す。表を巻いて浮いた番組表からライブへ移ると、裏に何も無いのに浮いたままになっていた
          */
     @supports (animation-timeline: scroll()) {
       .shell.fill {
         timeline-scope: --guide;
       }
-      .shell.fill .navbar {
+      .shell.fill.guide .navbar {
         animation-timeline: --guide;
+      }
+      .shell.fill:not(.guide) .navbar {
+        animation-name: none;
       }
     }
     /*

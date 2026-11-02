@@ -60,6 +60,8 @@ import {
   type CaptionShown,
   CaptionText,
   NO_SUBTITLE,
+  peekCaptions,
+  PMT_WAIT,
   programSpec,
   rawCaptionArgs,
   textFrame,
@@ -80,7 +82,7 @@ import { orm } from "./db";
 import { deinterlace } from "./encoder";
 import { followOnAir } from "./epg";
 import { emit, type Yielded } from "./events";
-import { type LiveHw, liveHw, liveHwArgs } from "./hwenc";
+import { type LiveHw, liveHw, liveHwArgs, nvencBusy } from "./hwenc";
 import { tunerOf, yieldedTo } from "./live-yield";
 import { programs, recordings, services } from "./schema";
 import { settings } from "./settings";
@@ -236,8 +238,18 @@ export function encodeArgs(
   codec: StreamCodec = "h264",
   caption: number | null = 0,
   hw: LiveHw | null = null,
+  copy = false,
 ): string[] {
-  const picture = codec === "audio" ? null : videoArgs(codec, hw);
+  const video = codec !== "audio";
+  /*
+   * **`copy` のときはデコードしない。** インタレ解除 (`-vf`) もコマ数の上限
+   * (`-fpsmax`) も「デコードして作り直す」前提の道具で、`-c:v copy` とは
+   * 同時に使えない (ffmpeg が受け付けない)。掛けるものが無いのは、相手が
+   * 既にプログレッシブな H.264 を作っているときだけ (`tunerTranscoding`)。
+   * AV1 を選ばれたら写せない (チューナーは H.264 しか作らない) ので、そのときも今までどおり
+   */
+  const passthrough = copy && codec === "h264";
+  const picture = video && !passthrough ? videoArgs(codec, hw) : null;
   const from = programSpec(program);
   return [
     "-hide_banner",
@@ -245,6 +257,10 @@ export function encodeArgs(
     "-nostats",
     // `-fflags nobuffer` は付けない。解析の間に読んだ I フレームを捨てて次の GOP を待つ (上の説明)
     // 1局に絞ってあるが、字幕まで見つけさせるぶん要る (上の説明)
+    "-err_detect",
+    "ignore_err",
+    "-fflags",
+    "+discardcorrupt",
     "-probesize",
     "100000",
     // GPU デバイスを開く。復号から GPU なら `-hwaccel` もここ (入力より前でないと効かない)
@@ -252,15 +268,14 @@ export function encodeArgs(
     "-i",
     "pipe:0",
     // 音声だけなら映像はエンコードしない (StreamCodec)
-    ...(picture !== null
+    ...(video
       ? [
           /*
            * インタレ解除 (上の説明)。**ライブは常に60コマ。** 録画は本編映像から実測して
            * 30に落とすことがあるが (`encoder.measureSmoothMotion`)、ライブは映像が来る前に
            * 決めないといけない。60 に倒しておけば動きは絶対に落ちない (アニメで無駄が出るだけ)
            */
-          "-vf",
-          picture.filter,
+          ...(picture === null ? [] : ["-vf", picture.filter]),
           "-map",
           `${from}:v:0`,
           /*
@@ -282,9 +297,9 @@ export function encodeArgs(
            * 値はインタレ解除の出方そのまま — 29.97 のインタレのフィールドを
            * 起こすので 59.94
            */
-          "-fpsmax",
-          "60000/1001",
-          ...picture.encoder,
+          ...(picture === null ? [] : ["-fpsmax", "60000/1001"]),
+          // 写すときは映像のエンコーダを載せない (下の `copy` の説明)
+          ...(picture === null ? ["-c:v", "copy"] : picture.encoder),
         ]
       : []),
     // 何本目の音声か。複数入っている放送では 0 が主とは限らない
@@ -303,9 +318,7 @@ export function encodeArgs(
     "1",
     "pipe:1",
     // **2つ目の出口。** 字幕をそのまま、映像と同じ物差しの時刻付きで出す
-    ...(caption === null || picture === null
-      ? []
-      : captionOutput(from, caption)),
+    ...(caption === null || !video ? [] : captionOutput(from, caption)),
   ];
 }
 
@@ -463,7 +476,7 @@ function softwareArgs(codec: LiveCodec): string[] {
  *
  * 設計 (stream.md#前提) が狙っていた組み合わせで、**録画と同じ扱い**でもある
  * (`encoder.ts` は前から `libopus -b:a 256k`)。同じ音質なら AAC より小さく、
- * ブラウザは MSE で受け取れる (Chromium で `av01…,opus` を確かめ済み)。
+ * ブラウザは MSE で受け取れる (Chromium で `av01…,Opus` を確かめ済み。codecs の書き方は `codecsFor`)。
  *
  * **256k は放送に合わせた値。** 元の放送が AAC 256kbps なので、録画側は
  * そこへ揃えてある。ライブだけ 192k で低かったのを、こちらへ寄せる。
@@ -488,14 +501,59 @@ export function audioArgs(codec: StreamCodec): string[] {
  *
  * - `avc1.640029` … High profile / Level 4.1。1080p60 まで
  * - `av01.0.08M.08` … Main profile / Level 4.0 / 8bit。同じく 1080p60 まで
+ * - `Opus` … MP4 での Opus の名前 (中の箱の名前と同じく大文字の O)。Safari は小文字の `opus` を断る
+ *   (Chromium は両方受け取る)。入れ物が WebM なら小文字が正しいので、エンコード済みのファイルは `opus` のまま
  *
  * **音声も組で決まる** (`audioArgs`)。AV1 は Opus、H.264 は AAC
+ *
+ * **写す経路 (`config.liveCopy`) でも同じ値を返す。** 実際に流れるのは
+ * チューナーが作った Main@3.1 (720p) で、宣言 (High@4.1) より低い。
+ * Chromium は `avc1.640029` を宣言したまま Main@3.1 の fMP4 を追記しても
+ * 受け取って再生した (15秒・エラー0・`readyState=4` を実測)。
+ * 宣言を実ストリームに合わせるには入口の SPS を読むことになるが、
+ * `tuned` を送る時点ではまだ1バイトも来ていない
  */
 export function codecsFor(codec: LiveCodec): string {
   return codec === "av1"
-    ? 'video/mp4; codecs="av01.0.08M.08,opus"'
+    ? 'video/mp4; codecs="av01.0.08M.08,Opus"'
     : 'video/mp4; codecs="avc1.640029,mp4a.40.2"';
 }
+
+/**
+ * チューナーが**オンボードで H.264 を作っているか** (`config.liveCopy` の判断)。
+ *
+ * 作っているなら、こちらでデコードして作り直す意味が無い — 画質は世代で劣化し、
+ * CPU を1コア近く食う。見に行く先はチューナーエージェントの `/presets` で、
+ * **`passthrough` のときだけ「作っていない」** (放送の MPEG-2 をそのまま流している。
+ * MSE は MPEG-2 を受け取れないので写せない)。
+ *
+ * **短く待って、少しの間は覚えておく。** 選局のたびに待つと映像が出るのが遅れる。
+ * 取れなかったら迷わず「作っていない」に倒す — 写せないのに写すと**何も出ない**が、
+ * エンコードしすぎるぶんには今までどおり映る
+ */
+export async function tunerTranscoding(): Promise<boolean> {
+  const now = Date.now();
+  if (presetSeen !== null && now - presetSeen.at < PRESET_TTL) {
+    return presetSeen.transcoding;
+  }
+  let transcoding = false;
+  try {
+    const res = await fetch(`${config.agentUrl}/presets`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(1500),
+    });
+    const html = await res.text();
+    const active = /適用中: <b>([^<]*)<\/b>/.exec(html)?.[1] ?? null;
+    transcoding = active !== null && active !== "passthrough";
+  } catch {
+    transcoding = false;
+  }
+  presetSeen = { at: now, transcoding };
+  return transcoding;
+}
+
+const PRESET_TTL = 30_000;
+let presetSeen: { at: number; transcoding: boolean } | null = null;
 
 /**
  * 「放送休止」と読める番組名。
@@ -550,7 +608,7 @@ export function whyNotTuned(why: string, until: number | null): string {
 }
 
 interface Viewer {
-  /** 送り先。WebSocket の視聴者は Connection、HTTP の視聴者 (liveStream) は映像だけを流すエンドポイント */
+  /** 送り先。WebSocket の視聴者は Connection、HTTP の視聴者は映像か字幕だけを流すエンドポイント (`sessionStream`・`liveCaptions`) */
   connection: Pick<Connection, "send">;
   /** init を渡したか。渡す前に中身を送っても MSE は捨てる */
   ready: boolean;
@@ -599,6 +657,9 @@ let liveTurn = 0;
 /** GPU からソフトウェアに降りたときに画面へ出す一行 */
 const GPU_GAVE_UP =
   "GPU でエンコードできないため、ソフトウェアでエンコードしています";
+/** NVENC の同時に開ける数を超えて降りたとき (`hwenc.nvencBusy`)。覚えないので、次の選局はまた GPU から試す */
+const GPU_BUSY =
+  "GPU が同時にエンコードできる数を超えたため、ソフトウェアでエンコードしています";
 
 function hwKey(codec: StreamCodec, hw: LiveHw): string {
   return `${codec}:${hw.way.device}:${hw.way.kind}:${hw.full}`;
@@ -613,12 +674,29 @@ export function pickLiveHw(codec: LiveCodec, interlaced = true): LiveHw | null {
   const found = liveHw(codec, settings().hwAllow, liveTurn++);
   if (found === null) return null;
   const hw = interlaced ? found : { ...found, full: false };
-  return remembered(gpuFailed, hwKey(codec, hw)) ? null : hw;
+  return liveHwFailed(codec, hw) ? null : hw;
 }
 
-/** GPU でエンコードできなかった経路を覚える。しばらくは `pickLiveHw` がソフトウェアを返す */
-export function blameLiveHw(codec: StreamCodec, hw: LiveHw): void {
+/** しばらくソフトウェアにしている (`blameLiveHw` で覚えた) 経路か */
+export function liveHwFailed(codec: StreamCodec, hw: LiveHw): boolean {
+  return remembered(gpuFailed, hwKey(codec, hw));
+}
+
+/**
+ * GPU でエンコードできなかった経路を覚える。しばらくは `pickLiveHw` がソフトウェアを返す。
+ *
+ * **同時に開ける数を超えて降りただけ (`busy`。`hwenc.nvencBusy`) なら覚えない。** GPU は壊れておらず、
+ * 空けば通る — 覚えると、ほかの選局まで15分ソフトウェアになる。降りた1本だけがソフトウェアで続く。
+ * 覚えたら true
+ */
+export function blameLiveHw(
+  codec: StreamCodec,
+  hw: LiveHw,
+  busy: boolean,
+): boolean {
+  if (busy) return false;
   gpuFailed.set(hwKey(codec, hw), Date.now());
+  return true;
 }
 
 /** 放送の実時刻を配り直す間隔 (ms)。配り続ける理由は `Session.tellClock` */
@@ -743,10 +821,12 @@ class Session {
    */
   private note: Notice | null = null;
   /**
-   * ソフトウェアで再エンコードしている GPU の経路 (`hwKey`)。**ソフトウェアで映像が出たら**
-   * GPU のせいだったと決めて覚え、断り書きを出す (`blameGpu`)
+   * ソフトウェアで再エンコードしている GPU の経路と、同時に開ける数を超えて降りたか (`busy`)。
+   * **ソフトウェアで映像が出たら** GPU のせいだったと決めて覚え、断り書きを出す (`blameGpu`)
    */
-  private blame: string | null = null;
+  private blame: { hw: LiveHw; busy: boolean } | null = null;
+  /** いまの ffmpeg が、NVENC の同時に開ける数を超えたと言ったか (`hwenc.nvencBusy`) */
+  private busy = false;
   /** 選べる字幕 (ffmpeg の入口の見出しから)。放送そのままの経路で字幕の ffmpeg を起こし直したら作り直す (`captions`) */
   private list: TrackList;
   private readonly aborter = new AbortController();
@@ -844,7 +924,7 @@ class Session {
     /**
      * 入力の差し替え。無ければチューナーから (ライブ)。
      * 追っかけ再生はこれで録画中のファイルを渡す (`openChase`)。
-     * 呼ぶたびに読み直したストリームを返すこと — 字幕なしでの再エンコードに使う
+     * 呼ぶたびに読み直したストリームを返すこと — 起こし直す (字幕なし・ソフトウェア) たびに頭から読む
      */
     private readonly source?: () => ReadableStream<Uint8Array>,
     /**
@@ -1027,7 +1107,9 @@ class Session {
        *
        * 字幕を持たない放送に `[0:p:X:s:0]` を指定すると、ffmpeg は組み立ての
        * 時点で降りる — **映像も出ない**。そうと分かったら字幕を外して
-       * もう一度起こす。TS は流れ続けているので、取り直しは要らない
+       * もう一度起こす。TS は流れ続けているので、取り直しは要らない。
+       * ふだんは起こす前に PMT で字幕の有無を見るので (下の `peekCaptions`)、ここへ来るのは
+       * 読めなかったときと、ffmpeg が字幕とみなさなかったとき
        */
       // 音声だけなら字幕はエンコードしない
       let wanted =
@@ -1037,6 +1119,18 @@ class Session {
       // GPU でエンコードするか (`pickLiveHw`)。降りたらソフトウェアで再エンコードする (下)
       let hw = this.codec === "audio" ? null : pickLiveHw(this.codec);
       /*
+       * **チューナーが既に H.264 を作っているなら、映像は写すだけにする**
+       * (`config.liveCopy`)。作っていない (放送そのままの MPEG-2) ときと、
+       * 追っかけ (録画の TS) のときは今までどおりエンコードする。
+       * 写すときは GPU の出番が無いので、試しのエンコードもしない
+       */
+      let copy =
+        config.liveCopy &&
+        this.codec === "h264" &&
+        this.source === undefined &&
+        (await tunerTranscoding());
+      if (copy) hw = null;
+      /*
        * **ライブの TS はリーダーを1つだけ作って、起こし直しても使い回す。**
        *
        * リーダー (`getReader`) は1人しか持てない。ffmpeg ごとに作ると、前の流し込みが
@@ -1044,18 +1138,58 @@ class Session {
        * だが、書き込みは返ってこないこともある (下の「終わりは ffmpeg の終了で見る」)。
        * 使い回せば前の流し込みは何も握っていない。追っかけは読み直すので毎回作る
        */
-      const feed = tuned === null ? null : chunks(tuned);
+      let feed = tuned === null ? null : chunks(tuned);
+      /** PMT を読んで字幕の本数を見たか (`peekCaptions`)。見るのは最初の1回だけ */
+      let peeked = false;
       for (;;) {
         // ライブは同じ TS が流れ続けている。追っかけは再エンコードのたびに読み直す
-        const stream =
+        let stream =
           feed ??
           (this.source === undefined ? undefined : chunks(this.source()));
         if (stream === undefined) return;
+        /*
+         * **字幕があるかは起こす前に PMT で見る。** 無い放送に字幕の出口を頼むと、ffmpeg が入口を
+         * 探り終えてから降りて、起こし直すぶん映像が 1.5秒ほど遅れる。読めなければ今までどおり頼んで、
+         * 降りたら字幕なしで起こし直す (下)
+         */
+        if (wanted !== null && !peeked && this.program > 0) {
+          peeked = true;
+          const head = await peekCaptions(
+            stream,
+            this.program,
+            PMT_WAIT,
+            feed === null
+              ? undefined
+              : () => {
+                  this.opening.firstByte ??= this.since();
+                },
+          );
+          stream = head.stream;
+          // 読んだぶんは返ってきたストリームの頭にある。ライブは起こし直してもこちらを使う
+          if (feed !== null) feed = head.stream;
+          /*
+           * 頼んだ本数目が無ければ頼まない。`captionless` には覚えない — 毎回 PMT を読むので、
+           * 番組が替わって字幕が付けばすぐ出せる
+           */
+          if (head.count !== null && head.count <= wanted) wanted = null;
+          if (this.stopped) {
+            if (feed === null) await stream.return(undefined);
+            return;
+          }
+        }
         this.produced = false;
+        this.busy = false;
         const proc = Bun.spawn(
           [
             config.ffmpeg,
-            ...encodeArgs(this.program, this.audio, this.codec, wanted, hw),
+            ...encodeArgs(
+              this.program,
+              this.audio,
+              this.codec,
+              wanted,
+              hw,
+              copy,
+            ),
           ],
           // 字幕は4本目のパイプ (pipe:3) へ出させる。**stdio の配列でしか増やせない**
           {
@@ -1072,7 +1206,7 @@ class Session {
         if (this.opening.media === undefined) {
           this.opening.spawned = this.since();
           delete this.opening.init;
-          this.way = `${this.codec}${hw === null ? "" : `・GPU ${hw.way.kind}`}`;
+          this.way = `${this.codec}${copy ? "・写す" : ""}${hw === null ? "" : `・GPU ${hw.way.kind}`}`;
         }
 
         /*
@@ -1128,20 +1262,37 @@ class Session {
          * ので先にそちらを直す (下)。**黙って替えず、一行だけ言う** — 遅れ・CPU の重さが
          * 変わるので、設定の印を外すかどうか決める手がかりになる
          */
+        /*
+         * **写して映像が出なかったら、エンコードし直す。**
+         *
+         * 写すだけでは、入口の頭が SPS/PPS + I フレームで始まっていないと
+         * **1パケットも出せない** (実測: 途中の PES から始めた TS を
+         * `-c:v copy` に通すと `non-existing PPS 0 referenced` で終了)。
+         * 見ている人はまだ何も受け取っていないので、経路を替えて起こし直すだけで済む。
+         * **黙って替えず、一行だけ言う** — CPU と画質の話が変わるので
+         */
+        if (copy && !this.produced) {
+          console.warn(
+            `[live] ${label}: チューナーの H.264 をそのまま写せなかったので、エンコードし直します`,
+          );
+          copy = false;
+          hw = this.codec === "audio" ? null : pickLiveHw(this.codec);
+          continue;
+        }
         if (
           hw !== null &&
           !this.produced &&
           !(wanted !== null && this.noSubtitle)
         ) {
           console.warn(
-            `[live] ${label}: GPU (${hw.way.device} の ${hw.way.kind}${hw.full ? "・復号から" : ""}) でエンコードできなかったので、ソフトウェアで再エンコードします`,
+            `[live] ${label}: GPU (${hw.way.device} の ${hw.way.kind}${hw.full ? "・復号から" : ""}) でエンコードできなかったので、ソフトウェアで再エンコードします${this.busy ? " (同時に開ける数を超えた。方式は覚えない)" : ""}`,
           );
-          this.blame = hwKey(this.codec, hw);
+          this.blame = { hw, busy: this.busy };
           hw = null;
           continue;
         }
-        if (wanted === null || !this.noSubtitle) {
-          // ここまで来たのは ffmpeg が自分で降りたとき
+        if (wanted === null) {
+          // 字幕なしでも降りた → 致命的
           this.died(
             label,
             trouble === null
@@ -1151,10 +1302,12 @@ class Session {
           );
           return;
         }
+        // 字幕付きで降りた → 字幕なしで再試行
         console.warn(
           `[live] ${label}: 字幕が無いので字幕なしで再エンコードします`,
         );
         captionless.set(this.serviceId, Date.now());
+        this.noSubtitle = true;
         wanted = null;
       }
     } catch (error) {
@@ -1413,13 +1566,14 @@ class Session {
    * GPU のせいだったと決める。**ソフトウェアに替えて映像が出たときだけ** — 選局直後で
    * 映像がまだ来ていない・入力が途切れた、のように GPU と関係なく降りたのなら、
    * ソフトウェアでも出ずに「映像を出せませんでした」になる。そのとき GPU を15分
-   * 外したり「GPU でエンコードできなかった」と言ったりすると嘘になる
+   * 外したり「GPU でエンコードできなかった」と言ったりすると嘘になる。
+   * 同時に開ける数を超えただけなら覚えず (`blameLiveHw`)、断り書きもそう言う
    */
   private blameGpu(): void {
     if (this.blame === null) return;
-    gpuFailed.set(this.blame, Date.now());
+    const kept = blameLiveHw(this.codec, this.blame.hw, this.blame.busy);
     this.blame = null;
-    this.note = { type: "notice", message: GPU_GAVE_UP };
+    this.note = { type: "notice", message: kept ? GPU_GAVE_UP : GPU_BUSY };
     this.tell(this.note);
   }
 
@@ -1506,10 +1660,7 @@ class Session {
     }
   }
 
-  /**
-   * 選べる字幕を1人に知らせる。**言語はその人に出しているもの** (`Viewer.language`) なので、全員に同じものは送れない。
-   * 言語がまだ分からない (字幕管理データが届いていない) ときは `languages` を省く
-   */
+  /** 選べる字幕を1人に知らせる (`captionsNotice`。言語はその人の `Viewer.language`) */
   private tellCaptions(viewer: Viewer, tracks: CaptionTrack[]): void {
     this.tellOne(
       viewer,
@@ -1686,6 +1837,8 @@ class Session {
       }
       // 字幕が無い放送。**映像ごと落ちる**ので、字幕なしで再エンコードする (`run`)
       if (NO_SUBTITLE.test(line)) this.noSubtitle = true;
+      // NVENC の同時に開ける数を超えた。GPU から降りても方式は覚えない (`run`・`blameGpu`)
+      if (nvencBusy(line)) this.busy = true;
       if (worthLogging(line)) {
         console.warn(
           `[live] ${this.channelType}:${this.channel} ffmpeg: ${line.trim()}`,
@@ -2047,7 +2200,7 @@ export function chaseStream(
   }
   const release = holdTranscode();
   if (release === null) return "busy";
-  return sessionStream((viewer, held) =>
+  return sessionStream((viewer, hold) =>
     openChase(
       {
         type: "chase",
@@ -2059,7 +2212,7 @@ export function chaseStream(
         language: undefined,
       },
       viewer,
-      held,
+      hold,
       release,
     ),
   );
@@ -2301,10 +2454,10 @@ function spawnRecordingCaptioner(
  * 流すのは映像のコンテナ (init + 中身) と元のTSだけで、字幕・データ放送・通知は捨てる。
  * エンコードできなくなったら・読み切ったら・チューナーから外されたら・番組が替わって作り直すなら (`error` / `ended` / `lost` / `restart`) 応答を閉じる。読むのが追いつかない
  * 相手も閉じる (溜め続けるとメモリが増え続け、fMP4 は途中を捨てると壊れる)。
- * `held` は溜まりすぎて送り込みを止めたいか (追っかけだけが使う。`CHASE_STREAM_HOLD`)
+ * `hold` は溜まりすぎて送り込みを止めたいか (追っかけだけが使う。`CHASE_STREAM_HOLD`)
  */
 export function sessionStream(
-  open: (viewer: Viewer, held: () => boolean) => Session | null,
+  open: (viewer: Viewer, hold: () => boolean) => Session | null,
 ): ReadableStream<Uint8Array> {
   let session: Session | null = null;
   /** もう閉じたか。加えている最中 (watch の中) に閉じることがあるので、戻ってから見る */
@@ -2436,7 +2589,7 @@ export function warm(
 
   /*
    * **誰も来なければ自分で畳む。** 見ている人がいなくなったら畳む仕掛け
-   * (`attend` の `leave`) は、**1人も来なかった場合には動かない**
+   * (`depart`) は、**1人も来なかった場合には動かない**
    */
   const timer = setTimeout(() => {
     if (session.empty) session.stop();

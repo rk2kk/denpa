@@ -96,11 +96,7 @@ type RemoteGet = (
 ) => Promise<{ contentType: string; body: Uint8Array } | null>;
 
 export type ResourceEvent =
-  | {
-      type: "pmt";
-      components: Map<number, ComponentPMT>;
-      previous: Map<number, ComponentPMT>;
-    }
+  | { type: "pmt"; components: Map<number, ComponentPMT> }
   | { type: "dii"; component: number; dii: Dii; previous: Dii | null }
   | { type: "module"; component: number; module: number }
   | { type: "program" }
@@ -168,7 +164,6 @@ export class Resources {
   feed(message: ResponseMessage): ResourceEvent[] {
     switch (message.type) {
       case "pmt": {
-        const previous = this.pmt;
         this.pmt = new Map(
           message.components
             .filter((c) => c.streamType === STREAM_CAROUSEL)
@@ -184,7 +179,7 @@ export class Resources {
         }
         // PMT に無い部品を待っても来ない
         this.settle((p) => (this.pmt.has(p.component) ? undefined : null));
-        return [{ type: "pmt", components: this.pmt, previous }];
+        return [{ type: "pmt", components: this.pmt }];
       }
       case "moduleListUpdated": {
         const previous = this.dii.get(message.componentId) ?? null;
@@ -615,7 +610,7 @@ export class Resources {
     });
   }
 
-  /** モジュールを捨てる。押さえていなければ作った URL を返す */
+  /** モジュールを捨てる。今のもの・押さえたものとしてまだ持っていなければ、作った URL を返す */
   private release(module: Module): void {
     const k = key(module.component, module.id);
     if (this.cache.get(k) === module || this.locks.get(k)?.module === module)

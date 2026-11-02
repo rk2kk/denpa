@@ -8,8 +8,9 @@
  *
  * | 録画にあるもの | 求められた形式 | 出し方 |
  * | --- | --- | --- |
- * | エンコード済み (同じコーデック) | H.264 / AV1 | ファイルそのまま (`file`)。そのまま読めない端末には詰め替え (`stream`、映像は写すだけ) |
+ * | エンコード済み (同じコーデック) | H.264 / H.265 / AV1 | ファイルそのまま (`file`)。そのまま読めない端末には詰め替え (`stream`、映像は写すだけ) |
  * | エンコード済み (違うコーデック) | H.264 / AV1 | **エンコード済みを元に**その場で変換 (`stream`) |
+ * | H.265 のエンコード済みが無い | H.265 | 出さない (H.265 はその場の変換で作らない) |
  * | 元の TS だけ | H.264 / AV1 | TS からその場で変換 (`stream`) |
  * | 元の TS | MPEG-2 | TS を飛び先から流す (`raw`。画面が自分で再生する) |
  * | エンコード済みだけ | MPEG-2 | 出さない |
@@ -43,6 +44,8 @@ import {
   parseAudios,
   pickTrack,
 } from "#lib/arib.js";
+import { encodedCodec } from "#lib/encoded-codec.js";
+import type { HwCodec } from "#lib/hw.js";
 import type { LiveCodec } from "#lib/live.js";
 import type { FileSource } from "#lib/source.js";
 import {
@@ -67,7 +70,7 @@ import type { Recording } from "#lib/types.js";
 import { programSpec } from "./captions";
 import { chapterList } from "./cm";
 import { config } from "./config";
-import type { LiveHw } from "./hwenc";
+import { type LiveHw, nvencBusy } from "./hwenc";
 import {
   aribServiceId,
   audioArgs,
@@ -114,6 +117,11 @@ const AVC_PROFILES: Record<string, string> = {
   "High 4:2:2": "7a00",
   "High 4:4:4 Predictive": "f400",
 };
+/** H.265 の profile 名 → codecs の profile と互換の印 */
+const HEVC_PROFILES: Record<string, string> = {
+  Main: "1.6",
+  "Main 10": "2.4",
+};
 const AV1_PROFILES: Record<string, number> = {
   Main: 0,
   High: 1,
@@ -128,6 +136,16 @@ function videoCodec(stream: ProbedStream | undefined): string | null {
   if (stream.codec_name === "h264") {
     const head = AVC_PROFILES[stream.profile ?? ""] ?? "6400";
     return `avc1.${head}${(level ?? 40).toString(16).padStart(2, "0")}`;
+  }
+  if (stream.codec_name === "hevc") {
+    /*
+     * `hvc1.<profile>.<互換の印>.<tier と level>.<制約>` (ISO/IEC 14496-15 の付録 E)。互換の印は profile ごとの
+     * 決まった値 (Main は 1 と 2 が立って 6、Main 10 は 2 だけで 4)。tier は ffprobe が言わないので Main tier (L)。
+     * 制約は「プログレッシブでフレームだけ」の 90 と決め打つ (ffprobe が言わない。ブラウザはここで断らない前提)。
+     * 詰め替えでも `hvc1` と名乗らせる (`copyArgs`。Safari は `hev1` を受け取らない)
+     */
+    const head = HEVC_PROFILES[stream.profile ?? ""] ?? "1.6";
+    return `hvc1.${head}.L${level ?? 120}.90`;
   }
   if (stream.codec_name === "av1") {
     const profile = AV1_PROFILES[stream.profile ?? ""] ?? 0;
@@ -216,12 +234,13 @@ async function probeMedia(
   if (result.code === 0) keep(probed, path, { mtime, file });
   return file;
 }
+
 /** エンコード済みのファイル 1 本 */
 interface EncodedFile {
   source: EncodedSource;
   path: string;
   /** 中身から読んだコーデック。読めなければ null */
-  codec: LiveCodec | null;
+  codec: HwCodec | null;
   media: MediaFile;
 }
 
@@ -250,15 +269,20 @@ export interface PlaybackPlan {
 }
 
 /** 中身の codecs (映像) からコーデックを読む */
-function codecOf(video: string | null): LiveCodec | null {
+function codecOf(video: string | null): HwCodec | null {
   if (video?.startsWith("avc1") === true) return "h264";
+  if (video?.startsWith("hvc1") === true) return "hevc";
   if (video?.startsWith("av01") === true) return "av1";
   return null;
 }
 
-/** fMP4 にしたときの音声の codecs。H.264 は AAC、AV1 は Opus (ライブと同じ組。`live.audioArgs`) */
-function streamAudio(codec: LiveCodec): string {
-  return codec === "av1" ? "opus" : "mp4a.40.2";
+/**
+ * fMP4 にしたときの音声の codecs。H.264 は AAC、AV1 は Opus (ライブと同じ組。`live.audioArgs`)。
+ * H.265 は AAC — H.265 を MSE で受け取りたいのは AV1 をデコードできない端末 (Safari など) で、MP4 の Opus を
+ * 受け取れるとは限らないため
+ */
+function streamAudio(codec: HwCodec): string {
+  return codec === "av1" ? "Opus" : "mp4a.40.2";
 }
 
 /** 変換したときの codecs (`live.codecsFor` の中身) */
@@ -326,16 +350,17 @@ function recordedSec(recording: Recording): number {
 /**
  * **何を出せるかを決める。** エンコード済みも元の TS も無ければ null。
  *
- * ffprobe が中身を読めなかったエンコード済み (ffprobe が無い・壊れている) は、いまの設定の
- * コーデックでエンコードしたものとみなしてファイルだけ出す (詰め替えも変換も、中身が分からないと組めない)
+ * ffprobe が中身を読めなかったエンコード済み (ffprobe が無い・壊れている) は、置き場の名前のコーデック
+ * (`… [H265].mkv` など) でエンコードしたものとみなしてファイルだけ出す (詰め替えも変換も、中身が分からないと組めない)
  */
 export async function playbackPlan(
   recording: Recording,
 ): Promise<PlaybackPlan | null> {
-  const guessed = settings().codecs;
+  // 並びは主 → H.265 → H.264 (`library.encodedPaths` と同じ)
   const files = (
     [
       ["encoded", recording.library_path],
+      ["hevc", recording.hevc_path],
       ["alt", recording.alt_path],
     ] as const
   ).filter(
@@ -363,9 +388,10 @@ export async function playbackPlan(
   const known = encoded.filter((file) => file.codec !== null);
 
   const offers: PlayOffer[] = [];
-  encoded.forEach((file, index) => {
-    const codec: PlayCodec =
-      file.codec ?? guessed[index] ?? (index === 0 ? "av1" : "h264");
+  for (const file of encoded) {
+    // 中身を読めなければ、置き場の名前で (`… [H265].mkv`。`encodedPath` の逆)
+    const named = encodedCodec(file.path);
+    const codec: PlayCodec = file.codec ?? (named === "mpeg2" ? "av1" : named);
     const codecs =
       file.media.video === null
         ? undefined
@@ -378,7 +404,19 @@ export async function playbackPlan(
       source: file.source,
       ...(codecs === undefined ? {} : { codecs }),
     });
-  });
+  }
+  /*
+   * H.265 は詰め替えだけ (エンコード済みの H.265 があるときだけ)。その場の変換では H.265 を作らない —
+   * ブラウザの H.265 は端末しだいで、AV1 か H.264 に変換すれば足りる (docs/encode.md「H.265 は GPU でだけ」)
+   */
+  const hevc = known.find((file) => file.codec === "hevc");
+  if (hevc !== undefined) {
+    offers.push({
+      codec: "hevc",
+      way: "stream",
+      codecs: `${hevc.media.video},${streamAudio("hevc")}`,
+    });
+  }
   for (const codec of ["h264", "av1"] as const) {
     const same = known.find((file) => file.codec === codec);
     if (same !== undefined) {
@@ -430,7 +468,7 @@ export async function playbackPlan(
 /** 失敗の理由だけ出させる (`transcodeBody` がログへ回す) */
 const QUIET = ["-hide_banner", "-nostats", "-loglevel", "error"];
 
-/** 詰め替えの共通の出口。時刻はそのまま書かせる (`copyArgs` の説明) */
+/** 詰め替えと変換で共通の出口。時刻はそのまま書かせる (`copyArgs` の説明) */
 const FMP4_OUT = [
   "-f",
   "mp4",
@@ -443,7 +481,10 @@ const FMP4_OUT = [
 ];
 
 /**
- * **エンコード済みを詰め替える引数** (映像は写すだけ。音声は H.264 なら AAC、AV1 なら Opus)。
+ * **エンコード済みを詰め替える引数** (映像は写すだけ。音声は H.264・H.265 なら AAC、AV1 なら Opus。`streamAudio`)。
+ * H.265 は `hvc1` と名乗らせる — mp4 の muxer の既定は `hev1` で、Safari は `hev1` を受け取らない。
+ * `hvc1` は「パラメータセットは入れ物の頭に」の印で、GPU のエンコーダがキーフレームごとに中にも
+ * 書いているものはそのまま残るが、ブラウザはそれで断らない前提 (実機では見ていない)。
  * `audio` は入れ物の中の何本目の音声か (主・副で分けてエンコードしてある。`encoder.ts`)。
  *
  * ## 位置はファイルの時刻のまま出す
@@ -469,7 +510,7 @@ export function copyArgs(
   path: string,
   from: number,
   audio: number,
-  codec: LiveCodec,
+  codec: HwCodec,
 ): string[] {
   return [
     ...QUIET,
@@ -483,8 +524,9 @@ export function copyArgs(
     `0:a:${audio}?`,
     "-c:v",
     "copy",
-    // モノラル (デュアルモノを分けたもの) も両耳へ。音量の揃え方はライブと同じ
-    ...audioArgs(codec),
+    ...(codec === "hevc" ? ["-tag:v", "hvc1"] : []),
+    // モノラル (デュアルモノを分けたもの) も両耳へ。エンコード方法はライブと同じ (`live.audioArgs`)
+    ...audioArgs(codec === "av1" ? "av1" : "h264"),
     "-avoid_negative_ts",
     "make_non_negative",
     ...FMP4_OUT,
@@ -619,15 +661,18 @@ export interface Attempt {
   argv: string[];
   /** 標準入力へ流し込むもの (TS が元)。起こすたびに読み直す */
   input?: () => ReadableStream<Uint8Array>;
-  /** これで 1 バイトも出せずに降り、次で出せたときに呼ぶ (GPU のせいだったと覚える) */
-  blame?: () => void;
+  /**
+   * 前の手が 1 バイトも出せずに降り、これで出せたときに呼ぶ (GPU のせいだったと覚える)。
+   * 渡すのは降りた前の手の標準エラーの全文 (理由で覚えるかを決める。`hwenc.nvencBusy`)
+   */
+  blame?: (failed: string) => void;
 }
 
 /**
  * **ffmpeg の出口を応答の本文にする** (`stream.ffmpegBody` に、降りたときの次の手と詰まりの見張りを足したもの)。
  *
  * - 読まれたぶんしか読み出さない。相手が読まなければ出口が詰まり、ffmpeg も止まる
- * - 1 バイトも出さずに降りたら、次の手 (GPU → ソフトウェア) で起こし直す
+ * - 1 バイトも出さずに降りたら、次の手 (GPU → ソフトウェア) で起こし直す。次で出せたら、降りた手の標準エラーを添えて `blame` を呼ぶ
  * - `IDLE_LIMIT` のあいだ読まれなければ畳む。閉じられた・読み切った・落ちたときも畳む
  * - **読みに来て ffmpeg が出すのを待っている間は、「読まれない」ではなく「ffmpeg が出さない」として数える。**
  *   上限は同じ `IDLE_LIMIT`。分けていなかった頃は、出だしの遅い ffmpeg を待っている相手を
@@ -644,6 +689,8 @@ export function transcodeBody(
   let index = 0;
   let proc: ReturnType<typeof spawnAttempt> | null = null;
   let sent = false;
+  /** 1 つ前の手が降りたときの標準エラー (`Attempt.blame` に渡す) */
+  let failed = "";
   let finished = false;
   let lastRead = Date.now();
   /** 読みに来て ffmpeg が出すのを待ちはじめた時刻。待っていなければ null */
@@ -705,7 +752,7 @@ export function transcodeBody(
       const { done: ended, value } = await current.read();
       if (finished) return;
       if (!ended) {
-        if (!sent && index > 0) attempts[index]?.blame?.();
+        if (!sent && index > 0) attempts[index]?.blame?.(failed);
         sent = true;
         controller.enqueue(value);
         return;
@@ -720,6 +767,7 @@ export function transcodeBody(
       const why = await current.why();
       if (!sent && index + 1 < attempts.length) {
         console.warn(`${what}をやり直します (${code}): ${why}`);
+        failed = await current.log();
         index++;
         proc = spawnAttempt(attempts[index]!);
         continue;
@@ -762,6 +810,8 @@ function spawnAttempt(attempt: Attempt) {
     read: () => out.read(),
     exited: proc.exited,
     why: async () => (await stderr).trim().split("\n").slice(-3).join(" / "),
+    /** 標準エラーの全文。降りた理由の行が最後の 3 行に入るとは限らない (`Attempt.blame`) */
+    log: () => stderr,
     stop: () => {
       source?.cancel().catch(() => undefined);
       proc.kill();
@@ -794,7 +844,7 @@ const MP4_HEADERS = {
 };
 
 /**
- * **`GET /api/recordings/<id>/stream` に答える。** `codec` は `h264` / `av1` / `mpeg2`、`from` は物差しの秒、
+ * **`GET /api/recordings/<id>/stream` に答える。** `codec` は `h264` / `hevc` / `av1` / `mpeg2`、`from` は物差しの秒、
  * `audio` は `playback` の `audios` の `id`。出せない形式は 404、枠が埋まっていれば 503
  */
 export async function streamResponse(
@@ -803,8 +853,11 @@ export async function streamResponse(
 ): Promise<Response> {
   const asked = query.get("codec");
   const codec: PlayCodec | null =
-    asked === "h264" || asked === "av1" || asked === "mpeg2" ? asked : null;
-  if (codec === null) error(400, "codec は h264 / av1 / mpeg2 のどれかです");
+    asked === "h264" || asked === "hevc" || asked === "av1" || asked === "mpeg2"
+      ? asked
+      : null;
+  if (codec === null)
+    error(400, "codec は h264 / hevc / av1 / mpeg2 のどれかです");
   const fromRaw = Number(query.get("from") ?? 0);
   const from = Number.isFinite(fromRaw) ? Math.max(0, fromRaw) : 0;
 
@@ -841,6 +894,8 @@ export async function streamResponse(
       { headers: MP4_HEADERS },
     );
   }
+  // H.265 は詰め替えだけ (その場の変換では作らない。`playbackPlan`)。offers にあればファイルがあるので、ここには来ない
+  if (codec === "hevc") error(404, "この形式では再生できません");
 
   const release = holdTranscode();
   if (release === null) error(503, BUSY);
@@ -870,7 +925,10 @@ export async function streamResponse(
   });
 }
 
-/** GPU でエンコードできるなら GPU、駄目ならソフトウェア。GPU が 1 バイトも出せずに降りたら覚える */
+/**
+ * GPU でエンコードできるなら GPU、駄目ならソフトウェア。GPU が 1 バイトも出せずに降りたら覚える —
+ * NVENC の同時に開ける数を超えただけなら覚えない (`live.blameLiveHw`)
+ */
 function withFallback(
   codec: LiveCodec,
   interlaced: boolean,
@@ -879,7 +937,13 @@ function withFallback(
   const hw = pickLiveHw(codec, interlaced);
   const software = build(null);
   if (hw === null) return [software];
-  return [build(hw), { ...software, blame: () => blameLiveHw(codec, hw) }];
+  return [
+    build(hw),
+    {
+      ...software,
+      blame: (failed) => blameLiveHw(codec, hw, nvencBusy(failed)),
+    },
+  ];
 }
 
 function fileAttempts(
@@ -1036,7 +1100,7 @@ export async function tsChapters(
 }
 
 /**
- * **字幕の筋だけを抜く引数** (`api/recordings/<id>/captions.json`)。デコードせずに写す (デコードするのは denpa)。
+ * **字幕のストリームだけを抜く引数** (`api/recordings/<id>/captions.json`)。デコードせずに写す (デコードするのは denpa)。
  *
  * エンコード済みがあればそこから。無ければ元の TS から抜き、時刻を物差し (TS の頭を 0) に揃える
  * (`-copyts` で放送の PTS を運び、頭のぶん引く。`presented`)。どちらも無ければ null

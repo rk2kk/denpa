@@ -61,12 +61,19 @@ export const overrides: Record<string, PageOverride> = {
 
 /**
  * トップ (src/pages/index.astro) に出す README の節。中身は README のまま取り込む (scripts/import-docs.ts)。
- * heading は README の見出しそのもの (id もそこから作る)、label はトップでの見出し (既定は heading)
+ * heading は README の見出しそのもの (id もそこから作る)、label はトップでの見出し (既定は heading)。
+ * end の節は入口のカード (もっと詳しく) より下、ページの終わりに出す
  */
-export const topSections: { key: string; heading: string; label?: string }[] = [
+export const topSections: {
+  key: string;
+  heading: string;
+  label?: string;
+  end?: boolean;
+}[] = [
   { key: "features", heading: "できること" },
   { key: "usage", heading: "使ってよい範囲" },
   { key: "install", heading: "2. 入れる", label: "1行で入れる" },
+  { key: "thanks", heading: "謝辞", end: true },
 ];
 
 /** トップの入口のカード。doc のページの説明を出し、more は下に並べるリンク。まだ無い文書は出さない */
@@ -105,6 +112,7 @@ export const sidebarGroups: { label: string; items: string[] }[] = [
       "install",
       "install-mac",
       "install-windows",
+      "install-talos",
       "screens",
       "faq",
       "v2",
@@ -122,7 +130,6 @@ export const sidebarGroups: { label: string; items: string[] }[] = [
     label: "仕組み",
     items: [
       "architecture",
-      "app",
       "agent",
       "data",
       "stream",
@@ -131,11 +138,11 @@ export const sidebarGroups: { label: string; items: string[] }[] = [
       "encode",
       "cm",
       "logo",
-      "development",
-      "writing",
-      "design",
-      "licenses",
     ],
+  },
+  {
+    label: "手を入れる",
+    items: ["development", "app", "writing", "design", "licenses"],
   },
 ];
 

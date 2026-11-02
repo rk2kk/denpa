@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Pipelines;
+using System.Text.Json.Nodes;
 
 namespace Denpa.Agent;
 
@@ -9,7 +10,7 @@ namespace Denpa.Agent;
 ///
 /// <para>
 /// 中身は富士通 MB86H47A の USB ブリッジ (Mb86h47.cs) と DiB8096 (Dib8096.cs)。ファームウェアは要らず、
-/// ホストがメモリ要求でレジスタを叩く。B-CAS の差し込み口もブリッジの UART で、CCID ではない (<see cref="Zd1jCard"/>)。
+/// ホストがメモリ要求でレジスタを読み書きする。B-CAS の差し込み口もブリッジの UART で、CCID ではない (<see cref="Zd1jCard"/>)。
 /// 作りは docs/agent.md「CECH-ZD1 J の作り」。USB は Linux の usbfs・Windows の WinUSB (Zadig で当てる)・macOS の IOKit。
 /// </para>
 ///
@@ -138,7 +139,7 @@ public static class Zd1j
         if (cards.Count == 0) output.WriteLine($"{Model}: 見つかりません");
         foreach (var found in cards)
         {
-            var started = System.Diagnostics.Stopwatch.StartNew();
+            var started = Stopwatch.StartNew();
             try
             {
                 using var link = found.Open();
@@ -248,7 +249,7 @@ public sealed class Zd1jBoard : IDibTime
     }
 
     /// <summary>開く段の名前 (USB を開くところ)。そのあとの段は <see cref="Mb86h47.Start"/> が知らせる</summary>
-    internal const string OpeningUsb = "USB を開く";
+    private const string OpeningUsb = "USB を開く";
 
     /// <summary>ポートごとの、最後に記録した開けなかった理由。同じ理由は繰り返し記録しない (<see cref="Registry"/> の中で触る)</summary>
     private static readonly Dictionary<string, string> LastFailure = [];
@@ -265,7 +266,7 @@ public sealed class Zd1jBoard : IDibTime
         Log.Write(line);
     }
 
-    internal static string OpenFailure(string port, string stage, Exception error) =>
+    private static string OpenFailure(string port, string stage, Exception error) =>
         $"[{Zd1j.Model} {port}] 開けません ({stage}ところで): {Zd1j.Reason(error)}";
 
     /// <summary>返す。開いたままにする (USB が抜けていれば閉じる)</summary>
@@ -397,7 +398,7 @@ public sealed class Zd1jTuner : ITuneDevice
     /// 読む側がいないまま、溜めが空かずに待つ上限。TunerPool が誰も読まなくなってから選局を畳むまでの間
     /// (<see cref="TunerPool.Linger"/>) と同じ 5 秒にそろえる (それより早く見切ると、TunerPool が畳む前に TS が途切れる)
     /// </summary>
-    internal static TimeSpan StallLimit { get; set; } = TunerPool.Linger;
+    internal static TimeSpan StallLimit => TunerPool.Linger;
 
     private readonly string _name;
     private readonly Func<Zd1jBoard> _acquire;
@@ -558,7 +559,7 @@ public sealed class Zd1jTuner : ITuneDevice
 }
 
 /// <summary>
-/// TS を1回流すぶん。EP 0x81 の読みを 16 本出しっぱなしにして、192 バイトの単位をほどき、
+/// TS を1回流すぶん。EP 0x81 の読みを 16 本出しっぱなしにして、192 バイトの単位から取り出し、
 /// <see cref="Pipe"/> (8MB) に詰める。読み出し側は <see cref="DeviceStream"/> (px4d から受けるときと同じ形)
 /// </summary>
 internal sealed class Zd1jStream
@@ -658,7 +659,6 @@ internal sealed class Zd1jStream
                 if (stalled.Elapsed >= Zd1jTuner.StallLimit)
                 {
                     writer.CancelPendingFlush();
-                    End(null);
                     _ended = true;
                     _stalled();
                     return false;
@@ -691,7 +691,7 @@ internal sealed class Zd1jStream
 }
 
 /// <summary>
-/// CECH-ZD1 J の内蔵の差し込み口。ブリッジの UART を叩き、**T=1 の枠組みはこちらで組む** (<see cref="T1Protocol"/>)。
+/// CECH-ZD1 J の内蔵の差し込み口。ブリッジの UART を読み書きし、**T=1 の枠組みはこちらで組む** (<see cref="T1Protocol"/>)。
 /// リセットと IFSD の取り決めは1回だけで、あとはつないだまま。並ぶ順は USB のリーダー → px4d → asicend → これ (CardLinks)
 /// </summary>
 public sealed class Zd1jCard : ICardLink
@@ -699,7 +699,7 @@ public sealed class Zd1jCard : ICardLink
     /// <summary>ATR を待つ上限 (仕様書 13.7 の「1 秒まで」)</summary>
     private static readonly TimeSpan AtrTimeout = TimeSpan.FromSeconds(1);
 
-    /// <summary>ATR を受けるときの速さのクロック数 (9600 ボー)。カードのクロックは 9600 × 372 Hz</summary>
+    /// <summary>カードのクロック (Hz)。ATR を受ける 9600 ボー (F 372 / D 1) から 9600 × 372</summary>
     private const double CardClock = 9600.0 * 372;
 
     private readonly Func<Zd1jBoard> _acquire;
@@ -760,7 +760,7 @@ public sealed class Zd1jCard : ICardLink
         if (_t1 is null) throw new IOException($"{Name} のカードに繋いでいません (Reset を先に)");
         try
         {
-            // 抜き差しの知らせは無いので、APDU の前ごとに見る (仕様書 13.3)
+            // 抜き差しの通知は無いので、APDU の前ごとに見る (仕様書 13.3)
             if (!Bridge.CardPresent())
             {
                 _t1 = null;
@@ -888,15 +888,15 @@ public sealed class Zd1jLocks
         if (path is null || !File.Exists(path)) return;
         try
         {
-            var root = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path)) as System.Text.Json.Nodes.JsonObject
+            var root = JsonNode.Parse(File.ReadAllText(path)) as JsonObject
                 ?? throw new FormatException("オブジェクトではありません");
             var version = root["version"]?.GetValue<int>();
             if (version != Version) throw new FormatException($"バージョンが {version?.ToString(CultureInfo.InvariantCulture) ?? "無し"} です ({Version} を読みます)");
-            if (root["boards"] is not System.Text.Json.Nodes.JsonObject boards) throw new FormatException("boards がありません");
+            if (root["boards"] is not JsonObject boards) throw new FormatException("boards がありません");
             var loaded = new Dictionary<string, DibMemory>();
             foreach (var (port, node) in boards)
             {
-                if (!UsbSysfs.IsPort(port) || node is not System.Text.Json.Nodes.JsonObject channels) throw new FormatException($"ポート「{port}」が読めません");
+                if (!UsbSysfs.IsPort(port) || node is not JsonObject channels) throw new FormatException($"ポート「{port}」が読めません");
                 loaded[port] = DibMemory.FromJson(channels);
             }
             foreach (var (port, memory) in loaded) Watch(port, memory);
@@ -931,11 +931,11 @@ public sealed class Zd1jLocks
         if (_path is null) return;
         lock (_gate)
         {
-            var boards = new System.Text.Json.Nodes.JsonObject();
+            var boards = new JsonObject();
             foreach (var (port, memory) in _boards.OrderBy(pair => pair.Key, StringComparer.Ordinal)) boards[port] = memory.ToJson();
             try
             {
-                Config.WriteAtomic(_path, new System.Text.Json.Nodes.JsonObject { ["version"] = Version, ["boards"] = boards });
+                Config.WriteAtomic(_path, new JsonObject { ["version"] = Version, ["boards"] = boards });
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

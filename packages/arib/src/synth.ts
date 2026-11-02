@@ -179,6 +179,41 @@ export interface SynthEvent {
    * 3 がコピー禁止、2 が1世代のみ。省くと記述子を載せない ({@link copyControlDescriptor})
    */
   copyControl?: number;
+  /** シリーズ。省くと記述子を載せない ({@link seriesDescriptor}) */
+  series?: SynthSeries;
+}
+
+/** series_descriptor の中身。省いた数は 0 (話数なら「分からない」) */
+export interface SynthSeries {
+  seriesId: number;
+  repeatLabel?: number;
+  programPattern?: number;
+  episode?: number;
+  lastEpisode?: number;
+  name?: string;
+}
+
+/**
+ * シリーズ記述子 (0xD5。ARIB STD-B10 第2部)。
+ *
+ * series_id(16) / repeat_label(4) program_pattern(3) expire_date_valid_flag(1) /
+ * expire_date(16) / episode_number(12) last_episode_number(12) / series_name_char。
+ * 有効期限は載せない (flag 0、日付は全ビット1)
+ */
+function seriesDescriptor(series: SynthSeries): number[] {
+  const episode = series.episode ?? 0;
+  const last = series.lastEpisode ?? 0;
+  const body = [
+    ...be(series.seriesId),
+    ((series.repeatLabel ?? 0) << 4) | ((series.programPattern ?? 0) << 1),
+    0xff,
+    0xff,
+    (episode >> 4) & 0xff,
+    ((episode & 0x0f) << 4) | ((last >> 8) & 0x0f),
+    last & 0xff,
+    ...encodeSiText(series.name ?? ""),
+  ];
+  return [0xd5, body.length, ...body];
 }
 
 /**
@@ -235,6 +270,8 @@ function eventDescriptors(event: SynthEvent): number[] {
 
   if (event.copyControl !== undefined)
     out.push(...copyControlDescriptor(event.copyControl));
+
+  if (event.series !== undefined) out.push(...seriesDescriptor(event.series));
 
   if (event.genres !== undefined && event.genres.length > 0) {
     const body = event.genres.flatMap(([lv1, lv2]) => [(lv1 << 4) | lv2, 0xff]);
@@ -486,6 +523,16 @@ export function bxmlDescriptor(
     0xa0, // 即時取得あり / 蓄積不可 / 起動優先
   ];
   return [0xfd, body.length, ...body];
+}
+
+/**
+ * 字幕の ES (stream_type 0x06) に付ける記述子。**字幕の目印。**
+ *
+ * 部品タグ (stream_identifier_descriptor。ふつうの字幕は 0x30〜0x37) と、データ符号化方式記述子の
+ * data_component_id 0x0008 (字幕)。続く1バイトの DMF・時刻制御モードは denpa も ffmpeg も見ない
+ */
+export function captionDescriptors(componentTag = 0x30): number[] {
+  return [0x52, 0x01, componentTag, 0xfd, 0x03, 0x00, 0x08, 0x3d];
 }
 
 /** DSM-CC のセクションで包む */

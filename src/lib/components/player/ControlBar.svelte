@@ -1,13 +1,18 @@
 <script lang="ts">
   /**
    * 映像に重ねる操作列 (3画面で同じ)。端から濃くなる影の上に置き、しばらく触らなければ消える (`shown`。消えている
-   * 間は押せない)。下端 (既定) は観ながら使うもの、右端 (`side`) は観る流れの外のもの (閉じる・録画・データ放送・切り抜き・削除)。
+   * 間は押せない)。下端 (既定) は観ながら使うもの、右端 (`side`) は観る流れの外のもの (閉じる・録画・データ放送・切り抜き・実況・削除)。
    *
    * - 右端は縦に積み、丸は 48px (狭い枠では下の列と同じ 40px) — 車のタブレットで映像の右の縁をなぞる指がいちばん届き、全画面から出ずに
    *   押せる (横一行・40px にしたら窮屈で押しにくく、戻した)
    * - 読みもの (時刻・局名・番組名) は押すものの行の空きに二段で入れる (`InfoBlock`)。幅ゼロから伸ばし、縮むのは
    *   番組名だけ (中身の幅で並べると長い名前で操作バーが二段に折れた)
    * - 狭い枠 (`data-compact`。`PlayerStage`) では余白も削る
+   * - **影とボタンは別の段に置き、間に実況のコメントと字幕を通す。** 枠の中の重なりは
+   *   映像 (データ放送 5・その小窓 6 を含む) → 影 (7) → 実況 (8。`JikkyoLayer`) → 字幕・幕 (9) → ボタン (10)。
+   *   影とボタンを1つの段にしていた頃は、右端の列の所でコメントが影に潜り、暗く欠けて見えた。
+   *   そのため外の箱 (`.bar`) には段 (`z-index`) も透明度も付けない — どちらかを付けると箱が1つの段にまとまり、
+   *   影 (`::before`) をコメントの下へ置けなくなる。出し入れの透明度は影と中身 (`.items`) にそれぞれ掛ける
    */
   let {
     shown = true,
@@ -31,38 +36,65 @@
   data-shown={shown}
   data-stage-bar={side ? undefined : ""}
 >
-  {@render children()}
+  <div class="items" data-bar-items>{@render children()}</div>
 </div>
 
 <style>
+  /* 外の箱は段も透明度も持たない (上の説明)。影 (`::before`) と中身 (`.items`) がそれぞれ舞台の重なりに入る */
   .bar {
     position: absolute;
-    z-index: 10;
     color: var(--dp-on-video);
+  }
+  .bar::before {
+    content: "";
+    position: absolute;
+    z-index: 7;
+    pointer-events: none;
+    transition: opacity var(--dp-duration);
+  }
+  .items {
+    position: relative;
+    z-index: 10;
     transition: opacity var(--dp-duration);
   }
   .bar.away {
     pointer-events: none;
+  }
+  .bar.away::before,
+  .bar.away > .items {
     opacity: 0;
   }
   .side {
     top: 0;
     right: 0;
-    bottom: 0;
+    /*
+     * 下の操作バーの中身の上で止める (`PlayerStage` の `--stage-bar`)。全画面のボタンと再生位置のバーに重ねない。
+     * 下の余白 (8px) は操作バーとの間に要らないので、そのぶん下げる
+     */
+    bottom: max(0px, var(--stage-bar, 0px) - 0.5rem);
     pointer-events: none;
+  }
+  .side > .items {
+    box-sizing: border-box;
+    height: 100%;
     display: flex;
-    /* 縦に積む (車のタブレットで指が届く右の縁。上の説明)。横一行に直さない */
+    /*
+     * 縦に積む (車のタブレットで指が届く右の縁。上の説明)。横一行に直さない。
+     * 入りきらない低い枠 (スマホの縦) では、残りを左へもう1列に並べる (丸は縮めない)
+     */
     flex-direction: column;
+    flex-wrap: wrap-reverse;
+    align-content: flex-start;
     align-items: center;
     /* 丸どうしは 8px 空ける (指で隣を押さない) */
     gap: 0.5rem;
     /* 角に寄せる (上と右の空きは 8px)。丸が角から離れて浮いて見えないように */
     padding: 0.5rem;
   }
-  .side > :global(*) {
+  .side .items > :global(*) {
     pointer-events: auto;
   }
-  .side.away > :global(*) {
+  .side.away .items > :global(*) {
     pointer-events: none;
   }
   /*
@@ -70,17 +102,14 @@
    * ボタンの所だけに敷くと四角い影が貼り付いて見えた。影は押せず、押せるのは中のボタンだけ
    */
   .side::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 0 auto;
-    z-index: -1;
+    /* 列は操作バーの上で止まるが、影は舞台の下の端まで流す */
+    inset: 0 0 calc(-1 * var(--stage-bar, 0px)) auto;
     width: 7.5rem;
     background: linear-gradient(
       to left,
       color-mix(in srgb, var(--dp-video) 62%, transparent),
       transparent
     );
-    pointer-events: none;
   }
 
   .bottom {
@@ -88,6 +117,10 @@
     right: 0;
     bottom: 0;
     padding: 2.5rem 0.75rem 0.75rem;
+  }
+  /* 下の影は箱 (上の余白ごと) いっぱい */
+  .bottom::before {
+    inset: 0;
     background: linear-gradient(
       to top,
       color-mix(in srgb, var(--dp-video) 82%, transparent),
@@ -100,7 +133,7 @@
    * 操作バーが出ている間だけ映像の右端と下端が四角く欠けて見えるので、端へ向かって消えていくのは残す
    */
   @media (prefers-reduced-transparency: reduce) {
-    .bottom {
+    .bottom::before {
       background: linear-gradient(
         to top,
         color-mix(in srgb, var(--dp-video-panel) 95%, transparent),

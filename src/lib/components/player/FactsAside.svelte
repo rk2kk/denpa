@@ -65,8 +65,11 @@
   .top {
     padding: var(--dp-side-top, var(--dp-side-pad, 0)) var(--dp-side-pad, 0) 0;
   }
-  /* 中身が無ければ場所も取らない (データ放送を出していない間のリモコン) */
-  .top:empty {
+  /*
+   * 中身が無ければ場所も取らない (データ放送を出していない間のリモコン・出していないコメントの一覧)。
+   * `:empty` で見ないのは、出し分けるものが 2 つ並ぶと間に空白の字が残るため
+   */
+  .top:not(:has(:global(*))) {
     display: none;
   }
   /*
@@ -78,8 +81,12 @@
     padding: var(--dp-side-top, var(--dp-side-pad, 0.25rem))
       var(--dp-side-pad, 0.5rem) 0;
   }
-  .top:not(:empty) + .back-row {
-    padding-top: var(--dp-side-pad, 0.25rem);
+  /*
+   * 上に置くもの (リモコン・コメントの一覧) は、自分の下に次のものとの間 (`--dp-space-4`) を持っている。
+   * ここでも足すと、番組の中身のときだけ間が倍の 32px になった (局の一覧のときと同じ 16px にする)
+   */
+  .top:has(:global(*)) + .back-row {
+    padding-top: 0;
   }
   .back {
     margin: 0 0 0 -0.5rem;
@@ -106,11 +113,11 @@
     padding: var(--dp-side-top, var(--dp-side-pad, 0.25rem))
       var(--dp-side-pad, 0.5rem) 1rem;
   }
-  /* 上に戻るやリモコンがあるときは、その下は列の中の余白 */
+  /* 上に戻るがあるときは、その下は列の中の余白。リモコン・コメントの一覧の下の間は、それぞれが持つ (上の `.back-row`) */
   .back-row + .box .body {
     padding-top: 0.5rem;
   }
-  .top:not(:empty) + .box .body {
-    padding-top: var(--dp-side-pad, 0.25rem);
+  .top:has(:global(*)) + .box .body {
+    padding-top: 0;
   }
 </style>

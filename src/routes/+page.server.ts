@@ -19,6 +19,7 @@ import { channelNotice } from "#lib/channel-notice.js";
 import { capacityLabel } from "#lib/format.js";
 import { GROUPED_COOKIE, storedGrouped } from "#lib/grouping.js";
 import { fileSize } from "#lib/server/chase.js";
+import { clipCountsByRecording } from "#lib/server/clips.js";
 import { now, orm } from "#lib/server/db.js";
 import { capacity } from "#lib/server/disk.js";
 import {
@@ -79,11 +80,12 @@ interface RecordingRow extends Recording {
    */
   raw_size: number | null;
   /**
-   * もう一方のコーデック (H.264) の大きさ。**両方エンコードしたときだけ**入る。
+   * もう一方のコーデック (H.265・H.264) の大きさ。**主でないときだけ**入る (`hevc_path`・`alt_path`)。
    *
-   * `ts_size` は主 (AV1) のぶんしか持っていないので、両方エンコードすると画面に出る
+   * `ts_size` は主のぶんしか持っていないので、いくつもエンコードすると画面に出る
    * 数字と実際に置き場が使っている量が食い違っていた
    */
+  hevc_size: number | null;
   alt_size: number | null;
   /**
    * どこから来た1本か。**予約の行から引く** (録画には写さない)。
@@ -278,6 +280,7 @@ export function load({ url, cookies }) {
         row.library_path === null || row.ts_path === null
           ? null
           : fileSize(row.ts_path),
+      hevc_size: row.hevc_path === null ? null : fileSize(row.hevc_path),
       alt_size: row.alt_path === null ? null : fileSize(row.alt_path),
       job_canceling: row.job_id !== null && isCanceling(row.job_id),
       progress: watchProgress(row),
@@ -335,6 +338,8 @@ export function load({ url, cookies }) {
     capacity: room === null ? null : capacityLabel(room.free, room.hours),
     /** まとめて表示 (`#lib/grouping.ts`)。サーバで描く形を、端末の覚えに合わせる */
     grouped: storedGrouped(cookies.get(GROUPED_COOKIE)),
+    /** 録画ごとの切り抜きの数。詳細の「この録画の切り抜き (n)」 */
+    clipCounts: clipCountsByRecording(),
   };
 }
 
@@ -370,8 +375,7 @@ export const actions = {
      */
     if (settings().codec === "none") {
       return fail(400, {
-        message:
-          "映像コーデックが選ばれていません。設定で AV1 か H.264 を選んでください",
+        message: "映像コーデックが選ばれていません。設定で選んでください",
       });
     }
     enqueue(recording.id);

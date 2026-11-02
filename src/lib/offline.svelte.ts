@@ -17,6 +17,7 @@ import {
   downloadRequests,
   fetchId,
   fetchIdPrefix,
+  offlineSource,
   type OfflineVideo,
   outbox,
   parseFetchId,
@@ -200,14 +201,13 @@ export function startOffline(): void {
   if (navigator.onLine) void flush();
 }
 
-/** 端末が AV1 をデコードできるか。デコードできなければ H.264 (`alt`) を落とす */
-const AV1 = 'video/mp4; codecs="av01.0.08M.08"';
-async function canPlayAv1(): Promise<boolean> {
+/** 端末がそのコーデックをデコードできるか (`navigator.mediaCapabilities`。聞けなければ `canPlayType`) */
+async function canDecode(type: string): Promise<boolean> {
   try {
     const info = await navigator.mediaCapabilities.decodingInfo({
       type: "file",
       video: {
-        contentType: AV1,
+        contentType: type,
         width: 1920,
         height: 1080,
         bitrate: 4_000_000,
@@ -216,8 +216,37 @@ async function canPlayAv1(): Promise<boolean> {
     });
     return info.supported;
   } catch {
-    return document.createElement("video").canPlayType(AV1) !== "";
+    return document.createElement("video").canPlayType(type) !== "";
   }
+}
+
+/**
+ * **AV1 は Level 4.1 (`09`) で問う。** `canDecode` は 1080p60 と言っているので、それが収まる Level で
+ * なければならない — AV1 の Level 4.0 (`08`) は 30fps まで。Safari は codecs の Level と
+ * 大きさ・コマ数・ビットレートを突き合わせ (WebKit の `validateAV1PerLevelConstraints`)、
+ * 収まらなければ「デコードできない」と答える。4.0 で問うていた頃は、AV1 をデコードできる iPhone
+ * (15 Pro Max) でも AV1 を保存しなかった。Chrome は突き合わせない
+ */
+const AV1 = 'video/mp4; codecs="av01.0.09M.08"';
+const HEVC = 'video/mp4; codecs="hvc1.1.6.L120.90"';
+
+/**
+ * **保存したファイルをこの端末で観られるか** (コーデックごと)。
+ *
+ * - H.264 … 確かめない (どの端末もデコードできる前提。前からそう)
+ * - AV1 … デコードできるか。AV1 の Matroska は WebM としても読める (Safari もそれで読む)
+ * - H.265 … デコードできて、**しかも Matroska のまま読めるか** (`canPlayType`)。保存するのは Matroska で、
+ *   WebM に H.265 は入れられないので、デコーダがあっても入れ物を読めない端末 (Safari など) がある
+ */
+async function playable(codec: "av1" | "hevc" | "h264"): Promise<boolean> {
+  if (codec === "h264") return true;
+  if (codec === "av1") return canDecode(AV1);
+  return (
+    (await canDecode(HEVC)) &&
+    document
+      .createElement("video")
+      .canPlayType('video/x-matroska; codecs="hvc1.1.6.L120.90"') !== ""
+  );
 }
 
 /** 保存に使ってよい残り容量か。動画そのもの + 一時領域ぶんの遊びを見る */
@@ -241,6 +270,11 @@ interface SaveTarget {
   start_at: number;
   duration_ms: number | null;
   ts_size: number;
+  /** エンコード済みの主。H.264 だけでエンコードした録画は、これが `… [H264].mkv` */
+  library_path: string | null;
+  /** H.265 (主でないときだけ) */
+  hevc_path: string | null;
+  /** H.264 (主でないときだけ) */
   alt_path: string | null;
 }
 
@@ -250,7 +284,7 @@ interface SaveTarget {
  * どちらも Background Fetch の仕様が理由 (実機の Edge で踏んだ):
  *
  * - **404 が1つでも混ざると全体が失敗になる** (`failureReason: bad-status`)。
- *   付き添い (字幕・データ放送・ポスター) は無い録画もあるので、そのまま
+ *   付属のデータ (字幕・データ放送・ポスター) は無い録画もあるので、そのまま
  *   渡すと**動画は落ち終わっているのに**全部が捨てられる。進みは 97% あたりで
  *   止まり、控えごと消えて「無かったことになった」ように見えていた
  * - **downloadTotal を超えた時点で打ち切られる。** 当てずっぽうの見積もりでは
@@ -267,7 +301,7 @@ async function probeDownloads(
       const res = await fetch(url, { method: "HEAD" });
       if (!res.ok) {
         if (video) throw new Error("動画を取得できませんでした");
-        continue; // 無い付き添いは落とさない
+        continue; // 無い付属のデータは落とさない
       }
       urls.push(url);
       const length = Number(res.headers.get("content-length"));
@@ -277,23 +311,15 @@ async function probeDownloads(
         throw error instanceof Error
           ? error
           : new Error("動画を取得できませんでした");
-      // 付き添いの下見に失敗しただけなら、そのぶんを諦めて先へ
+      // 付属のデータの下見に失敗しただけなら、そのぶんを諦めて先へ
     }
   }
   return { urls, total: total > 0 ? total : null };
 }
 
-/**
- * 端末に保存する。**どちらを落とすかはここで決める** — 既定は AV1、
- * 端末がデコードできなければ H.264 (両方エンコードした録画だけ)。
- */
+/** 端末に保存する。どれを落とすかは `offlineSource` (この端末で観られる最初のエンコード済みファイル。#1806) */
 export async function saveOffline(rec: SaveTarget): Promise<void> {
-  let source: "encoded" | "alt" = "encoded";
-  if (!(await canPlayAv1())) {
-    if (rec.alt_path === null)
-      throw new Error("AV1 を再生できず、H.264 のものもありません");
-    source = "alt";
-  }
+  const source = await offlineSource(rec, playable);
 
   // 下見して、在るものだけに絞る (404 が混ざると全体が失敗になる)
   const { urls, total } = await probeDownloads(
@@ -380,7 +406,7 @@ async function downloadInPage(
     const response = await fetch(url).catch(() => null);
     if (response === null || !response.ok) {
       if (url.includes("/file?")) throw new Error("動画を取得できませんでした");
-      continue; // 付き添いは無い録画もある
+      continue; // 付属のデータは無い録画もある
     }
     // 動画だけは進み具合を数えながら読む
     await storeResponse(held, url, response, (r) =>

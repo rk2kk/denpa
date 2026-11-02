@@ -1,6 +1,6 @@
 import type { CaptionLanguage } from "@danything/arib/caption-text";
 
-import { LIVE_CODECS, type LiveCodec } from "#lib/live.js";
+import { LIVE_CODECS, LIVE_TUNER_PRESETS, type LiveCodec } from "#lib/live.js";
 import { SPEEDS } from "#lib/ts/pacing.js";
 
 import type { IconShape } from "./icons";
@@ -9,8 +9,8 @@ import type { IconShape } from "./icons";
  * 再生の設定 (⚙ `SettingsMenu`) に並べるもの。**3画面 (ライブ・追っかけ・観る画面) で同じ形。**
  *
  * - 選ぶもの (`SettingChoice`) … 行にいまの値を出し、押すと選択肢の並びに入る (字幕・音声・コーデック)
- * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CMスキップ・データ放送・アンビエントモード・
- *   バックグラウンド再生・互換モード。並べるのは `StageTail`)
+ * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CMスキップ・データ放送・データ放送を常に受信・実況・
+ *   アンビエントモード・バックグラウンド再生・互換モード。並べるのは `StageTail`)
  *
  * 何を覚えるか (端末ごと) は各画面と `ambient.svelte.ts`・`background.svelte.ts` が持つ。ここは並べ方だけ
  */
@@ -45,6 +45,10 @@ export interface SettingToggle {
    * 窓のボタンを押した1回目がメニューの外を押したことになって、閉じるだけで終わる
    */
   closes?: boolean;
+  /** 名前の後ろに添える注記 (「この局にはありません」など。括弧は付けて出す) */
+  note?: string | undefined;
+  /** 並べるが押せない */
+  disabled?: boolean;
 }
 
 /** 押せない形式に添える注記 (docs/writing.md「同じことは同じ文言で」) */
@@ -68,6 +72,10 @@ export function liveCodecs(opts: {
   unavailable: LiveCodec[];
   onselect: (codec: LiveCodec) => void;
   onraw?: () => void;
+  /** チューナー側の画質 (DT295 のオンボード変換)。選局のときにだけ効く */
+  preset?: string;
+  presets?: { id: string; label: string }[];
+  onpreset?: (preset: string) => void;
 }): SettingChoice {
   const raw = opts.raw === true;
   const current = raw ? MPEG2 : opts.codec;
@@ -89,9 +97,18 @@ export function liveCodecs(opts: {
         };
       }),
       ...(opts.onraw ? [{ key: MPEG2, label: "MPEG-2", active: raw }] : []),
+      ...(opts.onpreset
+        ? (opts.presets ?? []).map((p) => ({
+            key: `tuner:${p.id}`,
+            label: `チューナー: ${p.label}`,
+            active: p.id === opts.preset,
+          }))
+        : []),
     ],
     pick: (key) => {
-      if (key === MPEG2) opts.onraw?.();
+      if (typeof key === "string" && key.startsWith("tuner:")) {
+        opts.onpreset?.(key.slice("tuner:".length));
+      } else if (key === MPEG2) opts.onraw?.();
       else opts.onselect(key as LiveCodec);
     },
   };
@@ -101,6 +118,34 @@ export function liveCodecs(opts: {
  * 観る画面のコーデック。録画ごとに観られるものが違い、「自動」も並ぶので、並びは渡されたまま
  * (`ts/playback.ts` の `codecChoices`)。`disabled` は互換モードでこの端末が描けない形式 (`canvasChoices`)
  */
+/**
+ * チューナー側の画質。**選局したときにしか効かない** (チューナーは選局を共有するので、
+ * いま見ている絵は変わらない)。そのため行には注記を出す。
+ */
+export function tunerPreset(opts: {
+  icon: IconShape;
+  preset: string;
+  onselect: (preset: string) => void;
+}): { kind: "choice" } & SettingChoice {
+  const current =
+    LIVE_TUNER_PRESETS.find((p) => p.id === opts.preset)?.label ??
+    LIVE_TUNER_PRESETS[0]?.label ??
+    opts.preset;
+  return {
+    kind: "choice",
+    id: "tuner-preset",
+    label: "チューナー画質",
+    icon: opts.icon,
+    value: current,
+    options: LIVE_TUNER_PRESETS.map((p) => ({
+      key: p.id,
+      label: p.label,
+      active: p.id === opts.preset,
+    })),
+    pick: (key) => opts.onselect(String(key)),
+  };
+}
+
 export function recordingCodecs(opts: {
   icon: IconShape;
   choices: { key: string; label: string; disabled?: boolean }[];

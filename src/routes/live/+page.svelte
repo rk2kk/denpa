@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { resolve } from "$app/paths";
+  import { onMount, tick, untrack } from "svelte";
+  import { MediaQuery } from "svelte/reactivity";
 
   import { submitting } from "#lib/actions.js";
   import type { Service } from "#lib/bml/engine.js";
@@ -24,19 +26,24 @@
     AUDIO,
     CAMERA,
     CAPTION,
+    CHECK,
     CODEC,
     DATA,
     INFO,
+    JIKKYO,
     OPEN_OUT,
     OVERLAY,
     PAUSE,
     PLAY,
     RECORD,
     SOUND_OFF,
-    SOUND_ON,
     SPEED,
   } from "#lib/components/player/icons.js";
   import InfoBlock from "#lib/components/player/InfoBlock.svelte";
+  import JikkyoCompose from "#lib/components/player/JikkyoCompose.svelte";
+  import JikkyoLayer from "#lib/components/player/JikkyoLayer.svelte";
+  import JikkyoList from "#lib/components/player/JikkyoList.svelte";
+  import { playerKeys } from "#lib/components/player/keys.js";
   import MediaStack from "#lib/components/player/MediaStack.svelte";
   import { pictureInPicture } from "#lib/components/player/pip.svelte.js";
   import PlayerLayout, {
@@ -54,10 +61,16 @@
     speedRow,
   } from "#lib/components/player/settings.js";
   import { snapshotter } from "#lib/components/player/shot.svelte.js";
-  import { grabbedFrame, videoFrame } from "#lib/components/player/snapshot.js";
+  import {
+    captionWords,
+    grabbedFrame,
+    videoFrame,
+  } from "#lib/components/player/snapshot.js";
+  import SoundButton from "#lib/components/player/SoundButton.svelte";
   import SpeedMenu from "#lib/components/player/SpeedMenu.svelte";
   import StageNote from "#lib/components/player/StageNote.svelte";
   import StageTail from "#lib/components/player/StageTail.svelte";
+  import { playerVolume } from "#lib/components/player/volume.svelte.js";
   import ProgramFacts from "#lib/components/ProgramFacts.svelte";
   import ServiceLogo from "#lib/components/ServiceLogo.svelte";
   import Toasts, {
@@ -67,11 +80,17 @@
   import { programDetail } from "#lib/detail.svelte.js";
   import { driveGate } from "#lib/drive-gate.svelte.js";
   import { SERVICE_TYPE_LABEL, time } from "#lib/format.js";
+  import { JikkyoFeed } from "#lib/jikkyo/feed.svelte.js";
+  import { slides } from "#lib/jikkyo/ranking.js";
+  import { JikkyoRanking } from "#lib/jikkyo/ranking.svelte.js";
+  import { JIKKYO_LIST_KEY, jikkyoSwitch } from "#lib/jikkyo/switch.svelte.js";
   import { livePlayer } from "#lib/live-player.svelte.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
+  import { LIVE_TUNER_PRESETS } from "#lib/live.js";
   import type { HybridcastLink } from "#lib/live.js";
+  import { separateLiveAudio } from "#lib/native-audio-choice.js";
   import { reload } from "#lib/reload.svelte.js";
-  import { FLOOR } from "#lib/ts/pacing.js";
+  import { FLOOR, stepSpeed } from "#lib/ts/pacing.js";
   import { CHANNEL_TYPES } from "#lib/types.js";
 
   import type { LiveChannel } from "./+page.server";
@@ -107,7 +126,10 @@
 
   /** 運転中の注意 (互換モード)。初めて canvas で再生する前に出し、押すまで再生を始めない */
   const drive = driveGate();
-  const player = livePlayer({ confirm: drive.confirm });
+  const player = livePlayer({
+    confirm: drive.confirm,
+    separateAudio: separateLiveAudio,
+  });
   /** 映像と重ねもの (MediaStack が組む)。bind で受けるので開くまでは null */
   let video = $state<HTMLVideoElement | null>(null);
   let still = $state<HTMLCanvasElement | null>(null);
@@ -135,14 +157,79 @@
     channels.find((c) => c.id === player.tuned?.serviceId),
   );
 
-  /** 一覧は種別で切り替える (番組表と同じ並び)。局を持っている種別だけ出す */
-  const types = $derived(
-    CHANNEL_TYPES.filter((t) => channels.some((c) => c.type === t)),
+  /**
+   * 実況のコメント (docs/watch.md の「実況のコメント」)。世帯の設定 (`data.jikkyo`) と端末の ⚙ の両方がオンで、
+   * 局を映している間だけ NX-Jikkyo に繋ぐ。局を替えたら繋ぎ直す
+   */
+  const jikkyoOn = jikkyoSwitch();
+  const jikkyo = new JikkyoFeed(true);
+  $effect(() => jikkyo.setNg(data.jikkyoNg));
+  const jikkyoChannel = $derived(
+    data.jikkyo ? (current?.jikkyo ?? null) : null,
   );
-  /** 開いたときは、いま映している局の種別 */
+  const jikkyoActive = $derived(
+    data.jikkyo && jikkyoOn.on && player.tuned !== null,
+  );
+  $effect(() => {
+    jikkyo.set(jikkyoChannel, jikkyoActive);
+  });
+  onMount(() => () => jikkyo.close());
+
+  /**
+   * 実況に書き込む 1 行 (`JikkyoCompose`)。出せるのは流しているときと同じ条件 (世帯と端末の両方がオンで、映している局に
+   * 実況のチャンネルがある) で、書き込み用の設定は無い。置き場はコメントの一覧の下 (下の `canList`)。
+   * 一覧を出せない形 (横にしたスマホ・全画面) では、右端の列の同じボタンで映像の上 (操作バーのすぐ上) に開き (`writing`)、
+   * 開いている間は操作バーを引っ込めない
+   */
+  const canWrite = $derived(
+    jikkyoActive && jikkyoChannel !== null && player.yielded === null,
+  );
+  const phoneLandscape = new MediaQuery(PHONE_LANDSCAPE);
+
+  /**
+   * 一覧は種別で切り替える (番組表と同じ並び)。局を持っている種別だけ出す。
+   * 世帯の設定と端末の ⚙ の両方で実況がオンなら、最後に「実況」タブ (勢いの順。`JIKKYO_TAB`) を足す
+   */
+  const JIKKYO_TAB = "jikkyo";
+  const jikkyoTab = $derived(
+    data.jikkyo && jikkyoOn.on && channels.some((c) => c.jikkyo !== null),
+  );
+  const types = $derived([
+    ...CHANNEL_TYPES.filter((t) => channels.some((c) => c.type === t)),
+    ...(jikkyoTab ? [JIKKYO_TAB] : []),
+  ]);
+  /**
+   * 開いたときは、「実況」タブが出ている (実況を流している) なら「実況」、ほかはいま映している局の種別。
+   * 押して選んだタブはページにいる間だけ持ち (覚えない)、そのタブが消えたら開いたときの決め方に戻す
+   */
   let picked = $state<string | null>(null);
-  const shown = $derived(picked ?? current?.type ?? types[0] ?? "GR");
-  const listed = $derived(channels.filter((c) => c.type === shown));
+  const shown = $derived(
+    (picked !== null && types.includes(picked) ? picked : null) ??
+      (jikkyoTab ? JIKKYO_TAB : current?.type) ??
+      types[0] ??
+      "GR",
+  );
+  /** 「実況」タブの勢い。開いている間だけ 30 秒ごとに取得し、一覧を使っていなければ並べ直す */
+  const ranking = new JikkyoRanking();
+  $effect(() => {
+    if (shown !== JIKKYO_TAB) return;
+    // 開いた時点の局で並べる (受信設定が変わっても、次に開くまで変えない)
+    const ids = untrack(() =>
+      channels.filter((c) => c.jikkyo !== null).map((c) => c.id),
+    );
+    return ranking.open(ids);
+  });
+  const listed = $derived.by(() => {
+    if (shown !== JIKKYO_TAB) return channels.filter((c) => c.type === shown);
+    const supported = channels.filter((c) => c.jikkyo !== null);
+    const order = ranking.order;
+    if (order === null) return supported;
+    const at = new Map(order.map((id, index) => [id, index]));
+    // 開いた後に増えた局 (並びに無い) は末尾に
+    return [...supported].sort(
+      (a, b) => (at.get(a.id) ?? order.length) - (at.get(b.id) ?? order.length),
+    );
+  });
 
   /**
    * 局を選ぶ。エンコード方式は引き継ぐ (その端末で出るかの話)。音声は引き継がない (番組ごとに構成が変わる。
@@ -179,12 +266,44 @@
    * 滑らせるのは CSS (下の style の `scroll-behavior`)
    */
   function backToPicture(): void {
-    if (stageEl === null || !window.matchMedia(PHONE_LANDSCAPE).matches) return;
+    if (stageEl === null || !phoneLandscape.current) return;
     stageEl.scrollIntoView({ block: "start" });
   }
 
   /** 一覧の各行。開いたときに、いま映している局まで送る (局が100を超えると画面の外のほうが普通) */
   const rows: Record<number, HTMLElement | undefined> = $state({});
+
+  /** チューナー側の画質。選局したときにだけ効く (下の注記を読む) */
+  let tunerPresetId = $state("passthrough");
+
+  onMount(() => {
+    void loadTunerPreset();
+  });
+
+  async function loadTunerPreset() {
+    try {
+      const res = await fetch(resolve("api/tuner-preset"));
+      if (!res.ok) return;
+      const body = (await res.json()) as { active?: string };
+      if (body.active) tunerPresetId = body.active;
+    } catch {
+      /* チューナーが居ないだけ。既定のまま */
+    }
+  }
+
+  async function selectTunerPreset(name: string) {
+    tunerPresetId = name;
+    try {
+      const res = await fetch(resolve("api/tuner-preset"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ preset: name }),
+      });
+      if (!res.ok) await loadTunerPreset();
+    } catch {
+      await loadTunerPreset();
+    }
+  }
   /** 一覧そのもの。送るのはこの中だけ (下の説明) */
   let list = $state<HTMLElement | null>(null);
   /** 一度送ったら、あとは触らない。見ている途中で勝手に動くと邪魔になる */
@@ -207,6 +326,56 @@
     list.scrollTop = Math.max(0, Math.min(room, middle));
   });
 
+  /**
+   * **「実況」タブで並べ直した行は、前の場所から滑る** (docs/design.md の「動き」)。
+   * 並べ直す前に各行の上端を測り、並べ直した後にその差だけずらした姿 (`data-slide` と `--slide-from`) を置いて、
+   * 印を外すと CSS が元の場所へ滑らせる。動きを減らす設定では時間が 0 なので、その場で置き換わる。
+   * 最初の返事で番号順から並べ替えるとき (前の並びが無い) は滑らせない
+   */
+  let tops: Map<number, number> | null = null;
+  let shownOrder: readonly number[] | null = null;
+  $effect.pre(() => {
+    const order = ranking.order;
+    tops =
+      shownOrder !== null &&
+      order !== null &&
+      untrack(() => shown) === JIKKYO_TAB
+        ? untrack(rowTops)
+        : null;
+    shownOrder = order;
+  });
+  $effect(() => {
+    void ranking.order;
+    const before = tops;
+    tops = null;
+    if (before === null || list === null) return;
+    untrack(() => slide(before));
+  });
+  /** 一覧の各行の上端 (局の ID → px) */
+  function rowTops(): Map<number, number> {
+    const at = new Map<number, number>();
+    for (const [id, row] of Object.entries(rows)) {
+      const item = row?.parentElement;
+      if (item?.isConnected)
+        at.set(Number(id), item.getBoundingClientRect().top);
+    }
+    return at;
+  }
+  function slide(before: Map<number, number>): void {
+    const items: HTMLElement[] = [];
+    for (const [id, offset] of slides(before, rowTops())) {
+      const item = rows[id]?.parentElement;
+      if (!item) continue;
+      item.style.setProperty("--slide-from", `${offset}px`);
+      item.dataset["slide"] = "";
+      items.push(item);
+    }
+    if (items.length === 0) return;
+    // ずらした姿を一度描いたことにしてから印を外す (測らせないと、ずらす前と後がまとめられて滑らない)
+    list?.getBoundingClientRect();
+    for (const item of items) delete item.dataset["slide"];
+  }
+
   /** 右の列に出す番組の中身 (モーダルにしない)。あらすじや出演者は番組表の側にあるので、開いた時点で引き直す */
   const detail = programDetail();
   function openDetail(channel: LiveChannel): void {
@@ -225,6 +394,52 @@
   let stageEl = $state<HTMLElement | null>(null);
   const fullscreen = stageFullscreen(() => stageEl);
 
+  /**
+   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
+   * 書ける間は一覧の下に書き込む 1 行を付ける (上の `canWrite`)。右の列の無い形 (横にしたスマホ・全画面) では出さず、
+   * 同じボタンで映像の上の 1 行を開く (書けなければボタンも置かない)
+   */
+  const jikkyoList = jikkyoSwitch(JIKKYO_LIST_KEY);
+  const canList = $derived(
+    jikkyoActive &&
+      jikkyoChannel !== null &&
+      !phoneLandscape.current &&
+      !fullscreen.active,
+  );
+  /** 映像の上の 1 行を開いている (一覧を出せない形だけ) */
+  let writing = $state(false);
+  $effect(() => {
+    if (!canWrite || canList) writing = false;
+  });
+  $effect(() => {
+    controls.writing = writing;
+  });
+  /** ボタンで一覧を開いた (書き込む 1 行へフォーカスを移す。覚えていた一覧で開いたときは移さない) */
+  let opened = $state(false);
+  function pressJikkyo(): void {
+    if (canList) {
+      jikkyoList.toggle();
+      opened = jikkyoList.on;
+      // 出た 1 行が読んだら下ろす (列を入れ替えて一覧を描き直したときに、また取らない)
+      void tick().then(() => (opened = false));
+    } else writing = !writing;
+  }
+  /** 閉じたら (Esc・✕) 右端の列のボタンへフォーカスを戻す。一覧の下の 1 行なら一覧ごとしまう */
+  function closeWriting(): void {
+    if (canList) {
+      if (jikkyoList.on) jikkyoList.toggle();
+    } else writing = false;
+    // 一覧の下で打っている間は操作列が引っ込んでいることがある。出し直してから移す (消えている間は押せない)
+    controls.stir();
+    void tick().then(() =>
+      document
+        .querySelector<HTMLElement>('[data-testid="live-jikkyo-list"]')
+        ?.focus(),
+    );
+  }
+  /** 書きかけ (一覧の下と映像の上で同じもの。番組の中身との行き来で一覧を描き直しても残す) */
+  let draft = $state("");
+
   /** 画面を落とさせない。止めている間も掛けたまま (追っかけの始まりで、画面を見ていることが多い) */
   const awake = screenAwake();
   $effect(() => {
@@ -234,8 +449,10 @@
   /** バックグラウンド再生。戻ったら、張り付いていたなら放送の今へ (止めた所からではなく) */
   let wasLive = false;
   const background = backgroundPlayback({
+    nativeVideo: () => (player.canvas ? null : video),
     pip: () => pip.active,
     paused: () => player.paused,
+    muted: () => player.silenced,
     pause: () => {
       wasLive = player.live;
       player.toggle();
@@ -271,10 +488,23 @@
     player.playback = background.on || pip.active;
   });
 
+  /** 音量 (`volume.svelte.ts`)。canvas はエンジンの中で、`<video>` は Web Audio に通して掛ける */
+  const volume = playerVolume({
+    separateAudio: separateLiveAudio,
+    video: () => (player.canvas ? null : video),
+    through: () => background.on || pip.active,
+    remote: (paused) => {
+      if (paused !== player.paused) player.toggle();
+    },
+  });
+  $effect(() => {
+    player.volume = volume.level;
+  });
+
   /** 真ん中あたりを素早く2回で再生/一時停止 (`center-tap.ts`)。1回目は操作列の出し入れ */
   const stageTap = centerTap(() => player.toggle(), controls.toggle);
 
-  /** いまの1コマを字幕ごと切り抜いて PNG に (3画面共通。`snapshot.ts`) */
+  /** いまの1コマを字幕・コメントごと切り抜いてサーバに保存する (3画面共通。`shot.svelte.ts`) */
   const shooter = snapshotter(controls);
   const notices = $derived<Notice[]>([
     ...shooter.notices,
@@ -297,7 +527,41 @@
       () => (player.canvas ? grabbedFrame(player.grab()) : videoFrame(video)),
       player.captions && player.hasCaptions ? overlay : null,
       current?.now?.name ?? current?.name ?? "ライブ",
+      () => ({
+        place: "live",
+        service: player.tuned?.serviceId ?? 0,
+        aired: player.airTime(),
+      }),
+      player.captions ? captionWords(player.shownCaption) : "",
     );
+  }
+
+  /**
+   * キーでも動かせるようにする。**割り当ては追っかけ・観る画面と共通** (`player/keys.ts`)。
+   * ← → はシークバーと同じく、出しているときだけ (MPEG-2 と録画に譲っている間は無い)。速さは追っかけ中だけ効く
+   * (`live-player` の `setSpeed`)
+   */
+  const playerKey = playerKeys({
+    togglePlay: () => player.toggle(),
+    seekBy: (seconds) => {
+      if (player.canvas || player.yielded !== null) return;
+      player.seek((player.live ? player.newest : player.position) + seconds);
+    },
+    toggleCaptions: () => player.toggleCaptions(),
+    snapshot,
+    toggleFull: fullscreen.toggle,
+    stepSpeed: (by) => player.setSpeed(stepSpeed(player.speed, by)),
+    toggleMute: player.toggleMute,
+    stepVolume: volume.step,
+  });
+  /** データ放送を出している間は、空白・十字キー・f はあちらのリモコン (`bml/engine.ts` の `aribKey`) */
+  function keys(event: KeyboardEvent): void {
+    if (
+      player.showData &&
+      (event.key === " " || event.key === "f" || event.key.startsWith("Arrow"))
+    )
+      return;
+    playerKey(event);
   }
 
   /** この番組に載っている Hybridcast (先頭だけ)。別のタブで開く (操作バーと ⚙ の行) */
@@ -309,6 +573,8 @@
     window.open(app.url, "_blank", "noopener,noreferrer");
   }
 </script>
+
+<svelte:window onkeydown={keys} />
 
 <!--
     映像を左、局を右 (YouTube の再生画面と同じ形)。広い画面ではページごとスクロールさせず、動くのは右の一覧だけ
@@ -333,7 +599,20 @@
         bind:still
         bind:overlay
         bind:box={mediaBox}
-      />
+      >
+        {#snippet under()}
+          <!-- 映像 → 実況 → 字幕。世帯の設定がオンのときだけ置く。データ放送を出している間は重ねない -->
+          {#if data.jikkyo}
+            <JikkyoLayer
+              feed={jikkyo}
+              air={() => player.airTime()}
+              show={jikkyoActive && jikkyoChannel !== null && !player.showData}
+              paused={player.paused}
+              rate={player.rate}
+            />
+          {/if}
+        {/snippet}
+      </MediaStack>
 
       <!-- データ放送。映像はここ (`media`) とだけ伝えて描くのはエンジンに任せる。局が変わったら作り直す -->
       <!-- 常に受信する端末は、開く前から動かす (局を映している間だけ。`data-receive.ts`) -->
@@ -395,15 +674,41 @@
           {/if}
           <!-- MPEG-2 でも切り抜ける (worker の canvas から1枚もらう。`snapshot.grabbedFrame`) -->
           <ControlButton
-            icon={CAMERA}
+            icon={shooter.saved ? CHECK : CAMERA}
             label="この場面を切り抜く"
             testid="live-shot"
             onclick={() => void snapshot()}
           />
+          <!--
+            右の列の頭に「コメントの一覧」(書ける間は下に書き込む 1 行) を出す・しまう (`canList`)。
+            一覧を出せない形では、映像の上に書き込む 1 行を開く (`canWrite`。追い付いていないときも出し、1 行のほうで理由を言う)
+          -->
+          {#if canList || canWrite}
+            <ControlButton
+              icon={JIKKYO}
+              label={canList ? "コメントの一覧" : "実況に書く"}
+              on={canList ? jikkyoList.on : writing}
+              testid="live-jikkyo-list"
+              onclick={pressJikkyo}
+            />
+          {/if}
         </ControlBar>
 
         <!-- 操作バーは映像が出る前から出しておく (出たり消えたりすると押そうとしたところで動く) -->
         <ControlBar shown={controls.shown} testid="live-controls">
+          <!-- 一覧を出せない形で書き込む 1 行 (操作バーのすぐ上。`writing`) -->
+          {#if writing}
+            <JikkyoCompose
+              feed={jikkyo}
+              air={() => player.airTime()}
+              lag={player.fromAir}
+              paused={player.paused}
+              panel={false}
+              focus
+              bind:text={draft}
+              onclose={closeWriting}
+            />
+          {/if}
           <!--
                         上に位置、下に押すもの (観る画面と同じ二段)。放送の今にいる間は右端に張り付かせる
                         (貯めているぶん後ろにいるが、描くと摘みが左へ動いて見える)。MPEG-2 では出さない
@@ -431,11 +736,11 @@
             />
             <!-- 畳むときは音・Hybridcast・速さを ⚙ の頭に入れる (`Extras`・`StageTail` の `fold`。字幕は ⚙ の「字幕」) -->
             <Extras>
-              <ControlButton
-                icon={player.silenced ? SOUND_OFF : SOUND_ON}
-                label={player.silenced ? "音を出す" : "音を消す"}
+              <SoundButton
+                silenced={player.silenced}
                 testid="live-sound"
                 onclick={player.toggleMute}
+                {volume}
               />
 
               <!--
@@ -583,6 +888,7 @@
                         -->
             <StageTail
               prefix="live"
+              {volume}
               fold={[
                 muteRow(SOUND_OFF, player.silenced, player.toggleMute),
                 ...(hybridcast === undefined
@@ -616,6 +922,14 @@
                 on: player.receiveData,
                 toggle: () => player.toggleReceiveData(),
               }}
+              jikkyo={data.jikkyo
+                ? {
+                    on: jikkyoOn.on,
+                    toggle: jikkyoOn.toggle,
+                    missing: jikkyoChannel === null,
+                    down: jikkyo.down,
+                  }
+                : undefined}
               codec={liveCodecs({
                 icon: CODEC,
                 codec: player.codec,
@@ -623,6 +937,13 @@
                 unavailable: player.unavailable,
                 onselect: (key) => player.setCodec(key),
                 onraw: () => player.setRaw(),
+                preset: tunerPresetId,
+                presets: LIVE_TUNER_PRESETS,
+                onpreset: (id) => {
+                  void selectTunerPreset(id);
+                  if (id === "passthrough") player.setRaw();
+                  else if (player.raw) player.setCodec("h264");
+                },
               })}
               audio={liveAudio(AUDIO, player)}
               subtitle={liveSubtitle(CAPTION, player)}
@@ -679,7 +1000,7 @@
       {#if player.yielded}
         {@const yielded = player.yielded}
         <span class="stage-note yielded" data-testid="live-yielded">
-          <span class="yielded-text">
+          <span>
             録画のため局を切り替えました: <span class="broadcast"
               >{yielded.recording.title}</span
             >
@@ -705,6 +1026,9 @@
       {#if player.warning}
         <StageNote testid="live-warning">{player.warning}</StageNote>
       {/if}
+      {#if volume.noted}
+        <StageNote testid="live-volume-note">音量 {volume.level}%</StageNote>
+      {/if}
     {/snippet}
   </PlayerStage>
 
@@ -712,6 +1036,23 @@
         右の列。幅は固定で、映像側だけ伸ばす。番組表と同じ並びで、高さは残りぜんぶ
     -->
   {#snippet aside()}
+    <!-- 右の列の頭のコメントの一覧。書ける間は下に書き込む 1 行を付ける (局の一覧・番組の中身のどちらでも同じ) -->
+    {#snippet commentList()}
+      <JikkyoList feed={jikkyo} air={() => player.airTime()}>
+        {#if canWrite}
+          <JikkyoCompose
+            feed={jikkyo}
+            air={() => player.airTime()}
+            lag={player.fromAir}
+            paused={player.paused}
+            panel
+            focus={opened}
+            bind:text={draft}
+            onclose={closeWriting}
+          />
+        {/if}
+      </JikkyoList>
+    {/snippet}
     {#if detail.current}
       <!--
             番組の中身は、この列を入れ替えて出す (モーダルにしない — 映像に被さると観ながら読めない)
@@ -724,6 +1065,12 @@
           testid: "live-detail-close",
         }}
       >
+        {#snippet top()}
+          <!-- 番組の中身を開いていても、コメントの一覧は列の頭に残す (局の一覧のときと同じ) -->
+          {#if canList && jikkyoList.on}
+            {@render commentList()}
+          {/if}
+        {/snippet}
         <ProgramFacts program={detail.current} />
       </FactsAside>
     {:else}
@@ -735,6 +1082,10 @@
             -->
         {#if dataPress !== null}
           <Remote press={dataPress} />
+        {/if}
+        <!-- 実況のコメントの一覧も、出している間は一覧の上 (リモコンの下) -->
+        {#if canList && jikkyoList.on}
+          {@render commentList()}
         {/if}
 
         <!-- 番組表と同じ並び・同じ見た目。探す場所がずれないようにする -->
@@ -753,19 +1104,48 @@
               }}
               data-testid="live-type-{type}"
             >
-              {SERVICE_TYPE_LABEL[type]}
+              {type === JIKKYO_TAB ? "実況" : SERVICE_TYPE_LABEL[type]}
             </button>
           {/each}
         </div>
-        <!-- 枠の無い行を並べる (サイドバーの一覧と同じ形) -->
+        <!-- 勢いを読めないときは一覧の頭に 1 行だけ (通知は出さない。並びは番号順) -->
+        {#if shown === JIKKYO_TAB && ranking.failed}
+          <p class="ranking-note" data-testid="live-ranking-note">
+            いまは勢いを読めません
+          </p>
+        {/if}
+        <!--
+          枠の無い行を並べる (サイドバーの一覧と同じ形)。
+          「実況」タブの並べ直しは、一覧を使っている間は待つ (`JikkyoRanking.hold`)。指は touch のほうで見る
+          (巻き始めると pointer は取り消されるが、touch は指を離すまで続く)。フォーカスはキーボードで入ったときだけ
+          (マウスで押したボタンに残るフォーカスでは止めない)
+        -->
         <ul
           bind:this={list}
           class="channels side-list"
+          data-mixed={shown === JIKKYO_TAB ? "" : undefined}
           data-testid="live-channels"
+          onpointerenter={() => ranking.hold("pointer", true)}
+          onpointerleave={() => ranking.hold("pointer", false)}
+          ontouchstart={() => ranking.hold("touch", true)}
+          ontouchend={() => ranking.hold("touch", false)}
+          ontouchcancel={() => ranking.hold("touch", false)}
+          onfocusin={(event) =>
+            ranking.hold(
+              "focus",
+              (event.target as HTMLElement).matches(":focus-visible"),
+            )}
+          onfocusout={() => ranking.hold("focus", false)}
+          onscroll={() => ranking.scrolled()}
         >
           {#each listed as channel (channel.id)}
             <!-- いま映しているものかどうかは、この行の中で何度も使う -->
             {@const tuned = current?.id === channel.id}
+            <!-- 「実況」タブでは 2 段目の頭に勢い (1 分あたりのコメント数)。ほかのタブには付けない -->
+            {@const force =
+              shown === JIKKYO_TAB
+                ? ranking.forces?.get(channel.id)
+                : undefined}
             <li class="channel-item side-item">
               <button
                 type="button"
@@ -811,9 +1191,14 @@
                       data-testid="live-number">{channel.number ?? ""}</span
                     >{channel.name}
                   </span>
-                  {#if channel.now}
+                  {#if channel.now || force !== undefined}
                     <span class="channel-now broadcast">
-                      {channel.now.name}
+                      {#if force !== undefined}<span
+                          class="force"
+                          data-testid="live-force"
+                          ><span title="1分あたりのコメント数">勢い</span>
+                          {force}</span
+                        >{#if channel.now}・{/if}{/if}{channel.now?.name ?? ""}
                     </span>
                   {/if}
                 </span>
@@ -910,13 +1295,15 @@
   .back-live:hover:not(:disabled) {
     background: var(--dp-on-video-hover);
   }
+  /* 押すものなので操作列のボタンと同じ段 (実況のコメントより上。`ControlBar`) */
   .unmute {
     --pico-background-color: var(--dp-video-veil);
     position: absolute;
     top: 0.75rem;
     left: 0.75rem;
+    z-index: 10;
   }
-  /* 列の幅いっぱいに伸びるので、3 つを均等に広げる。左に寄せると右に溝だけが余った */
+  /* 列の幅いっぱいに伸びるので、タブを均等に広げる。左に寄せると右に溝だけが余った */
   .type-tabs {
     display: flex;
     margin-bottom: 0.5rem;
@@ -945,6 +1332,15 @@
     gap: 0;
     padding: 0;
     font-size: inherit;
+    /* 地は行の決まりと同じ。並べ直した行は前の場所から滑る (上の `slide`) */
+    transition:
+      background-color var(--dp-duration),
+      translate var(--dp-duration-move) var(--dp-ease-spring);
+  }
+  /* 並べ直した直後の 1 回だけ、前の場所にずらして置く (印を外すと滑る。印は `slide` が付けるので、Svelte からは見えない) */
+  .channel-item:global([data-slide]) {
+    translate: 0 var(--slide-from);
+    transition: none;
   }
   .channel {
     display: flex;
@@ -995,6 +1391,22 @@
     font-weight: var(--dp-weight-bold);
   }
   .channel-now {
+    font-size: var(--dp-text-xs);
+    color: var(--dp-muted);
+  }
+  /* 「実況」タブは種別が混ざる (地上波は 1〜2 桁、BS・CS は 3 桁) ので、番号の幅を 3 桁にそろえる */
+  .channels[data-mixed] .channel-number {
+    min-width: 3ch;
+  }
+  /* 勢いは控えた字のまま、数字の幅をそろえる (書き換わっても番組名が揺れない) */
+  .force {
+    font-variant-numeric: tabular-nums;
+  }
+  /* 勢いを読めないときの 1 行。一覧の行と同じ左の余白で、控えた字 */
+  .ranking-note {
+    margin: 0;
+    /* 上はタブの下の余白 (`.type-tabs` の 8px) がそのまま空く。下も同じ 8px にして、タブと一覧の間の真ん中に置く */
+    padding: 0 var(--dp-space-3) var(--dp-space-2);
     font-size: var(--dp-text-xs);
     color: var(--dp-muted);
   }

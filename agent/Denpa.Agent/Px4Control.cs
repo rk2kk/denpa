@@ -10,7 +10,8 @@ namespace Denpa.Agent;
 /// asicen-userland の asicend も同じ IPC を話す (違うのは枠の頭とソケットの置き場だけ。<see cref="Px4Wire"/>)。
 ///
 /// <para>
-/// ソケットは <c>&lt;ランタイムディレクトリ&gt;/px4-userland/&lt;筐体の番号&gt;/control.sock</c>。
+/// ソケットは <c>&lt;ランタイムディレクトリ&gt;/px4-userland/&lt;筐体の名前&gt;/control.sock</c>
+/// (名前は筐体の番号。番号が重なる筐体は番号と USB ポート)。
 /// 1本の接続で送れる要求は同時に1つだけ (SPEC 6.2)。順番は使う側が守る。
 /// 接続を閉じれば、その接続で取ったもの (受信機の lease・カードの handle) は px4d が返す。
 /// </para>
@@ -105,7 +106,7 @@ internal sealed class Px4Control : IDisposable
 
     /// <summary>
     /// 繋ぐ。**上限つきで。** Socket.Connect は待つ上限を持たず、px4d が受け付けなくなって
-    /// 待ち行列が埋まると戻らない (選局の錠を握ったまま止まる)。間に合わなければ投げる
+    /// 待ち行列が埋まると戻らない (選局のロックを握ったまま止まる)。間に合わなければ投げる
     /// (ソケットは呼んだ側が閉じる)
     /// </summary>
     public static void ConnectWithin(Socket socket, string socketPath, TimeSpan timeout, Px4Wire? wire = null)

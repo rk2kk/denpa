@@ -95,11 +95,12 @@ export const config = {
 
   ffmpeg: str("FFMPEG", "/usr/local/bin/ffmpeg"),
   /**
-   * ブラウザで MPEG-2 と AAC をデコードする WebAssembly の置き場 (ライブを放送そのままで送る経路。docs/stream.md#放送そのままmpeg-2を送る)。
+   * ブラウザで MPEG-2・AAC・Opus をデコードする WebAssembly の置き場 (変換せずに観るライブと録画・互換モードの音。docs/stream.md#放送そのままmpeg-2を送る)。
    * Dockerfile の `mpeg2wasm` 段が置く。**アプリの外にあるのは、開発の compose がソースを
    * /app に被せるため** (中に置くと隠れる)。無ければ放送そのままの経路は使えず、画面はエンコードしたものに戻る
    */
   mpeg2Dir: str("MPEG2_DIR", "/opt/denpa/mpeg2"),
+  /** 録ったあとのエンコードを同時に走らせる本数。**ジョブではなく ffmpeg の本数で数える** (コーデックごとに1本。`encode-slots.ts`) */
   encodeConcurrency: num("ENCODE_CONCURRENCY", 2),
   /** 先頭が壊れていて初期化に失敗したときに頭を捨てて再試行する秒数 (enc.js 由来) */
   encodeRetrySeek: 0.2,
@@ -107,17 +108,39 @@ export const config = {
    * 1つのエンコードを何回まで試すか。**毒ジョブでキューを止めないため。**
    *
    * プロセスごと落とすジョブ (メモリ超過など) は、再起動のたびに running→queued
-   * へ戻され、同時実行1・id順だと毎回先頭に来て永久にキューを塞ぐ。取り出すたびに
+   * へ戻され、id順なので毎回先頭に来てキューを塞ぎ続ける。取り出すたびに
    * attempts を数えていて (頭を捨てる再試行も1回と数える)、ここを超えたら諦めて failed にし、後ろを進める
    */
   encodeMaxAttempts: num("ENCODE_MAX_ATTEMPTS", 5),
   ffprobe: str("FFPROBE", "/usr/local/bin/ffprobe"),
   /**
-   * GPU のデバイスを探すパターン (最後の段に `*`)。当たったデバイスを全部試して、QSV / VA-API が
+   * ライブで、チューナーが既に H.264 を作っているなら**映像を再エンコードせずに写す**。
+   *
+   * 既定は off。on にすると、チューナー側がオンボード変換しているときだけ
+   * `-c:v copy` で通す (`server/live.ts` の `tunerTranscoding`)。
+   * 変換していない (放送そのままの MPEG-2) ときは今までどおりエンコードする —
+   * MSE は MPEG-2 を受け取れないため。**音声は写さない** (AAC を写すと
+   * `esds` に AudioSpecificConfig が入らず MSE が拒否する)
+   */
+  liveCopy: bool("DENPA_LIVE_COPY", false),
+  /**
+   * GPU のデバイスを探すパターン (最後の段に `*`)。当たったデバイスを全部試して、VA-API が
    * 初期化できたものでエンコードする (server/hwenc.ts)。Pod / コンテナに `/dev/dri` を
    * 渡していなければ1つも無いのが普通
    */
   hwDevices: str("HW_DEVICES", "/dev/dri/renderD*"),
+  /**
+   * Rockchip MPP (RK3588 / RK3588S のハードウェアエンコーダ) のデバイス。在れば h264_rkmpp を試す
+   * (server/hwenc.ts)。BSP カーネルでないと無い。ffmpeg (MPP) は決まった場所を自分で開くので、
+   * ここを変えても ffmpeg の見る場所は変わらない — 変えるのはテスト (偽のデバイス) だけ
+   */
+  rkmppDevice: str("RKMPP_DEVICE", "/dev/mpp_service"),
+  /**
+   * NVIDIA の GPU のデバイスファイル (`nvidia0`・`nvidia1` …) を探すフォルダ。在れば NVENC を試す
+   * (server/hwenc.ts)。ffmpeg は GPU をデバイスファイルではなく番号 (`-gpu N`) で受けるので、
+   * ここを変えても ffmpeg の使う GPU は変わらない — 変えるのはテスト (偽のデバイス) だけ
+   */
+  nvidiaDir: str("NVIDIA_DIR", "/dev"),
   /** GPU の試しのエンコード1本に待つ上限 (ms)。ドライバが固まっても起動が止まらないように */
   hwProbeTimeout: num("HW_PROBE_TIMEOUT", 20000),
 
@@ -248,7 +271,8 @@ export const config = {
    */
   agentDownGrace: num("AGENT_DOWN_GRACE", 3 * MIN),
   /**
-   * 局ロゴの定期チェックの間隔。**ほかの選局を共有するだけで、自分ではチューナーを開かない** (`logo.sweep`)。
+   * 局ロゴの定期チェックの間隔。**ほかの選局を共有する** (`logo.sweep`)。自分で開くのは、衛星のロゴが足りない間に
+   * どのチューナーも空いているときに、当たりの中継で待つ (分からなければ探す。`logo.awaitCarousel`)。
    * 開いた瞬間の通知 (`tuners`) でも共有するので、これは通知を取りこぼしたときの保険
    */
   logoSweepInterval: 10 * MIN,

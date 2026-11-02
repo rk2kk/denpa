@@ -29,7 +29,7 @@ public class BCasTests
         return response;
     }
 
-    /// <summary>IDI の応答。番号1つ (メーカー識別・バージョン・48 ビットの番号・チェックコード)</summary>
+    /// <summary>IDI の応答。番号ごとに (メーカー識別・バージョン・48 ビットの番号・チェックコード)</summary>
     private static byte[] IdiResponse(params byte[][] ids)
     {
         var response = new byte[7 + ids.Length * 10 + 2];
@@ -193,7 +193,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 短い応答は同じ線で2回まで送り直す()
+    public async Task 短い応答は同じ接続で2回まで送り直す()
     {
         var calls = 0;
         var link = new FakeLink("reader", _ => ++calls < 3 ? [0x90, 0x00] : EcmResponse());
@@ -230,7 +230,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 線が切れたら探し直してINTからやり直す()
+    public async Task 接続が切れたら探し直してINTからやり直す()
     {
         var first = new FakeLink("first", _ => throw new IOException("USB が外れました"));
         var second = new FakeLink("second");

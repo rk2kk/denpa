@@ -202,7 +202,30 @@ function convertReadmePart(text: string, outFile: string): string {
   body = convertAlerts(body);
   body = rewriteLinks(body, readme.path, outFile);
   body = animImages(body);
+  body = linkIssueNumbers(body);
   return addVideoNotes(body).trim();
+}
+
+/**
+ * 本文の `#188` を、その番号の Issue・PR・Discussion へのリンクにする (GitHub の README では
+ * ひとりでにリンクになるが、サイトでは字のままになる。issues/<番号> は PR や Discussion にも飛ぶ)。
+ * リンクの字の中 (`[Discussion #760](…)`)・URL の中・コードの中は触らない
+ */
+function linkIssueNumbers(text: string): string {
+  return mapOutsideFences(text, (line) =>
+    // `…` の中は奇数番目に来る
+    line
+      .split("`")
+      .map((part, i) =>
+        i % 2
+          ? part
+          : part.replace(
+              /(?<![\w/#[])#(\d+)(?![\w\]])/g,
+              (_, n: string) => `[#${n}](${repoUrl}/issues/${n})`,
+            ),
+      )
+      .join("`"),
+  );
 }
 
 /** 見出しごとの中身 (下の段の見出しも含む)。コードの囲みの中の `#` (シェルのコメント) は見出しにしない */
@@ -272,7 +295,12 @@ function top() {
     }
     write(t.key, body);
     return [
-      { key: t.key, id: slugify(t.heading), heading: t.label ?? t.heading },
+      {
+        key: t.key,
+        id: slugify(t.heading),
+        heading: t.label ?? t.heading,
+        end: t.end ?? false,
+      },
     ];
   });
 
@@ -320,7 +348,7 @@ function mapOutsideFences(text: string, fn: (line: string) => string): string {
     .map((line) => {
       const m = /^\s*(`{3,}|~{3,})/.exec(line);
       if (m) {
-        if (!fence) fence = m[1]![0]!.repeat(m[1]!.length);
+        if (!fence) fence = m[1]!;
         else if (line.trim().startsWith(fence)) fence = undefined;
         return line;
       }

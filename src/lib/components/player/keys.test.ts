@@ -1,5 +1,5 @@
 /**
- * 再生画面のキー操作。**観る画面と追っかけで同じ割り当て**にするための共通部品。
+ * 再生画面のキー操作。**3画面 (ライブ・追っかけ・観る画面) で同じ割り当て**にするための共通部品。
  *
  * DOM は要らないので、押されたことだけを作って渡す。
  */
@@ -30,7 +30,7 @@ function press(
   return took;
 }
 
-/** 全部の操作を持つ画面 (観る画面・追っかけ)。押されたものを名前で溜める */
+/** 全部の操作を持つ画面。押されたものを名前で溜める */
 function harness() {
   const done: string[] = [];
   const handler = playerKeys({
@@ -41,6 +41,7 @@ function harness() {
     toggleFull: () => done.push("full"),
     stepSpeed: (direction) => done.push(`speed ${direction}`),
     toggleMute: () => done.push("mute"),
+    stepVolume: (direction) => done.push(`volume ${direction}`),
   });
   return {
     done,
@@ -59,9 +60,10 @@ describe("再生画面のキー", () => {
     expect(done).toEqual(["play", "play", "seek -10", "seek 10"]);
   });
 
-  test("字幕・切り抜き・全画面・速さ・消音", () => {
+  test("字幕・切り抜き・全画面・速さ・消音・音量", () => {
     const { done, press } = harness();
-    for (const key of ["c", "s", "f", ">", "<", "m"]) press(key);
+    for (const key of ["c", "s", "f", ">", "<", "m", "ArrowUp", "ArrowDown"])
+      press(key);
     expect(done).toEqual([
       "captions",
       "shot",
@@ -69,6 +71,8 @@ describe("再生画面のキー", () => {
       "speed 1",
       "speed -1",
       "mute",
+      "volume 1",
+      "volume -1",
     ]);
   });
 
@@ -125,6 +129,7 @@ describe("再生画面のキー", () => {
     expect(press(handler, "c")).toBe(false);
     expect(press(handler, ">")).toBe(false);
     expect(press(handler, "q")).toBe(false);
+    expect(press(handler, "ArrowUp")).toBe(false);
     expect(done).toEqual([]);
     expect(press(handler, " ")).toBe(true);
     expect(done).toEqual(["play"]);

@@ -48,7 +48,7 @@ export interface ScanWant {
   audio: boolean;
 }
 
-export interface ScanOptions extends ScanWant {
+interface ScanOptions extends ScanWant {
   signal?: AbortSignal | undefined;
   timeoutMs: number;
   /** 入力の前に置く引数。エンコードと同じだけ頭を捨てる (`-ss`) ときに */
@@ -285,6 +285,8 @@ export async function scan(
   const result = await run(scanArgs(input, reader.outputs, options.before), {
     signal: options.signal,
     timeoutMs: options.timeoutMs,
+    // 録ったあとの処理なので、ライブに CPU を譲る (stream.lowerPriority)
+    lowPriority: true,
     ...(reader.onStdout ? { onStdout: reader.onStdout } : {}),
     onStderrLine: (line) => {
       if (reader.line(line)) return;

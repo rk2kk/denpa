@@ -2,14 +2,14 @@
  * ホームを開いたときの位置 (`routes/+page.svelte`)。
  *
  * **観終えていない録画があれば、いちばん古いものを映す** — 溜まったぶんを古い順に片付けられるように。
- * 無ければ「いま」の線。どれを映すかと、描いていない所 (60 件より先) を描かせるのは呼ぶ側
- * (`#lib/timeline.ts` の `catchUp`・`Paged.showUpTo`)。ここは描き終えた一覧を送るだけ。
+ * 無ければ「いま」の線。どれを映すかと、まだ描いていない所を描かせるのは呼ぶ側
+ * (`#lib/timeline.ts` の `catchUp`・`#lib/paging.svelte.ts` の `Paged.showAtLeast`)。ここは描き終えた一覧を送るだけ。
  * どの幅でもページごとスクロールする (`home.css`) ので、送るのは window
  */
 
 /**
- * 一覧の下に被さるもの (下のタブと、そのすぐ上に貼り付いた頭の1行) の高さ。
- * 頭の1行を出すのはスマホの形だけで、いつも下に貼り付く (`home.css`)。上に被さるものは日付の見出しだけ
+ * 一覧の下に被さるもの (下のタブと、そのすぐ上に貼り付いた操作の1行) の高さ。
+ * 操作の1行を出すのはスマホの形だけで、いつも下に貼り付く (`home.css`)。上に被さるものは日付の見出しだけ
  */
 function bottomCover(): number {
   const tab =
@@ -38,7 +38,7 @@ export function placeTimeline(list: HTMLElement, target: string | null): void {
     topEdge(list) +
     (list.querySelector<HTMLElement>(".t-day")?.offsetHeight ?? 32);
   const bottom = window.innerHeight - bottomCover();
-  // 見えている所の高さ (上はヘッダーと見出し、スマホの形は下のタブと頭の1行が被さる)
+  // 見えている所の高さ (上はヘッダーと見出し、スマホの形は下のタブと操作の1行が被さる)
   const view = bottom - line;
   /*
    * **録画中は線を見せない** (`TimelineHeading`。読み上げの見出しだけ残す)。見せていない線は流れの外に置かれ、

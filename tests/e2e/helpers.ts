@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+
 import type {
   APIRequestContext,
   APIResponse,
@@ -21,8 +23,8 @@ export async function goto(page: Page, url: string): Promise<void> {
   await page.locator('[data-hydrated="true"]').waitFor();
   /*
    * **番組表はマスだけ後から届く** (`guide/+page.ts` が `/api/guide` から取る)。
-   * ハイドレーションだけ待って触りにいくと、まだ骨組みしか無いことがある。局が1つも無ければ表の代わりに
-   * 「局がありません」が出るので、どちらかが出るまで待つ
+   * ハイドレーションだけ待って触りにいくと、まだ骨組みしか無いことがある。局や番組表が無ければ表の代わりに
+   * 案内 (`empty-grid`) が出るので、どちらかが出るまで待つ
    */
   const pathname = new URL(url, "http://localhost").pathname;
   if (pathname === "/guide") {
@@ -360,7 +362,7 @@ export async function recordOne(
 export async function setRecording(
   request: APIRequestContext,
   patch: {
-    /** エンコードするコーデック。両方エンコードするなら `['av1', 'h264']`、エンコードしないなら `[]`。省けば av1 */
+    /** エンコードするコーデック。いくつもエンコードするなら `["av1", "hevc", "h264"]`、エンコードしないなら `[]`。省けば av1 */
     codecs?: string[];
     cmCut?: string;
     keepOriginal?: boolean;
@@ -378,6 +380,8 @@ export async function setRecording(
    */
   const encoding = new URLSearchParams();
   for (const codec of chosen) encoding.append("codecs", codec);
+  // H.265 の行を出した画面から送ったことにする (出していない画面から来ると、H.265 のチェックは前のまま)
+  encoding.append("codecsShown", "hevc");
   if (patch.keepOriginal === true) encoding.append("keepOriginal", "on");
   if (patch.transcodeLimit !== undefined)
     encoding.append("transcodeLimit", patch.transcodeLimit);
@@ -391,6 +395,44 @@ export async function setRecording(
     new URLSearchParams({ cmCut: patch.cmCut ?? "chapter" }),
   );
   await saveRecordingPart(request, "saveReserve", reserve);
+}
+
+/** 偽 ffmpeg がエンコードしていた1回 (`stack.encodeSpansFile`)。`end` が null なら終わらなかった (止められた) */
+export interface EncodeSpan {
+  output: string;
+  start: number;
+  end: number | null;
+}
+
+/**
+ * 偽 ffmpeg がその録画の元のTSをエンコードしていた間。作業ファイル (`….<コーデック>.encoding`) へ書いたものだけ
+ * (サムネイルなどは除く)。始まった順
+ */
+export function encodeSpans(file: string, recordingId: string): EncodeSpan[] {
+  if (!existsSync(file)) return [];
+  const mine = new RegExp(`-${recordingId}\\.m2ts$`);
+  const spans: EncodeSpan[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const [kind, at, input, output] = line.split("\t");
+    if (input === undefined || output === undefined) continue;
+    if (!mine.test(input) || !output.endsWith(".encoding")) continue;
+    if (kind === "start") spans.push({ output, start: Number(at), end: null });
+    if (kind === "end") {
+      const open = [...spans]
+        .reverse()
+        .find((s) => s.output === output && s.end === null);
+      if (open !== undefined) open.end = Number(at);
+    }
+  }
+  return spans;
+}
+
+/** 偽 ffmpeg に渡された引数 (`stack.encodeArgsFile`)。1回ぶんずつ */
+export function encodeRuns(file: string): string[][] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("---\n")
+    .map((run) => run.split("\n"));
 }
 
 async function saveRecordingPart(
@@ -485,8 +527,7 @@ export async function clearRules(page: Page): Promise<void> {
  * (`<一覧>-more`。`use:sentinel`) が画面に入るたびに続きを足す。件数を数える・
  * 行を番号で名指しするテストは、その前にこれを呼ぶ (ホームは `goto` が呼ぶ)。
  *
- * **印を巻き取って見せる**のはブラウザの `scrollIntoView` で。一覧は自分の箱の中で
- * 巻き取る (`overflow: auto`) ので、箱ごと動かさないと見えない。足されたかどうかは
+ * **印を巻き取って見せる**のはブラウザの `scrollIntoView` で。足されたかどうかは
  * **行の数**で見る (印の文言で見ていた頃は、読む前に足されると比べる相手が同じになって
  * 5 秒ずつ空回りし、テストごと時間切れになった)。
  *
@@ -564,6 +605,15 @@ export async function cancelAllReservations(page: Page): Promise<void> {
  * 同じ場所への `pointermove` は捨てられるので (止まっているカーソルの下で
  * 中身が動いただけでもブラウザは投げてくる)、**2回、違う場所へ動かします**
  */
+export async function wakeControls(page: Page, stage: string): Promise<void> {
+  const box = await page.getByTestId(stage).boundingBox();
+  if (box === null) return;
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.move(x, y - 4);
+}
+
 /**
  * GPU で描ける端末として開く。E2E のブラウザは GPU を切っていて `<html data-lite>` が付く (`#lib/lite.ts`) ので、
  * WebGL の描き手の名前を差し替える。時間で動き続けるもの (アンビエントの光など) を回したまま見るテストで使う
@@ -576,15 +626,6 @@ export async function pretendGpu(page: Page): Promise<void> {
       return typeof value === "string" ? "Test GPU" : value;
     };
   });
-}
-
-export async function wakeControls(page: Page, stage: string): Promise<void> {
-  const box = await page.getByTestId(stage).boundingBox();
-  if (box === null) return;
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.move(x, y - 4);
 }
 
 /**
@@ -715,8 +756,8 @@ export async function oneRowTroubles(
 }
 
 /**
- * **全画面をやめる。** 指の端末の観る画面は、開いた時点で全画面に入る。狭い枠のまま
- * (操作バーを映像の下に出した形) を見るときに呼ぶ
+ * **全画面をやめる。** 指の端末の観る画面は、開いた時点で全画面に入る。全画面でない狭い枠を
+ * 見るときに呼ぶ
  */
 export async function leaveFullscreen(page: Page): Promise<void> {
   await page.evaluate(
@@ -1221,7 +1262,7 @@ export async function routeCaptions(page: Page): Promise<void> {
 
 /**
  * ホームの**表示の切り替え** (まとめて表示・完了した予約も表示・削除済みも表示・ファイルと照合) の入れ物を返す。
- * 広い画面 (1000px 以上) はサイドバーの「表示」、狭い画面は一覧の頭の1行の「⋯」から出るメニュー
+ * 広い画面 (1000px 以上) はサイドバーの「表示」、狭い画面は下のタブのすぐ上の1行の「⋯」から出るメニュー
  */
 export async function homeTools(page: Page): Promise<Locator> {
   const side = page.getByTestId("sidebar");
@@ -1234,7 +1275,7 @@ export async function homeTools(page: Page): Promise<Locator> {
 
 /**
  * ホームの絞り込み (すべて・予約・録画中・未視聴、見てほしいことの競合・失敗・録り逃し・CMの判定) を押す。
- * 広い画面はサイドバーの行、狭い画面は一覧の頭のチップ
+ * 広い画面はサイドバーの行、狭い画面は下のタブのすぐ上の1行のチップ
  */
 export async function homeFilter(page: Page, id: string): Promise<void> {
   const side = page.getByTestId("sidebar");
@@ -1311,4 +1352,55 @@ export async function expectSideFrame(
     Math.abs(right - column.x),
     `映像の列の左 ${column.x} と、${first} の右 ${right}`,
   ).toBeLessThanOrEqual(1);
+}
+
+/**
+ * **フレームが来たことにする** (切り抜き)。偽の放送・偽 ffmpeg の映像はブラウザが読めず、フレームは来ない。
+ * 大きささえあれば写せる (中身の無い映像は黒く写る)。`testid` は `<video>` の目印
+ */
+export async function fakeFrame(page: Page, testid: string): Promise<void> {
+  await page.getByTestId(testid).evaluate((video) => {
+    Object.defineProperty(video, "videoWidth", { get: () => 320 });
+    Object.defineProperty(video, "videoHeight", { get: () => 180 });
+  });
+}
+
+/** 切り抜き1枚 (`POST /api/clips` の返事。`#lib/clips.ts` の `Clip`) */
+interface ClipJson {
+  id: number;
+  place: "live" | "chase" | "watch";
+  recordingId: number | null;
+  serviceName: string;
+  programName: string;
+  offsetMs: number | null;
+  captions: string;
+  /** あとから出し入れできる重ね (`Clip.layers`) */
+  layers: { captions?: boolean; comments?: boolean };
+}
+
+/**
+ * 切り抜きのボタンを押して、サーバに置けたところまで待つ。**端末には落とさない** (落ちたら失敗)。
+ * 返事 (201) の中身を返す
+ */
+export async function takeClip(page: Page, button: string): Promise<ClipJson> {
+  let downloads = 0;
+  const count = () => downloads++;
+  page.on("download", count);
+  try {
+    const response = page.waitForResponse(
+      (res) =>
+        res.request().method() === "POST" &&
+        new URL(res.url()).pathname.endsWith("/api/clips"),
+    );
+    await page.getByTestId(button).click();
+    const res = await response;
+    expect(res.status()).toBe(201);
+    await expect(
+      page.getByText("保存しました", { exact: false }),
+    ).toBeVisible();
+    expect(downloads).toBe(0);
+    return (await res.json()) as ClipJson;
+  } finally {
+    page.off("download", count);
+  }
 }

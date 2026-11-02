@@ -9,11 +9,13 @@ import {
 import { CHANNEL } from "#lib/live.js";
 
 import {
+  blameLiveHw,
   CHASE_STREAM_HOLD,
   codecsFor,
   encodeArgs,
   key,
   LIVE_STREAM_BACKLOG,
+  liveHwFailed,
   openingLine,
   sessionStream,
   whyNotTuned,
@@ -194,7 +196,7 @@ describe("ライブのエンコード方法", () => {
     // 映像の出口が先。字幕はそのあと
     expect(args.indexOf("pipe:1")).toBeLessThan(args.indexOf("pipe:3"));
     // 字幕はデコードせずに写す。描く指定 (-sub_type) も要らない
-    expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+    expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
     expect(args).not.toContain("-sub_type");
   });
 
@@ -216,7 +218,7 @@ describe("ライブのエンコード方法", () => {
   /** **言語が複数ある放送**では2本目を選べる */
   test("何本目の字幕かを選べる", () => {
     expect(encodeArgs(1024, stereo, "h264", 1).join(" ")).toContain(
-      "-map 0:p:1024:s:1 -c:s copy",
+      "-map 0:p:1024:s:1? -c:s copy",
     );
   });
 
@@ -298,6 +300,64 @@ describe("エンコード方式を選ぶ", () => {
 });
 
 /**
+ * **チューナーが既に H.264 を作っているなら、作り直さない** (`config.liveCopy`)。
+ *
+ * 実機 (PIX-DT295 のオンボード変換) では、こちらが `libx264 ultrafast` で
+ * デコードし直していた — 画質は世代で劣化し、CPU を1コア近く食っていた。
+ * 写すときはフィルタもコマ数の上限も掛けられない (`-c:v copy` と同時には使えない)。
+ *
+ * **音声は写さない。** 放送の AAC をそのまま mp4 へ入れると `esds` に
+ * AudioSpecificConfig (tag 0x05) が入らず、MSE が
+ * `CHUNK_DEMUXER_ERROR_APPEND_FAILED` で受け取らない (実測)。
+ * 音声だけエンコードすれば通る (15秒の fMP4 を Chromium で再生して確認)
+ */
+describe("チューナーの H.264 をそのまま写す", () => {
+  const passthrough = (
+    codec: "h264" | "av1" = "h264",
+    caption: number | null = 0,
+  ) => encodeArgs(1024, stereo, codec, caption, null, true);
+
+  test("映像は写し、音声はエンコードする", () => {
+    const args = passthrough();
+    expect(args[args.indexOf("-c:v") + 1]).toBe("copy");
+    expect(args).not.toContain("libx264");
+    expect(args[args.indexOf("-c:a") + 1]).toBe("aac");
+  });
+
+  /** フィルタを掛けると ffmpeg がデコードを始めるので、写せない */
+  test("インタレ解除もコマ数の上限も掛けない", () => {
+    const args = passthrough();
+    expect(args).not.toContain("-vf");
+    expect(args).not.toContain("-fpsmax");
+  });
+
+  /** 局を名指しする理屈は写すときも同じ (1つの物理チャンネルに複数の局が入っている) */
+  test("局の名指しは残る", () => {
+    const args = passthrough();
+    expect(args).toContain("0:p:1024:v:0");
+    expect(args).toContain("0:p:1024:a:0");
+  });
+
+  /** 字幕は別の ffmpeg が同じ TS から写すので、映像を写しても消えない */
+  test("字幕の出口は残る", () => {
+    expect(passthrough("h264", 0)).toContain("pipe:3");
+    expect(passthrough("h264", null)).not.toContain("pipe:3");
+  });
+
+  /** チューナーは H.264 しか作らない。AV1 を選ばれたら今までどおりエンコードする */
+  test("AV1 を選ばれたら写さない", () => {
+    const args = passthrough("av1");
+    expect(args[args.indexOf("-c:v") + 1]).toBe("libsvtav1");
+  });
+
+  /** 既定 (写さない) は今までと同じ */
+  test("指定しなければ今までどおりエンコードする", () => {
+    const args = encodeArgs(1024, stereo, "h264", 0, null, false);
+    expect(args[args.indexOf("-c:v") + 1]).toBe("libx264");
+  });
+});
+
+/**
  * **AV1 と組むときは Opus。**
  *
  * 設計 (stream.md#前提) が狙っていた組み合わせで、録画と同じ扱いでもある
@@ -314,7 +374,7 @@ describe("音声も組で決まる", () => {
   test("AV1 は Opus 256k", () => {
     expect(args("av1")).toContain("libopus");
     expect(rate(args("av1"))).toBe("256k");
-    expect(codecsFor("av1")).toContain("opus");
+    expect(codecsFor("av1")).toBe('video/mp4; codecs="av01.0.08M.08,Opus"');
   });
 
   test("H.264 は AAC のまま", () => {
@@ -479,7 +539,7 @@ describe("音声だけのエンコード方式 (外から使う API の ?audio=o
 
 /**
  * **HTTP の API で音声を選ぶ** (`live?audio=<id>`・`chase?audio=<id>`)。画面の WebSocket と同じ
- * 合言葉 (`AudioTrack.id`) を、同じ `pickTrack` → `encodeArgs` に通す
+ * ID (`AudioTrack.id`) を、同じ `pickTrack` → `encodeArgs` に通す
  */
 describe("外から選ぶ音声 (?audio=<id>)", () => {
   const tracks = audioTracks([{ componentType: 2, langs: ["jpn", "eng"] }]);
@@ -554,16 +614,16 @@ describe("GPU でエンコードする", () => {
   test("字幕の出口・コマ数の上限・音声はソフトウェアのときと同じ", () => {
     for (const args of [encodeOnly(), full()]) {
       expect(args[args.indexOf("-fpsmax") + 1]).toBe("60000/1001");
-      expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+      expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
       expect(args).toContain("pipe:3");
       expect(args.join(" ")).toContain("-c:a aac");
     }
     // AV1 は Opus のまま
     const av1 = encodeArgs(1024, stereo, "av1", 0, {
-      way: { device, kind: "qsv" },
+      way: { device, kind: "vaapi" },
       full: false,
     });
-    expect(av1.join(" ")).toContain("-c:v av1_qsv");
+    expect(av1.join(" ")).toContain("-c:v av1_vaapi");
     expect(av1.join(" ")).toContain("-c:a libopus");
   });
 
@@ -574,6 +634,37 @@ describe("GPU でエンコードする", () => {
     });
     expect(args).not.toContain("-init_hw_device");
     expect(args).not.toContain("-hwaccel");
+  });
+
+  test("NVENC は GPU の番号で選び、低遅延の引数で渡す (デバイスは開かない)", () => {
+    const args = encodeArgs(1024, stereo, "h264", 0, {
+      way: { device: "/dev/nvidia0", kind: "nvenc", gpu: 0 },
+      full: false,
+    });
+    expect(args).not.toContain("-init_hw_device");
+    expect(args[args.indexOf("-vf") + 1]).toBe("bwdif,format=nv12");
+    expect(args.join(" ")).toContain("-c:v h264_nvenc -gpu 0");
+    expect(args.join(" ")).toContain("-zerolatency 1 -delay 0 -g 60");
+    expect(args).not.toContain("-async_depth");
+  });
+
+  /*
+   * 消費者向けの GPU は同時に開けるエンコードの数に上限がある (`hwenc.nvencBusy`)。
+   * 超えて降りたのは GPU が壊れているのではないので、15分外すことはしない
+   */
+  test("同時に開ける数を超えて降りただけなら、方式を覚えない", () => {
+    // ほかの試験と混ざらないよう、ここだけのデバイス
+    const hw = {
+      way: { device: "/dev/nvidia-test-busy", kind: "nvenc" as const, gpu: 0 },
+      full: false,
+    };
+    expect(blameLiveHw("h264", hw, true)).toBe(false);
+    expect(liveHwFailed("h264", hw)).toBe(false);
+    // ほかの理由なら覚えて、しばらくソフトウェア
+    expect(blameLiveHw("h264", hw, false)).toBe(true);
+    expect(liveHwFailed("h264", hw)).toBe(true);
+    // コーデックが違えば別の方式
+    expect(liveHwFailed("av1", hw)).toBe(false);
   });
 });
 

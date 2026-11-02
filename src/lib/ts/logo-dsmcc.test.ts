@@ -11,7 +11,11 @@ import {
 } from "@danything/arib/synth";
 
 import { LogoCollector } from "./logo";
-import { DsmccLogoCollector, parseLogoModule } from "./logo-dsmcc";
+import {
+  CarouselProgress,
+  DsmccLogoCollector,
+  parseLogoModule,
+} from "./logo-dsmcc";
 
 /**
  * 衛星 (BS/CS) のロゴ。
@@ -21,7 +25,7 @@ import { DsmccLogoCollector, parseLogoModule } from "./logo-dsmcc";
  * → DII でモジュールの大きさ → DDB でブロック、と辿らないと取得できない。
  */
 
-/** 1x1 の PNG のつもり。中身は問わない */
+/** PNG の署名だけのもの。中身は問わない */
 const PNG = Uint8Array.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xbe, 0xef,
 ]);
@@ -211,6 +215,95 @@ describe("DsmccLogoCollector", () => {
     ]);
   });
 
+  /*
+   * **読み切ったかは、DII が知らせたモジュールが全部揃ったかで決める。** BS と CS のモジュールが
+   * 別々の時刻に来ると、片方だけ揃った時点ではまだ読み切っていない
+   */
+  test("知らせたロゴのモジュールが全部揃うまでは、読み切ったことにしない", () => {
+    const collector = new DsmccLogoCollector();
+    const bs = logoModule(0x05, [
+      { logoId: 0x0011, services: [[4, 211]], data: PNG },
+    ]);
+    const cs = logoModule(0x05, [
+      { logoId: 0x0012, services: [[7, 330]], data: PNG },
+    ]);
+    const CS_MODULE_ID = MODULE_ID + 1;
+    const head = stream(
+      packetize(0x0000, patSection([[ESS, PMT_PID]])),
+      packetize(PMT_PID, pmtSection(ESS, ES_PID, 0x79)),
+      packetize(
+        ES_PID,
+        diiSection(DOWNLOAD_ID, 4066, [
+          {
+            moduleId: MODULE_ID,
+            moduleSize: bs.length,
+            moduleVersion: 1,
+            name: "LOGO-05",
+          },
+          {
+            moduleId: CS_MODULE_ID,
+            moduleSize: cs.length,
+            moduleVersion: 1,
+            name: "CS_LOGO-05",
+          },
+        ]),
+      ),
+    );
+    for (const packet of packets(head)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(false);
+
+    const first = packetize(
+      ES_PID,
+      ddbSection(DOWNLOAD_ID, CS_MODULE_ID, 1, 0, cs),
+    );
+    for (const packet of packets(first)) collector.feed(packet);
+    expect(collector.collected()).toHaveLength(1);
+    expect(collector.carouselRead).toBe(false);
+
+    const second = packetize(
+      ES_PID,
+      ddbSection(DOWNLOAD_ID, MODULE_ID, 1, 0, bs),
+    );
+    for (const packet of packets(second)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(true);
+  });
+
+  test("BS と CS が別々の DII で来るとき、片方の名前しか知らされていないうちは読み切ったことにしない", () => {
+    const collector = new DsmccLogoCollector();
+    const bs = logoModule(0x05, [
+      { logoId: 0x0011, services: [[4, 211]], data: PNG },
+    ]);
+    const cs = logoModule(0x05, [
+      { logoId: 0x0012, services: [[7, 330]], data: PNG },
+    ]);
+    const dii = (downloadId: number, size: number, name: string) =>
+      packetize(
+        ES_PID,
+        diiSection(downloadId, 4066, {
+          moduleId: MODULE_ID,
+          moduleSize: size,
+          moduleVersion: 1,
+          name,
+        }),
+      );
+    const bsPart = stream(
+      packetize(0x0000, patSection([[ESS, PMT_PID]])),
+      packetize(PMT_PID, pmtSection(ESS, ES_PID, 0x79)),
+      dii(DOWNLOAD_ID, bs.length, "LOGO-05"),
+      packetize(ES_PID, ddbSection(DOWNLOAD_ID, MODULE_ID, 1, 0, bs)),
+    );
+    for (const packet of packets(bsPart)) collector.feed(packet);
+    expect(collector.collected()).toHaveLength(1);
+    expect(collector.carouselRead).toBe(false);
+
+    const csPart = stream(
+      dii(DOWNLOAD_ID + 1, cs.length, "CS_LOGO-05"),
+      packetize(ES_PID, ddbSection(DOWNLOAD_ID + 1, MODULE_ID, 1, 0, cs)),
+    );
+    for (const packet of packets(csPart)) collector.feed(packet);
+    expect(collector.carouselRead).toBe(true);
+  });
+
   /**
    * **放送の中身は外から作れる。** downloadId を変えた DII を次々に送られても、
    * 組み立て中のものは一定の数までしか溜めない (古いものから捨てる)
@@ -269,6 +362,120 @@ describe("DsmccLogoCollector", () => {
       for (const packet of packets(data)) collector.feed(packet);
     }).not.toThrow();
     expect(collector.collected()).toEqual([]);
+  });
+});
+
+/**
+ * **開き直しても読みかけを捨てない** (`CarouselProgress`)。
+ *
+ * 衛星のカルーセルは十数分に一度まとめて来るだけで、チューナーが2台の衛星では番組表集めやライブに
+ * 途中で取り上げられる。開くたびに一から読んでいた頃は、DII を見たあとで切れるとそれまでの
+ * ブロックが消え、次に開いても DII が来るまで何も組み立てられず、何日経っても揃わなかった
+ */
+describe("読みかけ (CarouselProgress)", () => {
+  const bs = logoModule(0x05, [
+    { logoId: 1, services: [[4, 211]], data: PNG },
+    { logoId: 2, services: [[4, 212]], data: PNG },
+  ]);
+  const cs = logoModule(0x05, [{ logoId: 1, services: [[7, 330]], data: PNG }]);
+  const CS_MODULE_ID = MODULE_ID + 1;
+  const BLOCK = 8;
+  const blocksOf = (moduleId: number, module: Uint8Array) => {
+    const list: Uint8Array[] = [];
+    for (let at = 0, n = 0; at < module.length; at += BLOCK, n++)
+      list.push(
+        packetize(
+          ES_PID,
+          ddbSection(
+            DOWNLOAD_ID,
+            moduleId,
+            1,
+            n,
+            module.subarray(at, at + BLOCK),
+          ),
+        ),
+      );
+    return list;
+  };
+  const head = (dii: boolean) =>
+    stream(
+      packetize(0x0000, patSection([[ESS, PMT_PID]])),
+      packetize(PMT_PID, pmtSection(ESS, ES_PID, 0x79)),
+      ...(dii
+        ? [
+            packetize(
+              ES_PID,
+              diiSection(DOWNLOAD_ID, BLOCK, [
+                {
+                  moduleId: MODULE_ID,
+                  moduleSize: bs.length,
+                  moduleVersion: 1,
+                  name: "LOGO-05",
+                },
+                {
+                  moduleId: CS_MODULE_ID,
+                  moduleSize: cs.length,
+                  moduleVersion: 1,
+                  name: "CS_LOGO-05",
+                },
+              ]),
+            ),
+          ]
+        : []),
+    );
+  const bsBlocks = blocksOf(MODULE_ID, bs);
+  const csBlocks = blocksOf(CS_MODULE_ID, cs);
+  const half = (list: Uint8Array[], first: boolean) => {
+    const mid = Math.ceil(list.length / 2);
+    return first ? list.slice(0, mid) : list.slice(mid);
+  };
+  /** 1回目: DII と前半のブロックで切れる。2回目: DII の無いまま後半のブロック */
+  const first = stream(
+    head(true),
+    ...half(bsBlocks, true),
+    ...half(csBlocks, true),
+  );
+  const second = stream(
+    head(false),
+    ...half(bsBlocks, false),
+    ...half(csBlocks, false),
+  );
+
+  test("読みかけを渡せば、DII の無い2回目でも続きから組み立てる", () => {
+    const progress = new CarouselProgress();
+    const before = new DsmccLogoCollector(progress);
+    for (const packet of packets(first)) before.feed(packet);
+    expect(before.collected()).toEqual([]);
+    expect(before.carouselRead).toBe(false);
+
+    // 開き直し。PAT・PMT はその中継のものを読み直す
+    const after = new DsmccLogoCollector(progress);
+    for (const packet of packets(second)) after.feed(packet);
+    expect(
+      after
+        .collected()
+        .flatMap((logo) => logo.services.map((s) => s.serviceId))
+        .sort(),
+    ).toEqual([211, 212, 330]);
+    // 2回に分けて読んでも、知らされたモジュールが全部揃えば読み切ったことになる
+    expect(after.carouselRead).toBe(true);
+  });
+
+  test("渡さなければ一から (2回目だけでは何も組み立てられない)", () => {
+    const before = new DsmccLogoCollector();
+    for (const packet of packets(first)) before.feed(packet);
+    const after = new DsmccLogoCollector();
+    for (const packet of packets(second)) after.feed(packet);
+    expect(after.collected()).toEqual([]);
+  });
+
+  test("LogoCollector も同じ読みかけを使う", () => {
+    const progress = new CarouselProgress();
+    new LogoCollector(4, progress).feed(first);
+    const collector = new LogoCollector(4, progress);
+    collector.feed(second);
+    expect(collector.satelliteCarouselRead).toBe(true);
+    expect(collector.collected().map((f) => f.networkId)).toEqual([4, 4, 7]);
   });
 });
 
