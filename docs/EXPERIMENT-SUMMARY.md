@@ -1,6 +1,6 @@
 # PIX-DT295 + denpa 実験総括
 
-最終更新: 2026-11-01
+最終更新: 2026-11-03
 
 ## 1. 目的
 
@@ -32,7 +32,9 @@ denpa をフォークして画質プリセットを UI から選べるように�
   - 画面: 放送から -0.4 秒
   - 音声は AAC で再エンコード (esds に AudioSpecificConfig が必要なため)
   - フォールバック: コピーが 0 パケットなら自動でエンコードへ
-- denpa を v2.20.0 に更新 (upstream 116 コミットマージ)
+- denpa を v2.26.0 に更新 (upstream 112 コミットマージ、`origin/main` = `97f47ec3`)
+  - `codecsFor` が `lib/live.ts` へ移動。コーデックの選択が `LiveChoice` (自動/AV1/H.265/H.264/MPEG-2) に統一され、
+    プリセットは同じ選択肢の末尾に並ぶ (`tuner:` キー)
 - 字幕 PID のオプショナル化 (`?` 付き map)
 - デコードエラー無視 + 破損パケット破棄 (`-err_detect ignore_err`, `-fflags +discardcorrupt`)
 - 字幕なしでの再試行 (初回字幕失敗が致命的だった問題を修正)
@@ -51,12 +53,14 @@ denpa をフォークして画質プリセットを UI から選べるように�
 **症状**: CS 視聴時に途切れ (stuttering) が発生。GR/BS は正常。
 
 **調査結果**:
+
 1. CS の H.264 ストリームは SPS/PPS/IDR を **ストリーム開始時のみ送信**（GOP 3 秒以上）
 2. **5.1ch AAC オーディオが corrupt** (`Decode error rate 1 exceeds maximum 0.666667`)
 3. **複数 MPEG-2 プログラムの混在** → PMT 書き換えが不完全
 4. デコードエラーが連続発生 (`Invalid data found when processing input`)
 
 **試した対策 (全て不成功)**:
+
 - IDR キャッシュ + 先送り → mid-GOP フレームの参照関係で効果なし
 - 新規 lease で CS → コピーは字幕 PID で失敗
 - 字幕 PID オプショナル化 → コピーは通るがデコードエラーは残る
@@ -72,6 +76,7 @@ denpa をフォークして画質プリセットを UI から選べるように�
 ### 3.2 CS の途切れ (passthrough 後)
 
 passthrough 後も denpa で CS が視聴できない問題が発生。原因:
+
 - denpa の service filter が CS の複数プログラム TS を正しく処理できない
 - 5.1ch AAC のデコードエラー
 
@@ -92,15 +97,15 @@ passthrough 後も denpa で CS が視聴できない問題が発生。原因:
 
 ## 4. 現在の構成
 
-| コンポーネント | 状態 |
-|---|---|
-| Raspberry Pi 5 | 稼働中 |
-| tuner-agent | dt295-agent:local (0.3.0-dt295) |
-| denpa | denpa-fork:prod (v2.20.0 + DT295 パッチ) |
-| pix-ts-legacy | v0.1.4 (upstream merge 済み) |
-| CS プロファイル | passthrough (MPEG-2) |
-| GR/BS プロファイル | 720p8m (H.264, 7,644 kbps) |
-| DENPA_LIVE_COPY | 1 (有効) |
+| コンポーネント     | 状態                                     |
+| ------------------ | ---------------------------------------- |
+| Raspberry Pi 5     | 稼働中                                   |
+| tuner-agent        | dt295-agent:local (0.3.2-dt295)          |
+| denpa              | denpa-fork:prod (v2.26.0 + DT295 パッチ) |
+| pix-ts-legacy      | v0.1.4 (upstream merge 済み)             |
+| CS プロファイル    | passthrough (MPEG-2)                     |
+| GR/BS プロファイル | 720p8m (H.264, 7,644 kbps)               |
+| DENPA_LIVE_COPY    | 1 (有効)                                 |
 
 ## 5. 推奨事項
 

@@ -1,5 +1,3 @@
-using Denpa.Agent;
-
 namespace Denpa.Agent.Tests;
 
 /*
@@ -7,8 +5,8 @@ namespace Denpa.Agent.Tests;
  *
  * 切ったあと (`Sink.Push` の `MaxLag`) に抜ける知らせが届かず、選局の利用者に残っていた。
  * そのチューナーは誰も読んでいないのに同じ優先度で塞がり続け、実機では番組表集めが
- * 「BS のチューナーに空きがありません」と断られ続け、衛星の局ロゴは残りの1台を
- * 30分ごとに番組表集めに取り上げられて読み切れなかった。
+ * 「BS のチューナーに空きがありません」と断られ続け、衛星の局ロゴは残りの 1 台を
+ * 30 分ごとに番組表集めに取り上げられて読み切れなかった。
  */
 public class SinkTests
 {
@@ -16,7 +14,7 @@ public class SinkTests
     public async Task 追いつかずに切ったあとでも_去れば抜ける()
     {
         var left = 0;
-        var sink = new Sink("logo BS/BS15_0", 1, _ => left++);
+        var sink = new Sink("logo BS/BS15:16625", 1, _ => left++);
         // 読まないまま溜める。上限を超えたところで切られる
         var chunk = new byte[1024 * 1024];
         for (var i = 0; i * chunk.Length <= TunerPool.MaxLag; i++) sink.Push(chunk);
@@ -24,16 +22,33 @@ public class SinkTests
 
         sink.Leave();
         await Assert.That(left).IsEqualTo(1);
-        // 2回去っても1回だけ
+        // 2 回去っても 1 回だけ
         sink.Leave();
         await Assert.That(left).IsEqualTo(1);
+    }
+
+    /// <summary>取り上げられた利用者には、取り上げた相手の名乗りを返す。記録から相手を追えるように (#1939)</summary>
+    [Test]
+    public async Task 取り上げられたら相手の名乗りを理由に入れる()
+    {
+        var sink = new Sink("logo BS/BS15:16625", 4, _ => { });
+        sink.Fail(TunerPool.PreemptedBy("epg BS03:16432"));
+        await Assert.That(sink.FailedWith).IsEqualTo("優先度の高い要求 (epg BS03:16432) にチューナーを譲りました");
+    }
+
+    /// <summary>取り上げられたのか、選局できなかったのかを見分ける。送る前に取り上げられたら 409 で返す (Program.cs)</summary>
+    [Test]
+    public async Task 取り上げられた理由を見分ける()
+    {
+        await Assert.That(TunerPool.IsPreempted(TunerPool.PreemptedBy("rec 12"))).IsTrue();
+        await Assert.That(TunerPool.IsPreempted("同期しません")).IsFalse();
     }
 
     [Test]
     public async Task ふつうに去っても1回だけ抜ける()
     {
         var left = 0;
-        var sink = new Sink("epg BS15_0", 3, _ => left++);
+        var sink = new Sink("epg BS15:16625", 3, _ => left++);
         sink.Leave();
         sink.Leave();
         await Assert.That(left).IsEqualTo(1);
