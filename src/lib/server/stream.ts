@@ -60,7 +60,7 @@ let lowerFailed = false;
  * 非力な機材 (Raspberry Pi 5 など) では、録画のエンコードがライブの変換 (libx264 ultrafast) と
  * CPU を取り合い、ライブのコマが落ちていた。録画のエンコードは急がないので、ライブに譲る。
  * 他に何も動いていなければ空いた CPU をそのまま使うので、速さは変わらない。GPU でエンコードするときも
- * 同じ道を通るが、下がるのは CPU の順番だけなので困らない。
+ * 同じ処理を通るが、下がるのは CPU の順番だけなので困らない。
  *
  * - Linux では `setpriority`。起こした直後に下げるので、ffmpeg が後から作るスレッドも引き継ぐ
  * - Windows では libuv が 19 を IDLE_PRIORITY_CLASS に当てる
@@ -98,7 +98,7 @@ export interface RunResult {
 /**
  * 外の道具を1回動かして、終わるまで待つ。
  *
- * ffmpeg / ffprobe / CM検出の道具を呼ぶところで同じ処理をあちこちで書いていた —
+ * ffmpeg / ffprobe を呼ぶところで同じ処理をあちこちで書いていた —
  * 起こす・出力を読み切る・中止 (AbortSignal) や時間切れで殺す・待つ。
  * ここに寄せて、**読み切る前に `exited` を待たない** (パイプが詰まって固まる) など
  * の決まりごとを1箇所で守る。
@@ -120,7 +120,7 @@ export async function run(
      */
     onStdout?: (chunk: Uint8Array) => void;
     /**
-     * 標準エラーを溜めずに1行ずつ渡す。コマごとに1行出させるもの (CM検出の `scdet`) 向け。
+     * 標準エラーを溜めずに1行ずつ渡す。コマごとに行が出るもの (コマ数の実測の `signalstats`・`-progress`) 向け。
      * `stderr` より優先し、返る `stderr` は末尾の数行だけ (落ちた理由を読むため)
      */
     onStderrLine?: (line: string) => void;
@@ -224,7 +224,7 @@ export async function run(
 
 /**
  * **ffmpeg の出口をそのまま応答の本文にする** (音声だけの取り出し。`stdout` に流させる)。
- * 録画のその場の変換・詰め替えは、降りたときの次の手と詰まりの見張りを足した `playback.transcodeBody`
+ * 録画のその場の変換・詰め替えは、降りたときの次の手と詰まりの検出を足した `playback.transcodeBody`
  *
  * - 読まれたぶんしか読み出さない (`pull`)。相手が読まなければ出口が詰まり、ffmpeg も止まる
  * - 閉じられたら (`cancel`) ffmpeg を殺す

@@ -39,7 +39,7 @@ describe("字幕の取り出し方", () => {
   /** 字幕はデコードせずに写す (`S_ARIBSUB`)。デコードするのは denpa なので、ffmpeg に字幕のデコーダは要らない */
   test("デコードせずに写す", () => {
     const args = captionOutput("0:p:1024", 0);
-    expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+    expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
     expect(args).not.toContain("-sub_type");
     expect(args).not.toContain("-filter_complex");
   });
@@ -88,7 +88,7 @@ describe("放送そのままの経路の字幕", () => {
     // 出口はエンコードの経路と同じ (Matroska を 3 番目の出口へ)
     expect(args.slice(-2)).toEqual(["matroska", "pipe:3"]);
     // 字幕はデコードせずに写す (デコードするのは denpa)。字幕を描く指定は要らない
-    expect(args.join(" ")).toContain("-map 0:p:1024:s:0 -c:s copy");
+    expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
     expect(args).not.toContain("-sub_type");
   });
 
@@ -338,7 +338,7 @@ describe("TrackList", () => {
     }
     expect(list.tracks.map((t) => t.label)).toEqual([
       "字幕 (日本語)",
-      "字幕2 (英語)",
+      "字幕 2 (英語)",
     ]);
     expect(list.tracks.map((t) => t.index)).toEqual([0, 1]);
   });
@@ -422,7 +422,7 @@ describe("アプリ向けの字幕 API", () => {
     expect([...out.subarray(13)]).toEqual([1, 2, 3]);
   });
 
-  test("字幕と、選べる字幕の通知だけを通す", async () => {
+  test("字幕と、選べる字幕の通知と時計の通知だけを通す", async () => {
     const stream = captionFeed((out) => {
       out.send(CHANNEL.rawTs, 0n, new Uint8Array(188));
       out.send(
@@ -437,18 +437,30 @@ describe("アプリ向けの字幕 API", () => {
       );
       out.send(CHANNEL.captionText, 90_000n, new Uint8Array([9]));
       out.send(CHANNEL.data, 0n, json({}));
+      out.send(CHANNEL.control, 0n, json({ type: "hybridcast", apps: [] }));
       out.close();
       return () => {};
     });
     const body = new Uint8Array(await new Response(stream).arrayBuffer());
+    const view = new DataView(body.buffer);
     const kinds: number[] = [];
-    for (
-      let at = 0;
-      at < body.length;
-      at += 4 + new DataView(body.buffer).getUint32(at)
-    )
+    const notices: string[] = [];
+    for (let at = 0; at < body.length; at += 4 + view.getUint32(at)) {
       kinds.push(body[at + 4]!);
-    expect(kinds).toEqual([CHANNEL.control, CHANNEL.captionText]);
+      if (body[at + 4] !== CHANNEL.control) continue;
+      const payload = body.subarray(at + 13, at + 4 + view.getUint32(at));
+      notices.push(
+        (JSON.parse(new TextDecoder().decode(payload)) as { type: string })
+          .type,
+      );
+    }
+    expect(kinds).toEqual([
+      CHANNEL.control,
+      CHANNEL.control,
+      CHANNEL.captionText,
+    ]);
+    // アプリが映しているコマの放送時刻を出すのに使う (実況のコメントを合わせる。docs/api.md)
+    expect(notices).toEqual(["clock", "captions"]);
   });
 
   // 映像が終わった (セッションが畳まれた・エンコードできなくなった) ら、字幕 API も閉じる
