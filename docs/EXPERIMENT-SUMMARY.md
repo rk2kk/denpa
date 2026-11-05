@@ -35,6 +35,8 @@ denpa をフォークして画質プリセットを UI から選べるように�
 - denpa を v2.31.0 に更新 (upstream 507 コミットマージ、`origin/main` = `ff7711ed`)
   - 公式エージェントが DT295 を常駐方式で扱うようになった (#2173)。ただしオンボード変換は無いので、
     画質プリセットは引き続き `dt295-agent` (pix-ts-legacy) 側で担う
+  - v2.31 のエージェントは相互 TLS と合言葉 (`#pair=`) が必須。このフォークは平文 http の
+    エージェントも許す分岐を足し、`TUNER_AGENT_URL: http://tuner-agent:25252` で動かす
   - `codecsFor` が `lib/live.ts` へ移動。コーデックの選択が `LiveChoice` (自動/AV1/H.265/H.264/MPEG-2) に統一され、
     プリセットは同じ選択肢の末尾に並ぶ (`tuner:` キー)
 - 字幕 PID のオプショナル化 (`?` 付き map)

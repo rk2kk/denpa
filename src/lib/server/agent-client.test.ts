@@ -47,8 +47,11 @@ describe("parseAgentUrl", () => {
     });
   });
 
-  test("http:// は誤り (平文では繋がない)", () => {
-    expect(() => parseAgentUrl("http://tuner-agent:25252")).toThrow("https://");
+  test("http:// も読む (このフォークの DT295 エージェントは平文)", () => {
+    expect(parseAgentUrl("http://tuner-agent:25252")).toEqual({
+      origin: "http://tuner-agent:25252",
+      pair: null,
+    });
   });
 
   test("ホストが空なら、合言葉を出さずに誤りにする (アドレスを取れなかったインストールの起動スクリプト)", () => {
