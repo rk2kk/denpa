@@ -43,9 +43,13 @@ export function parseAgentUrl(raw: string): AgentTarget {
   const hash = raw.indexOf("#");
   const base = (hash < 0 ? raw : raw.slice(0, hash)).replace(/\/+$/, "");
   const fragment = hash < 0 ? "" : raw.slice(hash + 1);
-  if (!/^https:\/\//i.test(base)) {
+  /*
+   * **このフォークは平文 http も許す。** DT295 の dt295-agent は TLS も
+   * 合言葉 (denpa-pair) も喋らないため。https のときだけ相互 TLS で組む。
+   */
+  if (!/^https?:\/\//i.test(base)) {
     throw new Error(
-      "TUNER_AGENT_URL は https:// で書きます (エージェントとは TLS で繋ぎます。docs/agent.md)",
+      "TUNER_AGENT_URL は https:// (または平文の http://) で書きます (docs/agent.md)",
     );
   }
   if (!URL.canParse(base) || new URL(base).hostname === "") {
@@ -398,7 +402,14 @@ export async function agentFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   const target = parseAgentUrl(config.agentUrl);
+  /*
+   * **平文 http のエージェントは、このフォークではそのまま許す。**
+   * 上流は相互 TLS と合言葉 (denpa-pair) を必須にしたが、DT295 の
+   * dt295-agent は平文の HTTP しか喋らない。https のときだけ従来どおり組む。
+   */
+  const plain = target.origin.startsWith("http://");
   const attempt = async (): Promise<Response> => {
+    if (plain) return fetch(`${target.origin}${path}`, init);
     const ca = agentCert();
     if (ca === null) throw new NeedsPairing();
     try {
@@ -413,7 +424,7 @@ export async function agentFetch(
   };
   try {
     const res = await attempt();
-    if (res.status !== 403 || target.pair === null) return res;
+    if (plain || res.status !== 403 || target.pair === null) return res;
     if (!(await notPaired(res))) return res;
   } catch (error) {
     if (!(error instanceof NeedsPairing)) throw error;
