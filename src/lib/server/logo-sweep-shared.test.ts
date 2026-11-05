@@ -13,6 +13,8 @@ import {
   stream,
 } from "@danything/arib/synth";
 
+import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+
 /**
  * 「ロゴをいますぐ集める」を、**BS と CS で共通のチューナー 2 台**で回す (#1939)。
  *
@@ -106,6 +108,7 @@ function pick(after: string[]): Tuner | undefined {
 
 const agent = Bun.serve({
   port: 0,
+  tls: fakeAgentTls(),
   fetch: (request) => {
     const url = new URL(request.url);
     if (url.pathname === "/denpa/stream") {
@@ -164,7 +167,8 @@ const { config } = await import("./config");
 const root = mkdtempSync(join(tmpdir(), "denpa-logo-sweep-shared-"));
 config.dbPath = join(root, "denpa.db");
 config.dataDir = root;
-config.agentUrl = `http://127.0.0.1:${agent.port}`;
+config.agentUrl = fakeAgentUrl(agent.port!);
+trustFakeAgent();
 
 const { orm } = await import("./db");
 const { services } = await import("./schema");
@@ -212,7 +216,7 @@ describe("BS と CS で共通のチューナー 2 台で「ロゴをいますぐ
     for (const s of STATIONS)
       rmSync(join(root, "logos", `${serviceKey(s.network, s.sid)}.png`));
     opened.length = 0;
-    // 1 台は番組表集めが使っている。空きは 1 台なので 1 つずつ回る
+    // 1 台は番組表の取得が使っている。空きは 1 台なので 1 つずつ回る
     tuners = [
       { channel: null, users: [] },
       {

@@ -1,7 +1,9 @@
 import type { APIRequestContext, Page } from "@playwright/test";
 
 import {
+  captureSockets,
   expect,
+  feedNotice,
   goto,
   openSettings,
   syncEpg,
@@ -65,7 +67,7 @@ test.describe("ライブの自動", () => {
     ).toHaveAttribute("aria-checked", "true");
   });
 
-  test("MPEG-2 をデコードできない端末では、断り書きを出さずに AV1 で観る", async ({
+  test("MPEG-2 をデコードできない端末では、断り書きを出さずに H.264 で観る (家の中は MPEG-2 の次が H.264)", async ({
     page,
   }) => {
     // worker へ描く先を渡せない端末 (OffscreenCanvas の無い古い Safari)
@@ -74,21 +76,48 @@ test.describe("ライブの自動", () => {
       delete (HTMLCanvasElement.prototype as any).transferControlToOffscreen;
     });
     await openLive(page);
-    await expect(page.getByTestId("live-codec")).toContainText("自動 (AV1)");
+    await expect(page.getByTestId("live-codec")).toContainText("自動 (H.264)");
     await expect(page.getByTestId("live-raw")).toHaveCount(0);
     await expect(page.getByTestId("live-warning")).toHaveCount(0);
   });
 
-  test("AV1 も受け取れない端末では H.264 で観る", async ({ page }) => {
+  test("サーバが塊を捨てたと知らせてきたら、家の中の MPEG-2 から段を下げた変換に移り、メニューに高さを出す", async ({
+    page,
+  }) => {
+    await captureSockets(page);
+    await openLive(page);
+    await expect(page.getByTestId("live-raw")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByTestId("live-codec")).toContainText("自動 (MPEG-2)");
+    // 選局の直後 (`adapt.ts` の `GRACE`) は数えないので、下がるまで送り続ける。届くたびに新しい通知として数える
+    await expect(async () => {
+      await feedNotice(page, [
+        { type: "pace", backlog: 0, dropped: 3, speed: null },
+      ]);
+      await expect(page.getByTestId("live-warning")).toContainText(
+        "回線が細いため",
+        { timeout: 1_000 },
+      );
+    }).toPass({ timeout: 20_000 });
+    // サーバが選んだコーデック (GPU が無いのでソフトウェアの H.264) と段の高さ
+    await expect(page.getByTestId("live-codec")).toContainText(
+      /自動 \(H\.264 \d+p\)/,
+      { timeout: 30_000 },
+    );
+    await expect(page.getByTestId("live-raw")).toHaveCount(0);
+  });
+
+  test("H.264 も受け取れない端末では AV1 で観る", async ({ page }) => {
     await page.addInitScript(() => {
       // oxlint-disable-next-line typescript/no-explicit-any -- 端末に無いことにする
       delete (HTMLCanvasElement.prototype as any).transferControlToOffscreen;
       const can = MediaSource.isTypeSupported.bind(MediaSource);
       MediaSource.isTypeSupported = (type) =>
-        !type.includes("av01") && can(type);
+        !type.includes("avc1") && can(type);
     });
     await openLive(page);
-    await expect(page.getByTestId("live-codec")).toContainText("自動 (H.264)");
+    await expect(page.getByTestId("live-codec")).toContainText("自動 (AV1)");
   });
 
   test("選んだものは家の中でもそのまま使い、開き直しても覚えている", async ({

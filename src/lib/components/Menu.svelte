@@ -48,8 +48,8 @@
   import type { Snippet } from "svelte";
 
   /**
-   * **開いたり閉じたりするメニュー。** 画面のメニューはどれもこれ1つで作る
-   * (録画の詳細の「その他…」・ホームの操作の1行の「⋯」・番組表の日付やジャンル・映像の上の選択肢・下のタブの「その他」)。
+   * **開いたり閉じたりするメニュー。** 画面のメニューはどれもこれ 1 つで作る
+   * (録画の詳細の「その他…」・ホームの操作の 1 行の「⋯」・番組表の日付やジャンル・映像の上の選択肢・下のタブの「その他」)。
    *
    * 枠はブラウザの `popover` (`manual`)。最前面 (top layer) に出るので、後ろの行が透けたり
    * (#481)、全画面の舞台に隠れたりしない。引き金は `popovertarget` で結ぶので、
@@ -80,6 +80,7 @@
     lazy = false,
     class: className = "",
     testid,
+    onclosed,
   }: {
     open?: boolean;
     /** 引き金。渡される属性を `<button>` に広げる */
@@ -96,12 +97,17 @@
      */
     nav?: boolean;
     /**
-     * 中身を開くまで作らない (`filled`)。一覧の行ごとに置くメニュー用 — 開かないメニューの中身まで、
+     * 中身を開くまで作らない (`filled`)。一覧の行ごとに置くメニュー用。開かないメニューの中身まで、
      * 一覧を開いた瞬間に作らないように。中身の状態を開く前から読むメニュー (⚙ など) では使わない
      */
     lazy?: boolean;
     class?: string;
     testid?: string | undefined;
+    /**
+     * 閉じ終えたとき (引っ込む動きが済んで、枠が消えてから)。中身を初めの姿に戻すのはここ。
+     * 閉じた瞬間に替えると、引っ込む間に替わった中身が一瞬見える (⚙ の選択肢の並びから閉じたとき)
+     */
+    onclosed?: (() => void) | undefined;
   } = $props();
 
   const uid = $props.id();
@@ -185,6 +191,14 @@
           const target = byPointer ? element : fromEnd ? list.at(-1) : list[0];
           (target ?? element).focus({ preventScroll: true });
         }
+      } else {
+        // 引っ込む動き (app.css の `.menu`) が済むのを待つ。`getAnimations` は動きを始めさせてから返す。
+        // 動きの無いブラウザ・動きを止めた端末ではすぐ
+        void Promise.allSettled(
+          element.getAnimations().map((animation) => animation.finished),
+        ).then(() => {
+          if (!element.matches(":popover-open")) onclosed?.();
+        });
       }
       byPointer = false;
       fromEnd = false;
@@ -226,7 +240,7 @@
         return;
       place();
     };
-    // 中身が入れ替わったら置き直す (⚙ の選択肢の並びに入ると高さが変わる)。**置いた直後の大きさと同じなら何もしない** —
+    // 中身が入れ替わったら置き直す (⚙ の選択肢の並びに入ると高さが変わる)。**置いた直後の大きさと同じなら何もしない**。
     // 置き直しが `max-height` を書き換えたぶんで、また置き直すことを繰り返さない
     const resized = new ResizeObserver(() => {
       if (content !== null && sizeOf(content) !== placed) place();

@@ -9,7 +9,7 @@
  * - 映像 … 256x144 の**I フレームだけ**。マクロブロックごとに色 (DC) だけを置き、
  *   AC は持たない (EOB だけ)。コマごとに縞が流れるので、**映像が進んでいるか**を
  *   画素で見分けられる。インタレの印も立て、輝度は上下のフィールドで別の時刻の映像にする (フィールド DCT)
- * - 音声 … 48kHz ステレオの AAC-LC の**無音**を ADTS で。1コマ 7 バイト
+ * - 音声 … 48kHz ステレオの AAC-LC の**無音**を ADTS で。1 コマ 7 バイト
  *
  * 規格は ISO/IEC 13818-2 (映像) と 13818-7 / 14496-3 (AAC)。表の出どころは
  * 各関数の頭に書いてある。
@@ -19,9 +19,9 @@ import { concatBytes } from "./bytes.js";
 import { PACKET, SYNC } from "./psi.js";
 import { putPcr } from "./synth.js";
 
-/** 29.97 コマ/秒の1コマ (90kHz)。放送と同じ */
+/** 29.97 コマ/秒の 1 コマ (90kHz)。放送と同じ */
 export const FRAME_TICKS = 3003;
-/** AAC の1コマ (1024 標本 @48kHz を 90kHz で) */
+/** AAC の 1 コマ (1024 標本 @48kHz を 90kHz で) */
 export const AUDIO_TICKS = 1920;
 
 /** 映像の大きさ。**16 の倍数** (マクロブロックで割り切る) */
@@ -84,7 +84,7 @@ const DC_CHROMA: [number, number][] = [
   [0b11111110, 8],
 ];
 
-/** 1ブロック。**DC の差分だけ書いて、すぐ EOB** (表 B-14 の '10') */
+/** 1 ブロック。**DC の差分だけ書いて、すぐ EOB** (表 B-14 の '10') */
 function block(bits: Bits, diff: number, table: [number, number][]): void {
   const size = diff === 0 ? 0 : Math.floor(Math.log2(Math.abs(diff))) + 1;
   const [code, length] = table[size]!;
@@ -95,9 +95,9 @@ function block(bits: Bits, diff: number, table: [number, number][]): void {
 }
 
 /**
- * n コマ目の色 (Y, Cb, Cr)。**列と時刻で縞を流す** — 進んでいれば画素が変わる。
+ * n コマ目の色 (Y, Cb, Cr)。**列と時刻で縞を流す。** 進んでいれば画素が変わる。
  * 輝度は**フィールドごとの時刻で**流す (下のフィールドは上の 1/59.94 秒後の位置)。フィールドごとに
- * 出せているか (bob) と、出す間合いを画素で見分けられる。1フィールドで 16 進み、30 コマ (60 フィールド)
+ * 出せているか (bob) と、出す間合いを画素で見分けられる。1 フィールドで 16 進み、30 コマ (60 フィールド)
  * でちょうど一周するので、偽の放送が 30 コマを繰り返しても段差が出ない
  */
 function colorAt(
@@ -111,7 +111,7 @@ function colorAt(
 }
 
 /**
- * I フレームを1枚。**毎枚、系列ヘッダから書く** — どこから受け取っても頭からデコードできる
+ * I フレームを 1 枚。**毎枚、系列ヘッダから書く。** どこから受け取っても頭からデコードできる
  * (放送は GOP ごとに書く。試験ではその手間を省く)。
  *
  * @param n 何枚目か。色と time_code に使う
@@ -168,7 +168,7 @@ export function mpeg2Frame(
 
   // picture_header (6.2.3)
   bits.startCode(0x00);
-  bits.put(0, 10); // temporal_reference (GOP ごとに1枚なので 0)
+  bits.put(0, 10); // temporal_reference (GOP ごとに 1 枚なので 0)
   bits.put(1, 3); // picture_coding_type = I
   bits.put(0xffff, 16); // vbv_delay
   bits.put(0, 1); // extra_bit_picture
@@ -191,7 +191,7 @@ export function mpeg2Frame(
   bits.put(0, 1); // composite_display_flag
 
   for (let row = 0; row < mbHeight; row++) {
-    // 1行を1スライスに。予測は行の頭で 128 に戻る (7.2.1)
+    // 1 行を 1 スライスに。予測は行の頭で 128 に戻る (7.2.1)
     bits.startCode(row + 1);
     bits.put(8, 5); // quantiser_scale_code (DC だけなので効かない)
     bits.put(0, 1); // extra_bit_slice
@@ -199,7 +199,7 @@ export function mpeg2Frame(
     for (let col = 0; col < mbWidth; col++) {
       bits.put(1, 1); // macroblock_address_increment = 1
       bits.put(1, 1); // macroblock_type = intra
-      bits.put(1, 1); // dct_type = 1 (フィールド DCT: 輝度の上2ブロックが上のフィールド、下2つが下)
+      bits.put(1, 1); // dct_type = 1 (フィールド DCT: 輝度の上 2 ブロックが上のフィールド、下 2 つが下)
       const [top, cb, cr] = color(col, row, n, 0);
       const [bottom] = color(col, row, n, 1);
       for (let i = 0; i < 4; i++) {
@@ -217,10 +217,10 @@ export function mpeg2Frame(
 }
 
 /**
- * AAC-LC の無音を1コマ、ADTS の頭付きで。48kHz・ステレオ (channel_configuration 2)。
+ * AAC-LC の無音を 1 コマ、ADTS の頭付きで。48kHz・ステレオ (channel_configuration 2)。
  *
- * 中身は CPE が1つ: 両耳とも `max_sfb = 0` (係数を1つも持たない) で、あとは END。
- * 55 ビットなので7バイトに収まる (14496-3 の raw_data_block)
+ * 中身は CPE が 1 つ: 両耳とも `max_sfb = 0` (係数を 1 つも持たない) で、あとは END。
+ * 55 ビットなので 7 バイトに収まる (14496-3 の raw_data_block)
  */
 export function silentAac(): Uint8Array {
   const body = new Bits();
@@ -256,7 +256,7 @@ export function silentAac(): Uint8Array {
   return Uint8Array.from([...head.bytes(), ...payload]);
 }
 
-/** PTS/DTS の5バイト (2.4.3.7)。頭の4ビットは '0010' (PTS だけ) */
+/** PTS/DTS の 5 バイト (2.4.3.7)。頭の 4 ビットは '0010' (PTS だけ) */
 function stamp(pts: number): number[] {
   const value = pts % 2 ** 33;
   const high = Math.floor(value / 2 ** 30) & 0x07;
@@ -314,7 +314,7 @@ export function packetizePes(
     const withPcr = at === 0 && pcr !== null;
     const rest = data.length - at;
     /*
-     * 適応フィールドの長さ。PCR を載せるなら旗1バイト + 6バイト。**中身が
+     * 適応フィールドの長さ。PCR を載せるなら旗 1 バイト + 6 バイト。**中身が
      * 足りないときもここを伸ばして詰める** (中身を 0xFF で埋めると PES の続きに見える)
      */
     const least = withPcr ? 7 : 0;

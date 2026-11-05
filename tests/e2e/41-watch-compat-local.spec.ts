@@ -22,7 +22,7 @@ import {
  *
  * 偽 ffmpeg がエンコードする録画は中身が無いので、作り置きの fMP4 (AV1 + Opus) から組んだ Matroska を端末に
  * 保存したことにする (`tests/fake/mkv-clip.ts`。IndexedDB に直に置く。置き方は `offline-db.ts` と同じ)。
- * サーバへはリクエストしない (`/stream` を1度も読まない) ことも見る
+ * サーバへはリクエストしない (`/stream` を 1 度も読まない) ことも見る
  */
 
 /** 操作バーの「m:ss / m:ss」の左 (いまの位置。秒) */
@@ -64,7 +64,8 @@ test("端末に保存した録画も canvas に描き、飛ぶ・CM 飛ばし・
     async ({ id, base64, caption }) => {
       const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open("denpa-offline", 1);
+        // バージョンは指定しない (画面が先に開いて上げている。`offline-db.ts` の VERSION)
+        const req = indexedDB.open("denpa-offline");
         req.onupgradeneeded = () => {
           for (const store of ["videos", "outbox", "resume"])
             if (!req.result.objectStoreNames.contains(store))

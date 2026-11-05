@@ -4,7 +4,9 @@ import type { Page } from "@playwright/test";
 
 import { MX } from "../fake/services";
 import {
+  captureSockets,
   expect,
+  feedNotice,
   goto,
   openSettings,
   pickCodec,
@@ -92,7 +94,7 @@ test.describe("互換モード", () => {
     // ライブは再生の前に出す注意も持っている (閉じたまま)。開いているほうを見る
     const notice = page.locator('[data-testid="drive-notice"][open]');
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText("走行中は画面を見ないでください");
+    await expect(notice).toContainText("運転中は画面を見ないでください");
     // フォーカスは箱に置き (取消に枠が付かない)、Tab でボタンへ進む
     await expect(notice.locator(".modal-box")).toBeFocused();
     await page.keyboard.press("Tab");
@@ -196,6 +198,64 @@ test.describe("互換モード", () => {
       });
     });
 
+    /*
+     * **互換モードでも、回線が細ければ「自動」は段を下げる** (`live-player.svelte.ts` の `adapt`)。下げた先のコーデックは
+     * サーバが選ぶので、canvas に描けるものだけを `playable` に並べる (H.265 は描かない)。GPU が無ければ下げた先は
+     * ソフトウェアの H.264 なので、H.264 を描ける端末のふりをする (Playwright の Chromium は描けないことがある。
+     * 段を下げた後に描くところは見ない)
+     */
+    test("回線が細いと、互換モードでも描ける形式だけを渡して段を下げる", async ({
+      page,
+    }) => {
+      await captureSockets(page);
+      await page.addInitScript(() => {
+        const real = VideoDecoder.isConfigSupported.bind(VideoDecoder);
+        VideoDecoder.isConfigSupported = (config) =>
+          config.codec.startsWith("avc1")
+            ? Promise.resolve({ supported: true, config })
+            : real(config);
+        // 送った指示を控える
+        const sent = window as unknown as { __sent: string[] };
+        sent.__sent = [];
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function (data) {
+          if (typeof data === "string") sent.__sent.push(data);
+          send.call(this, data);
+        };
+      });
+      // 自動で開く (ほかのスペックは H.264 を選んだ端末として開く)
+      await page.context().clearCookies();
+      await goto(page, "/live");
+      await page.getByTestId("drive-notice-accept").click();
+      await expect(page.getByTestId("live-title")).toBeVisible();
+      await expect(
+        page.locator('[data-testid="live-raw"][data-input="fmp4"]'),
+      ).toBeVisible({ timeout: 30_000 });
+
+      // 選局の直後 (`adapt.ts` の `GRACE`) は数えないので、下がるまで送り続ける
+      await expect(async () => {
+        await feedNotice(page, [
+          { type: "pace", backlog: 0, dropped: 3, speed: null },
+        ]);
+        await expect(page.getByTestId("live-warning")).toContainText(
+          "回線が細いため",
+          { timeout: 1_000 },
+        );
+      }).toPass({ timeout: 20_000 });
+      const lowered = (
+        await page.evaluate(
+          () => (window as unknown as { __sent: string[] }).__sent,
+        )
+      )
+        .map((text) => JSON.parse(text) as Record<string, unknown>)
+        .filter((command) => command["type"] === "tune")
+        .at(-1);
+      expect(lowered?.["rung"]).toBeGreaterThanOrEqual(1);
+      expect(lowered?.["raw"]).toBe(false);
+      expect(lowered?.["playable"]).toContain("h264");
+      expect(lowered?.["playable"]).not.toContain("hevc");
+    });
+
     test("⚙ で明示して切れば、テスラでも <video> で観る", async ({ page }) => {
       // 触らなくても入っているので、まず運転中の注意が出る
       await goto(page, "/live");
@@ -240,7 +300,7 @@ test.describe("互換モードの追っかけ", () => {
     writeFileSync(stack.liveFmp4File, "");
   });
   test.afterEach(async ({ request, stack }) => {
-    // 地上波の偽番組は30分あるので、止めないと次のテストまでチューナーを塞ぐ
+    // 地上波の偽番組は 30 分あるので、止めないと次のテストまでチューナーを塞ぐ
     if (programId !== null) {
       await request.post("/guide?/cancel", {
         form: { programId: String(programId) },
@@ -259,7 +319,7 @@ test.describe("互換モードの追っかけ", () => {
     test.setTimeout(180_000);
     /*
      * **録っている最中に観る。** 追っかけは録っている最中だけで、録り終えた録画は観る画面へ送られる
-     * (25-chase と同じく、地上波のいまの番組 (偽番組は30分) を録る)。エンコードは失敗させておく
+     * (25-chase と同じく、地上波のいまの番組 (偽番組は 30 分) を録る)。エンコードは失敗させておく
      * (止めたあとエンコードできると元の TS が無くなり、リクエストし直しが断られる)
      */
     writeFileSync(stack.failFile, "1");
@@ -338,14 +398,14 @@ test.describe("互換モードの追っかけ", () => {
     );
     await page.keyboard.press("ArrowLeft");
     /*
-     * **戻った先 (10秒前) の近くに来たのを見てから数える。** 新しいストリームが届くまでは、手元に残った前の
+     * **戻った先 (10 秒前) の近くに来たのを見てから数える。** 新しいストリームが届くまでは、手元に残った前の
      * ストリームを描き続け、再生位置もそれで進む (RawEngine を開き直すのは届いてから)。混んでいて届くのが
      * 遅れると、そのぶんのコマを新しいストリームのものと取り違え、前のストリームの位置を「後」として読んでいた
      */
     await expect
       .poll(where, { timeout: 15_000 })
       .toBeLessThan(Math.max(0, before - 10) + 3);
-    // リクエストした所へ戻り、そこから進む。3秒後も、前の再生位置より手前にある (前のストリームの秒を足していない)
+    // リクエストした所へ戻り、そこから進む。3 秒後も、前の再生位置より手前にある (前のストリームの秒を足していない)
     await expect
       .poll(shown, { timeout: 15_000 })
       .toBeGreaterThan((await shown()) + 30);

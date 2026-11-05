@@ -1,5 +1,5 @@
 /**
- * BML の CSS を読む。**ブラウザの CSS には渡さない** — 規則を読んで自分で重ね合わせ
+ * BML の CSS を読む。**ブラウザの CSS には渡さない。** 規則を読んで自分で重ね合わせ
  * ([style.ts](style.ts))、確かめた値だけを要素の style に書く ([render.ts](render.ts))。
  *
  * 放送が使うセレクタは `*`・`要素名`・`.class`・`#id`・`要素名.class` (と規格の `:focus`・
@@ -89,7 +89,7 @@ function stripComments(text: string): string {
  * `open` から次の `close` までを `by` に置き換える (閉じないものは残す)。正規表現の `[\s\S]*?` は
  * 閉じない `open` が並ぶと 2 乗かかるので、位置で探す
  */
-function replaceBlocks(
+export function replaceBlocks(
   text: string,
   open: string,
   close: string,

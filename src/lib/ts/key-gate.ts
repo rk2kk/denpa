@@ -10,15 +10,20 @@
  * キーフレームの手前から**音だけ先に鳴らし、映像はキーフレームで止まったまま**になります
  * (始める位置が手前にずれるぶん、遅延も伸びる)。
  *
- * 渡さなければ、どちらも始める位置がキーフレームになります (`at`)。待つ長さは変わりません —
- * 映せる1枚目はどのみちキーフレームです
+ * 渡さなければ、どちらも始める位置がキーフレームになります (`at`)。待つ長さは変わりません。
+ * 映せる 1 枚目はどのみちキーフレームです
  */
-import { type Fmp4Track, readFragment, readInit } from "./fmp4";
+import {
+  type Fmp4Sample,
+  type Fmp4Track,
+  readFragment,
+  readInit,
+} from "./fmp4";
 
 /**
  * キーフレームを待つ上限 (秒。映像の尺で数える)。**待ちきりにはしない。**
  *
- * キーフレームの間隔は約 1 秒 (`-g 60` で 60 コマごと。ライブはインタレ解除で 59.94 コマ/秒にする。`server/live.ts`)。印 (`sample_is_non_sync_sample`) が
+ * キーフレームの間隔は約 1 秒 (`-g` にコマの数。段 0 はインタレ解除で 59.94 コマ/秒にして 60、段を下げると 29.97 コマ/秒で 30。`server/live.ts`)。印 (`sample_is_non_sync_sample`) が
  * 読めないストリームだったときに、映像が出ないまま止まるよりは、前のとおり全部渡すほうがいい
  */
 const KEY_WAIT = 4;
@@ -50,7 +55,7 @@ export class KeyGate {
   pass(bytes: Uint8Array): boolean {
     const video = this.#video;
     if (!this.#waiting || video === undefined) return true;
-    let samples: ReturnType<typeof readFragment>;
+    let samples: Fmp4Sample[];
     try {
       samples = readFragment(bytes, this.#tracks);
     } catch {
@@ -59,8 +64,8 @@ export class KeyGate {
     }
     /*
      * **映像の入らない塊は渡す。** 選局したての ffmpeg は、放送の音声が映像のキーフレームより先に来ると、
-     * 最初の塊が音声だけになる。捨てると音声の頭が欠けて、映像より後から始まる。Chromium はそこで始めた
-     * 直後に速さを変える (`pacing`) と再生の時計が止まり、1枚目のまま 0.3〜0.6 秒 (ときに 7.9 秒) 動かなかった。
+     * 最初の塊が音声だけになる。捨てると音声の先頭が欠けて、映像より後から始まる。Chromium はそこで始めた
+     * 直後に速さを変える (`pacing`) と再生の時計が止まり、1 枚目のまま 0.3〜0.6 秒 (ときに 7.9 秒) 動かなかった。
      * 映像より前の音声は MSE の範囲 (`buffered`) に入らないので、渡しても始める位置は変わらない
      */
     if (!samples.some((sample) => sample.track === video.id)) return true;

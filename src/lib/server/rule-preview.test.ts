@@ -16,7 +16,7 @@ config.dbPath = join(
 );
 // エージェントには繋がない (チューナーの台数は空 = 競合は出さない)
 const realAgent = config.agentUrl;
-config.agentUrl = "http://127.0.0.1:9";
+config.agentUrl = "https://127.0.0.1:9";
 
 const { now, orm } = await import("./db");
 const { clockOf, jstOf } = await import("../rule-time");
@@ -149,11 +149,13 @@ describe("書く欄を読む", () => {
     expect(conditionsOf(form({ keyword: "a" })).skipEarlier).toBeNull();
   });
 
-  test("優先度は空なら 1、0 はそのまま", () => {
+  test("優先度は空なら 1、0 はそのまま、9 より大きければ 9", () => {
     expect(rulePriority(form({ priority: "" }))).toBe(1);
     expect(rulePriority(form({ priority: "0" }))).toBe(0);
     expect(rulePriority(form({ priority: "3" }))).toBe(3);
     expect(rulePriority(form({ priority: "-1" }))).toBe(1);
+    // 画面の選択肢は 0〜9。それより大きい値は 9 に丸める
+    expect(rulePriority(form({ priority: "100" }))).toBe(9);
   });
 
   test("時間帯は HH:MM を分に、曜日は 0〜6 を並べ直す", () => {
@@ -168,7 +170,7 @@ describe("書く欄を読む", () => {
     expect([read.timeFrom, read.timeTo]).toEqual([23 * 60, 2 * 60 + 30]);
     expect(read.weekdays).toEqual([1, 5]);
     expect(read.invalid).toBeNull();
-    // 空ならいつでも。7日とも選んだものも毎日
+    // 空ならいつでも。7 日とも選んだものも毎日
     const none = conditionsOf(
       form({
         keyword: "a",
@@ -380,7 +382,7 @@ describe("録画・番組から作るときの元", () => {
     expect(originOf("program:1")?.rule?.id).toBe(3);
   });
 
-  test("無い番組は見つからない、形の違うものは元にしない", () => {
+  test("無い番組は見つからない、形式の違うものは元にしない", () => {
     expect(originOf("program:999")).toMatchObject({
       found: false,
       prefill: null,

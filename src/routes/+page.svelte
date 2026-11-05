@@ -2,7 +2,7 @@
   import { SvelteSet } from "svelte/reactivity";
 
   /**
-   * 「まとめて表示」で開いている番組 (まとめる鍵)。**その場かぎり覚える** —
+   * 「まとめて表示」で開いている番組 (まとめるキー)。**その場かぎり覚える**。
    * モジュールに置くので、観る画面へ行って戻っても開いたまま。読み込み直すと閉じる
    */
   const openedGroups = new SvelteSet<string>();
@@ -145,15 +145,19 @@
   /**
    * 端末に保存する ([docs/offline.md](../../docs/offline.md))。落とすものは
    * `saveOffline` が決める (AV1 → H.265 → H.264 のうち、端末で観られる最初のもの)。
-   * Background Fetch ならタブを閉じても続くので、押したら詳細は閉じる
+   * 始めたら返ってくる (ページで受け取るときも終わりは待たない) ので、押したら詳細は閉じる
    */
   async function saveToDevice(rec: Rec): Promise<void> {
     try {
-      await saveOffline(rec);
+      const how = await saveOffline(rec);
       offlineNote = {
         key: `offline-save-${rec.id}`,
         kind: "info",
-        text: `端末への保存を始めました: ${rec.name}`,
+        // ページで受け取るブラウザ (Safari など) は、閉じると止まる
+        text:
+          how === "page"
+            ? `端末への保存を始めました (終わるまでこのページを開いたままにしてください): ${rec.name}`
+            : `端末への保存を始めました: ${rec.name}`,
       };
     } catch (error) {
       offlineNote = {
@@ -192,7 +196,7 @@
 
   /**
    * 行を押したら番組詳細を出す。中身の出し方は `detail` が持っている。
-   * ここで決めるのは、その行に添える注記 (失敗の理由・CMの判定) だけ。
+   * ここで決めるのは、その行に添える注記 (失敗の理由・CM の判定) だけ。
    */
   function openDetail(
     programId: number | null,
@@ -214,7 +218,7 @@
     detailResId = res.id;
   }
 
-  /** 削除は2回押させる。挙動はほかの画面と共通 ([arming.svelte.ts](../lib/arming.svelte.ts)) */
+  /** 削除は 2 回押させる。挙動はほかの画面と共通 ([arming.svelte.ts](../lib/arming.svelte.ts)) */
   const deleting = arming(
     '[data-testid="delete-button"], [data-testid="delete-confirm"], [data-testid="row-menu-delete"], [data-testid="row-menu-delete-confirm"]',
   );
@@ -229,7 +233,7 @@
     if (rec.deleted_at !== null || rec.state === "failed") return null;
     if (rec.library_path !== null) return resolve(`watch/${rec.id}`);
     /*
-     * **エンコードが終わる前でも観られる。** 録り終えて CM検出やエンコードを待っている間 (失敗したときも) は
+     * **エンコードが終わる前でも観られる。** 録り終えて CM 検出やエンコードを待っている間 (失敗したときも) は
      * 観る画面がサーバに元の TS をその場で変換させて流す (`server/playback.ts`)。録っている最中だけ
      * 追っかけ再生の画面 (`/chase`。伸びている TS を追い読みする)
      */
@@ -259,7 +263,7 @@
 
   /**
    * ファイルを持っているか。**端末に保存と「その他…」を出すかどうか。**
-   * エンコードの失敗はここに出てこない — 落ちたのは再エンコードのほうで、元のTSは無事なので観られる
+   * エンコードの失敗はここに出てこない。落ちたのは再エンコードのほうで、元の TS は無事なので観られる
    */
   function hasFile(rec: Rec): boolean {
     if (rec.deleted_at !== null) return false;
@@ -271,7 +275,7 @@
    * 録画の詳細。
    *
    * 失敗の理由は**ここでしか出さない** (一覧の行の高さを揃えるため)。
-   * 理由は3種類あって、それぞれ別物なので見出しを付けて分けて渡す
+   * 理由は 3 種類あって、それぞれ別物なので見出しを付けて分けて渡す
    */
   function openRecording(rec: Rec): void {
     const notes: { title: string; text: string }[] = [];
@@ -301,9 +305,9 @@
   }
 
   /*
-   * ---- 1本の時間軸 (`#lib/timeline.ts`) ----
+   * ---- 1 本の時間軸 (`#lib/timeline.ts`) ----
    *
-   * 予約・録画・録り逃しを1つの一覧に並べる。上が録れたものと録画中、「いま」の線、
+   * 予約・録画・録り逃しを 1 つの一覧に並べる。上が録れたものと録画中、「いま」の線、
    * 下がこれからの予約 (下へ行くほど時間が進む)。行の形 (`Item`) は部品と分け合う (`#lib/components/home/context.ts`)
    */
 
@@ -420,7 +424,7 @@
    */
   // svelte-ignore state_referenced_locally
   let grouped = $state(data.grouped);
-  /** 開いた番組の鍵。側ごとに分けて覚える (`future:アニメ`) */
+  /** 開いた番組のキー。側ごとに分けて覚える (`future:アニメ`) */
   const openKey = (zone: "future" | "past", group: string) =>
     `${zone}:${group}`;
   function isOpen(zone: "future" | "past", group: string): boolean {
@@ -503,7 +507,7 @@
   }
 
   /**
-   * 開いた瞬間に作らなかった行を足す。**表示した次のコマで** — 開くのを一コマで済ませ、画面の外の行は後から作る。
+   * 開いた瞬間に作らなかった行を足す。**表示した次のコマで**。開くのを一コマで済ませ、画面の外の行は後から作る。
    * 上に足すぶん読んでいる所は動かさない (`holdPlace`)
    */
   let filling = 0;
@@ -522,7 +526,7 @@
   }
 
   /**
-   * まだ描いていない**録れたものの本数** (「残り N 件」)。閉じた見出し1つに何本も入っているので、
+   * まだ描いていない**録れたものの本数** (「残り N 件」)。閉じた見出し 1 つに何本も入っているので、
    * 描く行の数では数えない
    */
   const pastRest = $derived.by(() => {
@@ -558,7 +562,7 @@
     }
     return next;
   });
-  /** 「いま」の線に添える一言。次の録画まで (絞り込みに関係なく。録画中のあと何分かは行の3段目) */
+  /** 「いま」の線に添える一言。次の録画まで (絞り込みに関係なく。録画中のあと何分かは行の 3 段目) */
   const lineStatus = $derived(nowStatus(clock, nextRes));
   function dayLabel(at: number): string {
     return dayName(at, clock) ?? fullDate(at);
@@ -571,7 +575,7 @@
    * まだ描いていない所にあれば、そこまで描いてから送る。
    * **新しい順のときは探さず、「いま」の線を上のほうに映す** (線のすぐ下に新しい録画が並ぶ。古い未視聴へ送ると、
    * 新しいものがすべて上に残り、読む向きと逆になる)。
-   * 並べ替えや絞り込みのたびには動かさない (開いたときの1回だけ)
+   * 並べ替えや絞り込みのたびには動かさない (開いたときの 1 回だけ)
    */
   let listBox: HTMLElement | undefined = $state();
   let placed = false;
@@ -632,7 +636,7 @@
 
   /**
    * 古い録画を足す (一覧の端の「残り N 件」が見えたとき。ふだんは頭、新しい順のときは末尾)。**開いたときの位置に送り終えるまでは足さない。**
-   * 送っている途中に足すと、送った先がずれる。待っている間も印は見張り直すので、送り終えたら足す (`sentinel`)
+   * 送っている途中に足すと、送った先がずれる。待っている間も印が見えたかは確かめ続けるので、送り終えたら足す (`sentinel`)
    */
   let ready = false;
   let revealing = false;
@@ -661,7 +665,7 @@
   const dayMarks = $derived(markDays(shownItems, today));
   let pinned = $state<number | null>(null);
   let pinFrame = 0;
-  /** 頭の日を読み直す。送っている間は1コマに1回だけ */
+  /** 頭の日を読み直す。送っている間は 1 コマに 1 回だけ */
   function trackPinned(): void {
     if (pinFrame !== 0) return;
     pinFrame = requestAnimationFrame(() => {
@@ -678,7 +682,7 @@
   /**
    * その日の見出しを頭に送る。**まだ描いていない古い日なら、そこまで描いてから** (`showPastUpTo` と同じ数え方)。
    * 上へ足すときは、足す間は読んでいる所を動かさず (`holdPlace`)、描き終えてから送る。足したぶん飛んでから送り直す、
-   * という2段の動きを見せない。新しい順のときは見出しの下にも 1 回に足すぶんを描く (見出しを頭まで送れるように)
+   * という 2 段の動きを見せない。新しい順のときは見出しの下にも 1 回に足すぶんを描く (見出しを頭まで送れるように)
    */
   async function pickDay(day: number): Promise<void> {
     if (listBox === undefined) return;
@@ -750,7 +754,7 @@
 <svelte:window onclick={deleting.stand} onscroll={trackPinned} />
 
 <!--
-    「その他…」の中の、送るだけの項目。**閉じるのは送り終わってから** (`done`) — 先に閉じると、
+    「その他…」の中の、送るだけの項目。**閉じるのは送り終わってから** (`done`)。先に閉じると、
     断られたときの通知 (Toasts) が出る前に画面が変わってしまう
 -->
 {#snippet menuSubmit(
@@ -787,7 +791,7 @@
 
   <TimelineBar {...controls} />
 
-  <div class="t-main">
+  <div class="t-main with-side">
     <section
       class="t-list"
       bind:this={listBox}
@@ -795,7 +799,7 @@
       data-testid="timeline"
     >
       <!--
-                **300件で頭打ちなのを黙らない。** 溜まると古いものが黙って消え、「消えた」ように見える。
+                **300 件で頭打ちなのを黙らない。** 溜まると古いものが黙って消え、「消えた」ように見える。
                 上限に当たっていたら、いちばん古い録画の隣 (一覧の端。新しい順のときは末尾) に検索へ誘う一行を出す (`+page.server.ts` の `.limit(300)`)。
                 描き切っていなければ、代わりに残りの件数を出し、近づいたら古いほうを足す (`sentinel`・`revealOlder`)。残りが無くなれば消える
             -->
@@ -834,12 +838,12 @@
       {#if shownItems.length === 0}
         {#if items.length === 0}
           <!-- 空のときは次に何をすればよいかまで言う -->
-          <div class="empty glow">
-            <p class="empty-title">予約も録画もありません</p>
-            <p class="empty-hint">
+          <div class="empty-state glow">
+            <p class="bold">予約も録画もありません</p>
+            <p class="small muted">
               番組表から予約するか、ルールを作ると自動で入ります
             </p>
-            <div class="empty-actions">
+            <div class="actions">
               <a class="button small" href={resolve("guide")}>番組表を開く</a>
               <a class="button secondary outline small" href={resolve("search")}
                 >ルールを作る</a
@@ -847,8 +851,8 @@
             </div>
           </div>
         {:else}
-          <div class="empty">
-            <p class="empty-title">当てはまるものはありません</p>
+          <div class="empty-state">
+            <p class="bold">当てはまるものはありません</p>
           </div>
         {/if}
       {/if}
@@ -882,7 +886,7 @@
 <!--
     予約の詳細から取り消す。**行の「取消」と同じアクション** (`?/cancel`) なので、
     ルールが立てた予約でも作り直されない (戻すのは行の「戻す」から)。
-    中身を確かめてから、閉じずに取り消せるように。**取り消せたら閉じる** — 番組表の詳細と同じ。
+    中身を確かめてから、閉じずに取り消せるように。**取り消せたら閉じる**。番組表の詳細と同じ。
     取り消した行は一覧から消える (完了した予約も出しているときは「戻す」に変わる)
 -->
 {#snippet reservationActions()}
@@ -915,7 +919,7 @@
 {/snippet}
 
 <!--
-    その1本に対する操作。**一覧の行ではなくここに置く** (行に並べていた頃は狭い画面で枠から流れ出した)。
+    その 1 本に対する操作。**一覧の行ではなくここに置く** (行に並べていた頃は狭い画面で枠から流れ出した)。
     行に残すのは入口 (詳細) と削除だけ
 -->
 {#snippet recordingActions()}
@@ -923,16 +927,16 @@
     {@const rec = detailRec}
     {#if hasFile(rec)}
       <!--
-                **並べるのはよく押すものだけ** — 端末に保存・ルールを作る。
-                条件が揃うと10個のボタンが同じ見た目で並び、狭い画面では文字の
+                **並べるのはよく押すものだけ**。端末に保存・ルールを作る。
+                条件が揃うと 10 個のボタンが同じ見た目で並び、狭い画面では文字の
                 途中で折り返していた。めったに押さないもの (視聴済みの付け外し・
                 再エンコード) は「その他…」に畳む。
             -->
       {#if offline.usable && rec.library_path !== null}
         <!--
                     **端末に保存 (オフライン視聴)。** 落とすのはエンコードしたもの
-                    (docs/offline.md)。元のTSしか無い録画はブラウザで再生できない
-                    ので出さない。保存済みなら「端末から消す」に変わる —
+                    (docs/offline.md)。元の TS しか無い録画はブラウザで再生できない
+                    ので出さない。保存済みなら「端末から消す」に変わる。
                     こちらはサーバの録画に触らない (行の削除ボタンとは別)
                 -->
         {@const held = offline.entries[rec.id]}
@@ -988,7 +992,7 @@
     {#if hasFile(rec)}
       <!--
                 **めったに押さないものの置き場。** 上に開く (フッターは画面の下端にある)。中身は上から
-                視聴済みの付け外し、直すもの (再エンコード・CM検出) の順。
+                視聴済みの付け外し、直すもの (再エンコード・CM 検出) の順。
                 閉じている間も中身は DOM に置く (どの項目が出るかを e2e が開かずに数えている)
             -->
       <Menu side="top" align="end" class="more-menu" testid="detail-more-menu">
@@ -1015,8 +1019,8 @@
         )}
         {#if rec.job_id === null && encodeSource(rec) !== null}
           <!--
-                        再エンコードの元になるのは元のTS。エンコード済みを元にしても
-                        画質は戻らないので、元のTSがあるときだけ出す
+                        再エンコードの元になるのは元の TS。エンコード済みを元にしても
+                        画質は戻らないので、元の TS があるときだけ出す
                     -->
           {@render menuSubmit(
             "?/reencode",
@@ -1029,10 +1033,10 @@
         {#if rec.job_id === null && cmRedo(rec).state !== "hidden"}
           {@const redo = cmRedo(rec)}
           <!--
-                        **CM 検出だけやり直す** (再エンコードしない。encoder.runCmJob)。元のTSがあれば元のTSから、
+                        **CM 検出だけやり直す** (再エンコードしない。encoder.runCmJob)。元の TS があれば元の TS から、
                         無ければエンコードしたものから読み、チャプターを書き直す。CM を切ってエンコードしたものは戻せないので、
-                        元のTSがあれば押したときに再エンコードを促し (サーバが断る)、無ければ理由を出して押せない。
-                        閉じるのは投げ終わってから (再エンコードと同じ)
+                        元の TS があれば押したときに再エンコードを促し (サーバが断る)、無ければ理由を出して押せない。
+                        閉じるのは送り終わってから (再エンコードと同じ)
                     -->
           {#if redo.state === "disabled"}
             <div
@@ -1060,7 +1064,7 @@
     {/if}
     {@const watch = watchLink(rec)}
     {#if watch !== null}
-      <!-- **主のボタンは再生だけ** (並びのいちばん右・狭い画面ではいちばん上) -->
+      <!-- **主のボタンは再生だけ** (並びのいちばん右。狭い画面では下の段の右端) -->
       <a class="button" href={watch} data-testid="detail-play">再生</a>
     {/if}
   {/if}
@@ -1068,7 +1072,7 @@
 
 <style>
   /*
-     * 一覧・行・操作の1行の見た目は部品と分け合うので `#lib/components/home/home.css` (`.board` の下だけに効く)。
+     * 一覧・行・操作の 1 行の見た目は部品と分け合うので `#lib/components/home/home.css` (`.board` の下だけに効く)。
      * ここに残すのは、一覧の外 (番組の詳細) に出るものだけ。送るだけの項目を包むフォーム (`.menu-form`) は `app.css`
      */
   /* 「その他…」の中身 (枠は `Menu` の中なので :global)。項目は左寄せで縦に積む (`app.css` の `.menu`) */
@@ -1076,7 +1080,7 @@
     width: 16rem;
     max-width: calc(100vw - 2rem);
   }
-  /* 押せない項目のすぐ下に出す理由 (CM検出をやり直せないわけ)。項目と同じ字下げで、次の項目とは余白で分ける */
+  /* 押せない項目のすぐ下に出す理由 (CM 検出をやり直せないわけ)。項目と同じ字下げで、次の項目とは余白で分ける */
   .menu-note {
     padding: 0.25rem 0.75rem 0.5rem;
     white-space: nowrap;

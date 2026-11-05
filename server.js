@@ -1,7 +1,7 @@
 /**
  * 本番の入口。**adapter-bun の `Bun.serve` に WebSocket を足すためだけにある。**
  *
- * ライブ視聴は映像・音声・字幕・データ放送を1本の接続に多重化する作りなので
+ * ライブ視聴は映像・音声・字幕・データ放送を 1 本の接続に多重化する作りなので
  * ([docs/stream.md](docs/stream.md#websocket-プロトコル))、`Request` → `Response` しか扱えない
  * SvelteKit の仕組みでは足りない。
  *
@@ -13,30 +13,30 @@
  * SvelteKit の手続き (handler) も静的ファイルの表 (routes) も `build/server/adapter-index.js`
  * に畳み込まれていて、外から import できる形では出てこない。
  *
- * そこで **`Bun.serve` を1回だけ包んでから `build/index.js` を読む。** adapter が渡す
+ * そこで **`Bun.serve` を 1 回だけ包んでから `build/index.js` を読む。** adapter が渡す
  * 設定 (PORT・HOST・BODY_SIZE_LIMIT などの環境変数を読んだもの) はそのまま使い、
- * `websocket` を足して、`fetch` の前に WebSocket の握手と接続元の決定を挟む。
+ * `websocket` を足して、`fetch` の前に WebSocket のハンドシェイクと接続元の決定を挟む。
  * Bun のバージョンの確認も環境変数の読み方も adapter のものがそのまま効く。
- * 頼っているのは「adapter の入口が `Bun.serve` を1回呼ぶ」ことだけ — 呼ばれなければ起動を止める。
+ * 頼っているのは「adapter の入口が `Bun.serve` を 1 回呼ぶ」ことだけで、呼ばれなければ起動を止める。
  *
  * 以前は adapter-node を内側に置いて HTTP を中継していた (bun の `node:http` は WebSocket の
- * 握手ができないため)。その1ホップと `Accept-Encoding` の食い違いはもう無い。
+ * ハンドシェイクができないため)。その 1 ホップと `Accept-Encoding` の食い違いはもう無い。
  *
- * **止まれの合図 (SIGTERM) は adapter のものを使わない。** adapter は受けたその場で listen を
+ * **停止のシグナル (SIGTERM) は adapter のものを使わない。** adapter は受けたその場で listen を
  * 閉じるので、録画が終わるまで居座る間に画面が開けなくなる。アプリ (`runtime.ts` の
  * `takeOverSignals`) が引き取る。adapter が合図を登録するのは `build/index.js` のいちばん最後なので、
  * 読み終えたあとでもう一度アプリに引き取らせる (下の `takeOver`)。アプリが引き取るまでに来た合図は
  * `hold-signals.ts` が取っておき、アプリが受け直す (PID 1 では、受け手のいない合図は捨てられる)。
  *
  * **`Host` はそのまま扱う。** SvelteKit の CSRF 判定は自分の origin と `Origin` を比べる。
- * denpa は名前をいくつも持てるので自分の origin を1つに固定できない (SvelteKit の `paths.origin`。
+ * denpa は名前をいくつも持てるので自分の origin を 1 つに固定できない (SvelteKit の `paths.origin`。
  * 組むときに決まる) ので、`Host` と `x-forwarded-proto` から毎回組み立てさせる
  * (名前は charts/denpa/values.yaml の httpRoute.hostnames。無ければ ingress.hosts)。
  * そのため名前を偽ると (DNS リバインディング) CSRF の判定は通ってしまう。信頼するネットワークから
  * ログインなしで通すのを、知っている名前のときだけにしてある (`auth.knownHost`)。
  */
 
-// いちばん先に読む。起動の途中に来た止まれの合図を捨てずに取っておく (中の説明)
+// いちばん先に読む。起動の途中に来た停止のシグナルを捨てずに取っておく (中の説明)
 import "./src/lib/server/hold-signals.ts";
 
 import {
@@ -45,6 +45,7 @@ import {
   unreadable,
 } from "./src/lib/server/address.ts";
 import { compress } from "./src/lib/server/compress.ts";
+import { freshWorker } from "./src/lib/server/fresh-worker.ts";
 
 /** `src/lib/server/ws.ts` が置く名前 */
 const LIVE = "__denpaLive";
@@ -54,10 +55,10 @@ const TAKE_OVER = "__denpaTakeOverSignals";
 /*
  * **スキームは常に `x-forwarded-proto` から読む** (選べるオプションにしない)。
  * adapter は読めないと https と決め打つので、http で受ける構成 (前段の無い直結など)
- * で CSRF 判定が食い違って POST が全部 403 になる (前段が無ければ下で入れる)。偽装されても得るものが無い —
+ * で CSRF 判定が食い違って POST が全部 403 になる (前段が無ければ下で入れる)。偽装されても得るものが無い。
  * ブラウザ経由の CSRF ではこのヘッダを付けられないし、直に付けて来る相手が
  * 変えられるのは自分に返る origin の見た目だけ。`TRUSTED_PROXIES` の前段からだけ読む
- * ようにはしない — 守れるものが無いのに、前段を設定し忘れた構成の POST を全部止める。
+ * ようにはしない。守れるものが無いのに、前段を設定し忘れた構成の POST を全部止めることになる。
  *
  * **接続元のアドレスはこの入口が決める** (TRUSTED_NETWORKS の判定材料。`src/lib/server/address.ts`)。
  * ここで決めたアドレスを `x-denpa-remote` に**上書きで**入れ (外から同名で付けて来ても消える)、
@@ -68,9 +69,9 @@ const TAKE_OVER = "__denpaTakeOverSignals";
  * - そうでなければ相手そのもの。`X-Forwarded-For` は誰でも付けられるので読まない
  *
  * 以前は `ADDRESS_HEADER=x-forwarded-for` を渡すと adapter-node が誰から来たヘッダでも
- * 信じていた — :3000 へ直に届く経路があると、ヘッダを付けるだけで信頼ネットワークを
+ * 信じていた。:3000 へ直に届く経路があると、ヘッダを付けるだけで信頼ネットワークを
  * 名乗れた。**`ADDRESS_HEADER` はもう読まない** (互換の経路は残さない。docs/auth.md の
- * 「前段の後ろに置くとき」)。設定してあれば起動時に1行だけ知らせる
+ * 「前段の後ろに置くとき」)。設定してあれば起動時に 1 行だけ知らせる
  */
 process.env.PROTOCOL_HEADER = "x-forwarded-proto";
 const REMOTE_HEADER = "x-denpa-remote";
@@ -94,7 +95,7 @@ const upgrading = (request) =>
   request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
   request.headers.get("connection")?.toLowerCase().includes("upgrade") === true;
 
-/** アプリが置いたもの。**毎回引き直す** — 読み込みが遅れることがある */
+/** アプリが置いたもの。**毎回引き直す。** 読み込みが遅れることがある */
 const live = () => globalThis[LIVE];
 
 const websocket = {
@@ -111,7 +112,7 @@ const websocket = {
   // 映像はサーバ→客の一方向なので、この値は「客からの pong が途切れて
   // よい上限」。ブラウザは ping に自動で pong を返すため、**生きている客は
   // 映像が流れているだけで切れない**。返さなくなった客だけを畳む。
-  // serve 直下は 0 のまま — 録画のファイルや SSE は別勘定。
+  // serve 直下は 0 のままで、録画のファイルや SSE はこの値に掛からない。
   idleTimeout: 120,
   sendPings: true,
   open(ws) {
@@ -131,8 +132,8 @@ const front = (handler) => (request, server) => {
 
   if (upgrading(request) && live()?.handles(url) === true) {
     /*
-     * **断るのは握手の前。** ここなら普通の HTTP として理由を返せる。
-     * 握手したあとに切ると、ブラウザには「繋がらない」としか映らない
+     * **断るのはハンドシェイクの前。** ここなら普通の HTTP として理由を返せる。
+     * ハンドシェイクしたあとに切ると、ブラウザには「繋がらない」としか映らない
      */
     if (!live().accept(url))
       return new Response("ticket required", { status: 403 });
@@ -175,7 +176,13 @@ let served = false;
 Bun.serve = (options) => {
   Bun.serve = serve;
   served = true;
-  return serve({ ...options, fetch: front(options.fetch), websocket });
+  return serve({
+    ...options,
+    // サービスワーカーは毎回聞き直させる (`src/lib/server/fresh-worker.ts`)
+    routes: freshWorker(options.routes),
+    fetch: front(options.fetch),
+    websocket,
+  });
 };
 try {
   await import("./build/index.js");
@@ -188,21 +195,21 @@ if (!served)
   );
 
 /*
- * **止まれの合図をアプリにもう一度引き取らせる。** adapter は読み込みのいちばん最後で
+ * **停止のシグナルをアプリにもう一度引き取らせる。** adapter は読み込みのいちばん最後で
  * 自分の後始末を登録する。それが残ると SIGTERM で listen が閉じ、録画が終わるまで居座る間に
  * 画面が開けなくなる (上の説明)。
  *
  * **adapter の作りが変わっても気付けるようにする。** ここは adapter の中の作りに頼っているので、
- * 外れたら黙って居座りが壊れる。引き取る関数が無い・引き取ったあとも合図に2人以上ついている、は
- * 起動を止める (E2E も本番と同じくこの入口で起こすので、CI で落ちる)。数が想定 (アプリの2件 +
- * adapter の2件) と違うだけなら知らせる。adapter があとから登録する作りに変わったときのために、
+ * 外れたら黙って居座りが壊れる。引き取る関数が無い・引き取ったあとも合図に 2 人以上ついている、は
+ * 起動を止める (E2E も本番と同じくこの入口で起こすので、CI で落ちる)。数が想定 (アプリの 2 件 +
+ * adapter の 2 件) と違うだけなら知らせる。adapter があとから登録する作りに変わったときのために、
  * 少し置いてもう一度見て、ついていたら引き取り直して知らせる
  */
 const SIGNALS = ["SIGTERM", "SIGINT"];
 const takeOver = globalThis[TAKE_OVER];
 if (typeof takeOver !== "function") {
   throw new Error(
-    "アプリが止まれの合図を引き取る関数を置いていません (src/lib/server/runtime.ts)",
+    "アプリが停止のシグナルを引き取る関数を置いていません (src/lib/server/runtime.ts)",
   );
 }
 const taken = takeOver();
@@ -210,12 +217,12 @@ const extra = () =>
   SIGNALS.filter((signal) => process.listenerCount(signal) !== 1);
 if (extra().length > 0) {
   throw new Error(
-    `止まれの合図を引き取れません (${extra().join("・")})。adapter-bun の作りが変わっていないか確かめてください`,
+    `停止のシグナルを引き取れません (${extra().join("・")})。adapter-bun の作りが変わっていないか確かめてください`,
   );
 }
 if (taken !== 4) {
   console.warn(
-    `[boot] 止まれの合図の数が想定 (4 件) と違います (${taken} 件)。adapter-bun の作りが変わっていないか確かめてください`,
+    `[boot] 停止のシグナルの数が想定 (4 件) と違います (${taken} 件)。adapter-bun の作りが変わっていないか確かめてください`,
   );
 }
 setTimeout(() => {
@@ -223,6 +230,6 @@ setTimeout(() => {
   if (late.length === 0) return;
   takeOver();
   console.warn(
-    `[boot] 起動のあとで止まれの合図に後始末が足されていました (${late.join("・")})。引き取り直しました。adapter-bun の作りが変わっていないか確かめてください`,
+    `[boot] 起動のあとで停止のシグナルに後始末が足されていました (${late.join("・")})。引き取り直しました。adapter-bun の作りが変わっていないか確かめてください`,
   );
 }, 1000).unref();

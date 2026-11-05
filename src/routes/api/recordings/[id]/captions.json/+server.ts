@@ -13,24 +13,24 @@ import { run } from "#lib/server/stream.js";
  * (`components/player/caption-draw.ts`)。
  *
  * エンコードしたもの (mkv) に入っている放送の字幕そのもの (`S_ARIBSUB`) を抜いて、サーバでデコードする。
- * 抜くには ffmpeg が動画を頭から尻まで読む (実測 0.1〜1秒。ディスクが遅いと観はじめの読み込みと取り合う)。
+ * 抜くには ffmpeg が動画を先頭から末尾まで読む (実測 0.1〜1 秒。ディスクが遅いと観はじめの読み込みと取り合う)。
  * **一度作ったものは覚えておき、同じファイルなら作り直さない** (`file-memo.ts`)。
  * **ずっと前にエンコードした録画は画像 (PGS) が入っている**ことがあり、それは読まずに 404 を返す (字幕なし)。
- * 元のTSが残っていれば、再エンコードすると ARIB の字幕が入る。
+ * 元の TS が残っていれば、再エンコードすると ARIB の字幕が入る。
  *
  * **まだエンコードできていない録画は元の TS から抜く** (`playback.captionArgs`)。時刻は観る画面の物差し
- * (TS の頭を 0) に揃える。TS は丸ごと舐めるのでエンコードしたものより時間がかかる (1 時間の BS で 7GB)。
+ * (TS の先頭を 0) に揃える。TS は丸ごと舐めるのでエンコードしたものより時間がかかる (1 時間の BS で 7GB)。
  * エンコードが終わると物差しが変わるので、こちらは覚えない
  */
 
-/** 待ち時間の上限。壊れたファイルで居座らせない。元の TS は大きいぶん長く待つ */
+/** 待ち時間の上限。壊れたファイルで ffmpeg を待ち続けない。元の TS は大きいぶん長く待つ */
 const TIMEOUT = 30_000;
 const TIMEOUT_TS = 300_000;
 
-/** 溜める量の上限。字幕の筋だけなら1時間で数百KB。壊れたファイルで膨らんでもここで止める */
+/** 溜める量の上限。字幕のストリームだけなら 1 時間で数百 KB。壊れたファイルで膨らんでもここで止める */
 const LIMIT = 32 * 1024 * 1024;
 
-/** 作ったもの。JSON か、字幕が無い理由。1本で数百KB なので、最近観た十数本ぶん */
+/** 作ったもの。JSON か、字幕が無い理由。1 本で数百 KB なので、最近観た十数本ぶん */
 type Made = { json: string } | { missing: string };
 const made = fileMemo<Made>(16);
 
@@ -38,7 +38,7 @@ const MISSING = "字幕がありません";
 
 /**
  * 字幕を抜いてデコードし、JSON にする。字幕を持たない (抜けたものが空・画像の字幕) ならその理由。
- * **ffmpeg が降りた・上限で切れたときは覚えない** (404 を投げる) — 時間切れや起こせなかったのかもしれない
+ * **ffmpeg が降りた・上限で切れたときは覚えない** (404 を投げる)。時間切れや、ffmpeg を起こせなかっただけかもしれないため
  */
 async function build(argv: string[], ts: boolean): Promise<Made> {
   const parts: Uint8Array[] = [];
@@ -55,7 +55,7 @@ async function build(argv: string[], ts: boolean): Promise<Made> {
       size += chunk.length;
     },
   });
-  // 字幕を持たない番組のほうが多い (ffmpeg は「その筋は無い」で、動画を読む前に降りる)
+  // 字幕を持たない番組のほうが多い (ffmpeg は「そのストリームは無い」で、動画を読む前に降りる)
   if (code !== 0) error(404, MISSING);
   // 上限で切れた。壊れたファイルの途中までを覚えて返し続けない
   if (over) error(404, MISSING);
@@ -71,18 +71,20 @@ export async function GET({ params }) {
   const recording = recordingOr404(params.id);
   const args = await captionArgs(recording);
   if (args === null) error(404, MISSING);
+  const { argv, path } = args;
+  const ts = path === null;
 
   const result =
-    args.path === null
-      ? await build(args.argv, args.ts)
-      : await made.get(args.path, () => build(args.argv, args.ts));
+    path === null
+      ? await build(argv, ts)
+      : await made.get(path, () => build(argv, ts));
   if ("missing" in result) error(404, result.missing);
 
   return new Response(result.json, {
     headers: {
       "Content-Type": "application/json",
       // 同じファイルなら中身は変わらない。再エンコードすればパスごと変わる。元の TS はエンコードが終わると物差しが変わる
-      "Cache-Control": args.ts ? "no-store" : "private, max-age=3600",
+      "Cache-Control": ts ? "no-store" : "private, max-age=3600",
     },
   });
 }

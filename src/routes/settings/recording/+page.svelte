@@ -19,7 +19,7 @@
   let { data, form } = $props();
 
   /**
-   * 押した結果。**その場で保存した結果はここに出さない** — 変えた欄の近く (節の見出しの横。`SaveNote`) に出す
+   * 押した結果。**その場で保存した結果はここに出さない**。変えた欄の近く (節の見出しの横。`SaveNote`) に出す
    */
   const notices = $derived.by(() => {
     const list = errorNotice(form, "settings-error");
@@ -35,7 +35,7 @@
   /**
    * 録画設定のフォームは bind せず `checked` / `selected` で初期値だけ渡す。
    * 別のフォームを保存して data が読み直されても、値が同じなら Svelte は DOM に
-   * 書かない — 手元で変えたまま保存していない入力はそのまま残る
+   * 書かない。手元で変えたまま保存していない入力はそのまま残る
    */
   const recording = $derived(data.recording);
 
@@ -71,7 +71,7 @@
     結果は変えた節の見出しの横に出る。値の渡し方は上の `recording`。
     どの節もすべての録画に効く。ルールや予約ごとには変えられない
 -->
-<div class="part" id="encoding" data-part>
+<div id="encoding" data-part>
   <div class="sections readable">
     <section class="section">
       <div class="section-head">
@@ -92,7 +92,7 @@
                     選ぶ欄はチェックと関係なく出しておく。
                     **H.265 は GPU でだけエンコードする**ので、行ごと GPU を確かめてから出し、エンコーダに
                     「ソフトウェア」を置かない (録画で外すならチェックを外す)。ライブの列は「ソフトウェア」の代わりに「使わない」を置く。
-                    選ぶとライブで H.265 を出さない (`live.liveHevc`)。行を出したときだけ `codecsShown` を送る —
+                    選ぶとライブで H.265 を出さない (`live.liveHevc`)。行を出したときだけ `codecsShown` を送る。
                     確かめている最中や GPU が無いときに保存しても、H.265 のチェックは前のまま (saveEncoding)
                 -->
         {#snippet codecRow(
@@ -232,12 +232,12 @@
                     エンコーダは録画とライブで別々に選べます。追っかけと、録画を別の形式で観るときの変換もライブのエンコーダを使います
                     (チェックを外したコーデックも)。MPEG-2 のデコードまで GPU
                     でできるデバイスでは、ライブはデコードとインターレース解除も
-                    GPU で行います。
+                    GPU で処理します。
                   </p>
                   <p>
                     GPU が 2 枚あれば「録画はこちら、ライブはあちら」「AV1
                     はこちら、H.264 はあちら」のように分けられます。「GPU
-                    を順番に使う」では、 エンコードのたびに使う GPU
+                    を順番に使う」では、エンコードのたびに使う GPU
                     を入れ替えます。
                   </p>
                   {#each hw.devices as device (device.path)}
@@ -324,7 +324,7 @@
         </div>
         <!--
                     コマ数 (30/60) は本編映像のフィールドを比べて決める (`server/fps.ts`)。
-                    放送は素材が何でも 1080i/60 で来るので、ジャンルにもTSのヘッダにも
+                    放送は素材が何でも 1080i/60 で来るので、ジャンルにも TS のヘッダにも
                     本当のコマ数は入っていない
                 -->
         <div class="field">
@@ -354,7 +354,7 @@
     視聴 (世帯の設定)。ライブの「自動」が家の中とみる名前 (`#lib/host.ts` の `indoorHost`) と、コーデックのメニューから
     H.264 と H.265 を外すか (`#lib/live-choice.ts` の `HIDDEN_CODECS`)。名前の欄は離れたときに保存する (打っている途中では送らない)
 -->
-<div class="part" id="viewing" data-part>
+<div id="viewing" data-part>
   <div class="sections readable">
     <section class="section">
       <div class="section-head">
@@ -386,7 +386,8 @@
               <p>
                 家の中では放送のまま (MPEG-2)
                 で流すと、サーバがエンコードせずに済み、画質も放送のままです。外からは
-                AV1、再生できなければ H.264 を選びます。
+                AV1、再生できなければ H.265 (ライブのエンコーダが GPU
+                のとき)、それも駄目なら H.264 を選びます。
               </p>
               <p>
                 家の中かは、開いたアドレスの名前で決めます。192.168.x.x
@@ -412,7 +413,7 @@
   </div>
 </div>
 
-<div class="part" id="cm" data-part>
+<div id="cm" data-part>
   <div class="sections readable">
     <section class="section">
       <div class="section-head">
@@ -448,7 +449,7 @@
   </div>
 </div>
 
-<div class="part" id="reserve" data-part>
+<div id="reserve" data-part>
   <div class="sections readable">
     <section class="section">
       <div class="section-head">

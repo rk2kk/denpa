@@ -13,24 +13,25 @@ import {
   string,
   tolerate,
 } from "../shape";
+import { agentFetch } from "./agent-client";
 import { config } from "./config";
 
 /**
  * スクランブルの検出と復号。
  *
  * カードが読めないまま録れると、**録画は成功してサイズもそれらしいのに、中身が
- * 全部スクランブルされていて ffmpeg が1フレームも取り出せない**、という分かりにくい
+ * 全部スクランブルされていて ffmpeg が 1 フレームも取り出せない**、という分かりにくい
  * 壊れ方をする。
  *
- * 録画そのものは止めない(電波は二度と戻ってこないので、暗号のままでも残す)。
+ * 録画そのものは止めない (電波は二度と戻ってこないので、暗号のままでも残す)。
  * 代わりにエンコードの前に見て、掛かったままならその場で復号する。
  *
  * 復号するのはエージェント側 (`/denpa/decode`)。カードリーダーを使うのは
- * あちらなので、カードを持っている側に任せるようにしてある。元のTSの置き場は両方のコンテナに見せてあり、
+ * あちらなので、カードを持っている側に任せるようにしてある。元の TS の置き場は両方のコンテナに見せてあり、
  * やり取りするのはパスだけ。
  */
 
-/** 何パケット見るか。全部読むと数GBのTSで時間がかかる */
+/** 何パケット見るか。全部読むと数 GB の TS で時間がかかる */
 const SAMPLE = 20_000;
 /** これを超えていたらスクランブルされているとみなす */
 const THRESHOLD = 0.5;
@@ -38,7 +39,7 @@ const THRESHOLD = 0.5;
 /**
  * TS の中でスクランブルされているパケットの割合。
  *
- * transport_scrambling_control (4バイト目の上位2ビット) が立っているものを数える。
+ * transport_scrambling_control (4 バイト目の上位 2 ビット) が立っているものを数える。
  * 正常なら 0 に近い。カードが読めていないと 98〜99% になる。
  */
 export function scrambledRatio(path: string): number {
@@ -77,14 +78,14 @@ export function isScrambled(path: string): boolean {
   return scrambledRatio(path) > THRESHOLD;
 }
 
-/** `/denpa/card` の1行。リーダー1つ */
+/** `/denpa/card` の 1 行。リーダー 1 つ */
 const CARD_READER = object({
   name: string,
   /** カードが読めたか */
   card: boolean,
-  /** カードの番号 (10進16桁) */
+  /** カードの番号 (10 進 16 桁) */
   ids: array(string),
-  /** 鍵の出どころが使っているリーダー。**使うのは1枚だけ** (他は予備) */
+  /** 鍵の出どころが使っているリーダー。**使うのは 1 枚だけ** (他は予備) */
   active: boolean,
   /** このカードで復号しているチューナー */
   tuners: array(string),
@@ -107,9 +108,8 @@ const CARD_STATUS = object({
   readers: array(CARD_READER),
 });
 
-/** 画面での呼び分け。`unknown` は前のバージョンのエージェント (名前しか返さない) */
-export type CardReaderState =
-  "active" | "standby" | "empty" | "error" | "unknown";
+/** 画面での呼び分け */
+export type CardReaderState = "active" | "standby" | "empty" | "error";
 
 type CardReader = {
   name: string;
@@ -146,8 +146,7 @@ function stateOf(row: Loose<Infer<typeof CARD_READER>>): CardReaderState {
 
 /**
  * 画面に渡す形式に揃える。**形式が違っても止めない** (`tolerate`) ので、ここは来たものを
- * 疑って読む。前のバージョンのエージェントは `readers` がリーダーの名前の並びで、
- * 名前と番号は `message` に書いてある — 行は名前だけ出し、状態は「—」にする
+ * 疑って読む
  */
 function normalize(raw: unknown): CardStatus {
   const body: Loose<Infer<typeof CARD_STATUS>> =
@@ -155,8 +154,6 @@ function normalize(raw: unknown): CardStatus {
   const readers = (
     Array.isArray(body.readers) ? (body.readers as unknown[]) : []
   ).map((entry): CardReader => {
-    if (typeof entry === "string")
-      return { name: entry, state: "unknown", ids: [], tuners: [] };
     const row: Loose<Infer<typeof CARD_READER>> =
       typeof entry === "object" && entry !== null ? entry : {};
     return {
@@ -178,7 +175,7 @@ function normalize(raw: unknown): CardStatus {
   };
 }
 
-/** エージェントの答えを読む。**形式が違えば1回だけ警告して、読めるだけ読む** */
+/** エージェントの答えを読む。**形式が違えば 1 回だけ警告して、読めるだけ読む** */
 export function readCardStatus(raw: unknown): CardStatus {
   return normalize(tolerate(CARD_STATUS, raw, "エージェントの /denpa/card"));
 }
@@ -194,12 +191,12 @@ const DECODED = object({ ok: optional(boolean), error: optional(string) });
 /**
  * カードリーダーの状態。設定画面に出す。
  *
- * リーダーが見えていてもカードを読めていないことがある(挿さっていない・USBが黙る)。
+ * リーダーが見えていてもカードを読めていないことがある (挿さっていない・USB が黙る)。
  * そのまま録ると上に書いた壊れ方になるので、画面から見えるようにしてある。
  */
 export async function cardStatus(): Promise<CardStatus> {
   try {
-    const res = await fetch(`${config.agentUrl}/denpa/card`, {
+    const res = await agentFetch("/denpa/card", {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
@@ -214,12 +211,12 @@ export async function cardStatus(): Promise<CardStatus> {
 }
 
 /**
- * スクランブルを復号する。成功したら output に復号できたTSが出来ている。
+ * スクランブルを復号する。成功したら output に復号できた TS が出来ている。
  *
- * 渡すのはパスだけで、TS そのものは流さない。元のTSの置き場はエージェント側にも
- * 見せてあるので、読むのも書くのも向こうが直接やる。数十GBになることがあり、
- * HTTP で往復させる意味が無い(そもそも Bun の fetch は送りながら受け取れず、
- * 大きいものを投げると詰まる)。
+ * 渡すのはパスだけで、TS そのものは流さない。元の TS の置き場はエージェント側にも
+ * 見せてあるので、読むのも書くのも向こうが直接する。数十 GB になることがあり、
+ * HTTP で往復させる意味が無い (そもそも Bun の fetch は送りながら受け取れず、
+ * 大きいものを渡すと詰まる)。
  *
  * **返事だけでは信じない。** 出来上がったものを読み、掛かったままなら失敗にする。
  */
@@ -229,9 +226,9 @@ export async function descramble(
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; error: string }> {
   /*
-   * 向こうのマウント先はこちらと同じとは限らないので、元のTSの置き場からの相対で渡す。
-   * 掛かったままのTSは必ずここにある(引き継いだ録画も、移行のときに
-   * 未エンコードのものは元のTSとしてここへ入る)
+   * 向こうのマウント先はこちらと同じとは限らないので、元の TS の置き場からの相対で渡す。
+   * 掛かったままの TS は必ずここにある (引き継いだ録画も、移行のときに
+   * 未エンコードのものは元の TS としてここへ入る)
    */
   const base = config.rawDir;
   const from = relative(base, input);
@@ -245,7 +242,7 @@ export async function descramble(
 
   try {
     // 復号は数十分かかることがある。中止を押されたらここで切る
-    const res = await fetch(`${config.agentUrl}/denpa/decode`, {
+    const res = await agentFetch("/denpa/decode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: from, output: to }),

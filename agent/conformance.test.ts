@@ -5,7 +5,7 @@
  * 本物の取り合いも総当たりも 1 行も通らない。ここがその穴を塞ぐ。
  *
  * **API に当てているので、中身が何語で書かれていても走る。** bun の実装から .NET に
- * 書き直したときも、`AGENT_CMD` を差し替えて同じものを通した — それが
+ * 書き直したときも、`AGENT_CMD` を差し替えて同じものを通した。それが
  * 「今までと同じように動く」の定義 ([agent.md](../docs/agent.md))。
  *
  *     bun run test:conformance
@@ -16,6 +16,9 @@
  *
  * チューナーの代わりは `tests/fake/tune.ts` (`FAKE_TUNE`)。エージェントから見れば
  * 「起こすと TS を流し続ける子プロセス」で、取り合いと配り方はそのまま通る。
+ *
+ * 普通のポートは HTTPS だけで、組んだ denpa しか通さない (docs/agent.md「denpa とは TLS で組む」)。
+ * ここでも denpa と同じく、自分の証明書を作って `POST /denpa/pair` で組んでから当てる。
  */
 import {
   afterAll,
@@ -25,15 +28,17 @@ import {
   expect,
   test,
 } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { createHash, createHmac } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -50,7 +55,6 @@ const AGENT_CMD = (process.env.AGENT_CMD ?? "agent/publish/denpa-agent").split(
   " ",
 );
 const PORT = Number(process.env.AGENT_TEST_PORT ?? 40881);
-const BASE = `http://127.0.0.1:${PORT}`;
 /** 鍵を配るポート (CARD_SHARE_PORT)。普通の API とは別 (agent/Denpa.Agent/CardShareServer.cs) */
 const SHARE_PORT = PORT + 3;
 const SHARE_BASE = `http://127.0.0.1:${SHARE_PORT}`;
@@ -80,27 +84,195 @@ const TUNERS = JSON.stringify(
   4,
 );
 
+/** 組むときの合言葉。本番でも denpa とエージェントに同じ値を渡す (`AGENT_PAIR_TOKEN`) */
+const TOKEN = "conformance-token";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 指紋: 証明書の DER の SHA-256 を小文字の 16 進で */
+const fingerprint = (pem: string) =>
+  createHash("sha256")
+    .update(
+      Buffer.from(
+        pem.replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, ""),
+        "base64",
+      ),
+    )
+    .digest("hex");
+
+/** 組むときの proof (agent/Denpa.Agent/AgentTls.cs の Proof) */
+const proof = (
+  token: string,
+  role: "client" | "agent",
+  agent: string,
+  client: string,
+) =>
+  createHmac("sha256", token)
+    .update(`denpa-pair/${role}\n${agent}\n${client}`)
+    .digest("base64url");
+
+/** denpa の代わりの鍵と自己署名の証明書 */
+interface Identity {
+  key: string;
+  cert: string;
+  fingerprint: string;
+}
+
+/**
+ * denpa が作るものに近づける: basicConstraints も EKU も付けない (openssl の既定の設定を読ませない)。
+ * エージェントは TLS の段ではどの証明書も受けるので、拡張が無くても繋がることをここで見る
+ */
+function identity(name: string): Identity {
+  const dir = mkdtempSync(join(tmpdir(), "denpa-client-"));
+  try {
+    writeFileSync(
+      join(dir, "openssl.cnf"),
+      "[req]\ndistinguished_name = dn\n[dn]\n",
+    );
+    execFileSync(
+      "openssl",
+      [
+        "req",
+        "-config",
+        join(dir, "openssl.cnf"),
+        "-x509",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-nodes",
+        "-keyout",
+        join(dir, "key.pem"),
+        "-out",
+        join(dir, "cert.pem"),
+        "-days",
+        "2",
+        "-subj",
+        `/CN=${name}`,
+      ],
+      { stdio: "ignore" },
+    );
+    const cert = readFileSync(join(dir, "cert.pem"), "utf8");
+    return {
+      key: readFileSync(join(dir, "key.pem"), "utf8"),
+      cert,
+      fingerprint: fingerprint(cert),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** 起こしたエージェント。証明書は tls/agent.crt から読む (denpa はこれを ca にする) */
+interface Agent {
+  base: string;
+  tlsDir: string;
+  ca: string;
+  fingerprint: string;
+}
+
+/** 組んだ denpa の代わり。どのエージェントともこれで組む */
+const denpa = identity("denpa-conformance");
+
+/**
+ * エージェントに当てる。`as` の証明書で繋ぐ (null なら出さない)。
+ * 証明書そのものを ca にするので名前は見ない (denpa と同じ)
+ */
+function call(
+  agent: Agent,
+  path: string,
+  init: RequestInit = {},
+  as: Identity | null = denpa,
+) {
+  return fetch(`${agent.base}${path}`, {
+    ...init,
+    tls: {
+      ca: agent.ca,
+      ...(as === null ? {} : { cert: as.cert, key: as.key }),
+      checkServerIdentity: () => undefined,
+    },
+  });
+}
+
+/**
+ * 組む。`client` は名乗る指紋 (既定は `as` のもの)。**接続は使い回さない。**
+ * 別の証明書で張った接続に乗ると、エージェントが見る相手が変わってしまう
+ */
+function pair(
+  agent: Agent,
+  as: Identity = denpa,
+  token = TOKEN,
+  client = as.fingerprint,
+) {
+  return call(
+    agent,
+    "/denpa/pair",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client,
+        proof: proof(token, "client", agent.fingerprint, client),
+      }),
+      keepalive: false,
+    },
+    as,
+  );
+}
+
+/** 起こしたエージェントが証明書を作って待ち受けるまで待ち、denpa の代わりで組む */
+async function ready(
+  port: number,
+  tlsDir: string,
+  child: Bun.Subprocess,
+  token: string | null = TOKEN,
+  ms = 30_000,
+): Promise<Agent> {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (child.exitCode !== null)
+      throw new Error(`:${port} のエージェントが起動直後に落ちました`);
+    try {
+      const ca = readFileSync(join(tlsDir, "agent.crt"), "utf8");
+      const agent = {
+        base: `https://127.0.0.1:${port}`,
+        tlsDir,
+        ca,
+        fingerprint: fingerprint(ca),
+      };
+      const given =
+        token ?? readFileSync(join(tlsDir, "pair-token"), "utf8").trim();
+      if ((await pair(agent, denpa, given)).ok) return agent;
+    } catch {
+      // まだ証明書が無い・待ち受けていない
+    }
+    if (Date.now() > until)
+      throw new Error(`:${port} のエージェントが応答しません`);
+    await sleep(100);
+  }
+}
+
 let work: string;
 let agent: Bun.Subprocess;
+let main: Agent;
 let log = "";
 
 const paths = () => ({
   tuners: join(work, "tuners.json"),
   channels: join(work, "channels.json"),
   recorded: join(work, "recorded"),
+  tls: join(work, "tls"),
 });
 
 const get = (path: string, signal?: AbortSignal) =>
-  fetch(`${BASE}${path}`, { signal });
+  call(main, path, { signal });
 const request = (method: string, path: string, body?: unknown) =>
-  fetch(`${BASE}${path}`, {
+  call(main, path, {
     method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
 const post = (path: string, body?: unknown) => request("POST", path, body);
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface TunerStatus {
   name: string;
@@ -109,6 +281,8 @@ interface TunerStatus {
   /** 選ぶ順。小さいほど先に使う (docs/agent.md「選ぶ順の約束」)。無効なチューナーは null */
   rank: number | null;
   device: string | null;
+  /** 名指しで選ぶときの目印 (stream の tuner)。デバイス、無ければ名前 */
+  pin: string;
   lnb: string | null;
   channel: { type: string; channel: string } | null;
   users: { use: string; priority: number }[];
@@ -200,6 +374,7 @@ beforeAll(async () => {
       CARD_SHARE_PORT: String(SHARE_PORT),
       // リリースのイメージが足す 1 層と同じ (`/denpa/about` のバージョン。About.cs)
       DENPA_VERSION: "v9.8.7",
+      AGENT_PAIR_TOKEN: TOKEN,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -215,18 +390,10 @@ beforeAll(async () => {
     }
   })();
 
-  const until = Date.now() + 30_000;
-  for (;;) {
-    if (agent.exitCode !== null)
-      throw new Error(`エージェントが起動直後に落ちました:\n${log}`);
-    try {
-      if ((await get("/denpa/tuners")).ok) break;
-    } catch {
-      // まだ待ち受けていない
-    }
-    if (Date.now() > until)
-      throw new Error(`エージェントが応答しません:\n${log}`);
-    await sleep(200);
+  try {
+    main = await ready(PORT, paths().tls, agent);
+  } catch (error) {
+    throw new Error(`${(error as Error).message}:\n${log}`);
   }
 });
 
@@ -237,7 +404,7 @@ beforeAll(async () => {
  * 1 枚挟んでいるため)。確保したままの状態で次のテストが始まると、取り合いの
  * 前提が崩れて何を見ているのか分からなくなる。
  *
- * 使っているチャンネル自体は残ってよい — 誰も読まなくなってから 5 秒は
+ * 使っているチャンネル自体は残ってよい。誰も読まなくなってから 5 秒は
  * わざと離さない作りで、次に開く人はその選局を共有するのが正しい。
  */
 afterEach(async () => {
@@ -263,6 +430,182 @@ afterAll(async () => {
   agent?.kill();
   await agent?.exited;
   rmSync(work, { recursive: true, force: true });
+});
+
+/*
+ * **組んだ denpa しか通さない** (docs/agent.md「denpa とは TLS で組む」)。ブラウザはクライアント証明書を
+ * 出さないので TLS の段で落ち、証明書を出しても組んでいなければ 403。組むには合言葉が要る
+ */
+describe("denpa と組む", () => {
+  const error = async (res: Response) =>
+    ((await res.json()) as { error: string }).error;
+
+  test("クライアント証明書を出さない相手は TLS の段で落とす。平文の HTTP も受けない", async () => {
+    await expect(
+      call(main, "/denpa/tuners", { keepalive: false }, null),
+    ).rejects.toThrow();
+    const plain = await fetch(`http://127.0.0.1:${PORT}/denpa/tuners`, {
+      keepalive: false,
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => null);
+    expect(plain?.status ?? 0).not.toBe(200);
+  });
+
+  test("組んでいない証明書には、組む API のほかは 403", async () => {
+    const stranger = identity("stranger");
+    for (const [method, path] of [
+      ["GET", "/denpa/tuners"],
+      ["GET", "/denpa/card"],
+      ["GET", "/denpa/logs"],
+      ["GET", "/denpa/stream?type=GR&channel=T16"],
+      ["GET", "/denpa/nope"],
+      ["GET", "/denpa/pair"],
+      ["PUT", "/denpa/tuners"],
+    ]) {
+      const res = await call(
+        main,
+        path,
+        { method, body: method === "PUT" ? "{}" : undefined, keepalive: false },
+        stranger,
+      );
+      expect({ path, status: res.status }).toEqual({ path, status: 403 });
+      const body = (await res.json()) as { error: string; paired: boolean };
+      // denpa は paired: false を見て組み直す (src/lib/server/agent-client.ts)
+      expect(body.paired).toBe(false);
+      expect(body.error).toContain("#pair=");
+    }
+    expect(readFileSync(join(paths().tls, "clients"), "utf8")).not.toContain(
+      stranger.fingerprint,
+    );
+  });
+
+  test("合言葉が違えば組めない", async () => {
+    const stranger = identity("stranger");
+    const res = await pair(main, stranger, "wrong-token");
+    expect(res.status).toBe(403);
+    expect(await error(res)).toBe("合言葉が違います");
+    expect(
+      (await call(main, "/denpa/tuners", { keepalive: false }, stranger))
+        .status,
+    ).toBe(403);
+  });
+
+  test("名乗った指紋が繋いだ証明書と違えば組めない", async () => {
+    // 組んだ denpa の指紋を名乗っても、その証明書の鍵を持っていなければ通らない
+    const stranger = identity("stranger");
+    const res = await pair(main, stranger, TOKEN, denpa.fingerprint);
+    expect(res.status).toBe(403);
+    expect(await error(res)).toBe("証明書が名乗りと違います");
+  });
+
+  test("合言葉から作った proof なら組めて、エージェントも合言葉を知っていると返す", async () => {
+    const newcomer = identity("newcomer");
+    const res = await pair(main, newcomer);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { proof: string }).proof).toBe(
+      proof(TOKEN, "agent", main.fingerprint, newcomer.fingerprint),
+    );
+    expect(
+      (await call(main, "/denpa/tuners", { keepalive: false }, newcomer))
+        .status,
+    ).toBe(200);
+    // 組み直しても重ねて書かない
+    expect((await pair(main, newcomer)).status).toBe(200);
+    const lines = readFileSync(join(paths().tls, "clients"), "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0);
+    expect(lines.sort()).toEqual(
+      [denpa.fingerprint, newcomer.fingerprint].sort(),
+    );
+    expect(log).toContain(
+      `denpa (${newcomer.fingerprint.slice(0, 16)}) と組みました`,
+    );
+  });
+
+  test("組む URL は組む前の起動のときだけ標準出力に出し、/denpa/logs には載せない", async () => {
+    expect(log).toContain(`denpa と組むときの URL: https://`);
+    expect(log).toContain(`:${PORT}#pair=${TOKEN}`);
+    expect(await (await get("/denpa/logs")).text()).not.toContain(TOKEN);
+  });
+
+  /*
+   * インストーラが動いているエージェントの様子を見る入口。自分の証明書 (agent.key) で繋ぐので組まなくてよい
+   * (agent.key を読めるのはその機械の管理者だけ)
+   */
+  test("--status は自分の証明書で繋いで /denpa/tuners をそのまま出す。繋がらなければ 1", async () => {
+    const env = {
+      ...process.env,
+      TUNERS_FILE: paths().tuners,
+      CHANNELS_FILE: paths().channels,
+    };
+    const ok = Bun.spawnSync([...AGENT_CMD, "--status"], {
+      cwd: ROOT,
+      env: { ...env, AGENT_PORT: String(PORT) },
+    });
+    expect(ok.exitCode).toBe(0);
+    const body = JSON.parse(ok.stdout.toString()) as { tuners: TunerStatus[] };
+    expect(Array.isArray(body.tuners)).toBe(true);
+
+    // 誰も待ち受けていないポート
+    const down = Bun.spawnSync([...AGENT_CMD, "--status"], {
+      cwd: ROOT,
+      env: { ...env, AGENT_PORT: String(PORT + 6) },
+    });
+    expect(down.exitCode).toBe(1);
+    expect(down.stdout.toString()).toBe("");
+    expect(down.stderr.toString().length).toBeGreaterThan(0);
+  });
+
+  test("合言葉を渡さなければ tls/pair-token に作り、--pair で同じ URL を出す。鍵は作り直さない", async () => {
+    const room = mkdtempSync(join(tmpdir(), "denpa-agent-pair-"));
+    try {
+      const env = {
+        ...process.env,
+        TUNERS_FILE: join(room, "tuners.json"),
+        CHANNELS_FILE: join(room, "channels.json"),
+        AGENT_PORT: "1234",
+      };
+      delete env.AGENT_PAIR_TOKEN;
+      const printed = () =>
+        Bun.spawnSync([...AGENT_CMD, "--pair"], {
+          cwd: ROOT,
+          env,
+        }).stdout.toString();
+      const first = printed();
+      const token = readFileSync(
+        join(room, "tls", "pair-token"),
+        "utf8",
+      ).trim();
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(first).toMatch(
+        new RegExp(`^https://[^/:]+:1234#pair=${token}\\n$`),
+      );
+      const cert = readFileSync(join(room, "tls", "agent.crt"), "utf8");
+      if (process.platform !== "win32") {
+        expect(statSync(join(room, "tls", "pair-token")).mode & 0o777).toBe(
+          0o600,
+        );
+        expect(statSync(join(room, "tls", "agent.key")).mode & 0o777).toBe(
+          0o600,
+        );
+      }
+      expect(printed()).toBe(first);
+
+      // 起こしても同じ証明書のまま、ファイルの合言葉で組める
+      const { agent: other, stop } = await spawnAgent(
+        PORT + 2,
+        { AGENT_PAIR_TOKEN: "" },
+        { room, token: null },
+      );
+      try {
+        expect(other.ca).toBe(cert);
+      } finally {
+        await stop();
+      }
+    } finally {
+      rmSync(room, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("チューナー", () => {
@@ -330,7 +673,7 @@ describe("チューナー", () => {
    * ReadableStream を `error()` にしても向こうには**正常終了として届く**
    * (Bun は残りの chunk を打ち切って畳むだけで、接続を壊さない)。
    *
-   * なので API の約束はこうする — **選局は利用者が切るまで終わらない。**
+   * なので API の約束はこうする。**選局は利用者が切るまで終わらない。**
    * 向こうから終わったなら、それは失敗である。読む側 (denpa) は EOF を
    * 「録り終えた」と読んではいけない。この約束なら .NET でも成り立つ
    */
@@ -356,10 +699,10 @@ describe("チューナー", () => {
    * 落ちた回をどれも接続を壊して知らせていた頃は、状態行すら送る前に
    * 落ちても接続だけ切れていて、呼んだ側に届くのは
    * `socket connection was closed unexpectedly` だけだった。実機で
-   * 番組表集めが同じ数チャンネルを毎周落とし続けていたが、
+   * 番組表の取得が同じ数チャンネルを毎周落とし続けていたが、
    * **電波なのか取り損ねなのか設定なのかが記録から分からなかった。**
    *
-   * 送り始めたあとは今まで通り壊す (上のテスト) — 途中まで書いた本文を
+   * 送り始めたあとは今まで通り壊す (上のテスト)。途中まで書いた本文を
    * きれいに閉じると「録り終えた」ように届いてしまうため。
    */
   test("送る前に選局が落ちたら、理由を付けて 500 で返す", async () => {
@@ -396,7 +739,7 @@ describe("チューナー", () => {
 
 describe("通知 (SSE)", () => {
   /**
-   * **繋いだ時点で応答が返る。** 何も起きていなくてもヘッダは先に送る — 最初の
+   * **繋いだ時点で応答が返る。** 何も起きていなくてもヘッダは先に送る。最初の
    * 通知まで黙っていると、denpa の fetch は応答待ちのまま 5 分で切られ、
    * 静かな時間帯に「チューナーに繋がりません」が鳴る (実機で 1 時間おきに鳴った)
    */
@@ -485,6 +828,17 @@ describe("チャンネル", () => {
     expect(put.status).toBe(400);
     expect(readFileSync(paths().channels, "utf8")).toBe(before);
   });
+
+  test("文字列でない値の差し替えは 400 で断る", async () => {
+    const before = readFileSync(paths().channels, "utf8");
+    for (const body of [
+      { scanned: [1], channels: [{ type: "GR", channel: "T27" }] },
+      { scanned: ["GR"], channels: [{ type: "GR", channel: 27 }] },
+    ]) {
+      expect((await request("PUT", "/denpa/channels", body)).status).toBe(400);
+    }
+    expect(readFileSync(paths().channels, "utf8")).toBe(before);
+  });
 });
 
 /** `/denpa/logs` の形式 (agent/Denpa.Agent/Json.cs の LogRing) */
@@ -560,9 +914,16 @@ function expectReader(reader: CardReader) {
   if (reader.error !== undefined) expect(typeof reader.error).toBe("string");
 }
 
-/** 別のエージェントを起こして、`/denpa/card` が答えるまで待つ。止めるのは呼んだ側 (`stop`) */
-async function spawnAgent(port: number, env: Record<string, string>) {
-  const room = mkdtempSync(join(tmpdir(), "denpa-agent-card-"));
+/**
+ * 別のエージェントを起こして組み、`/denpa/card` を読む。止めるのは呼んだ側 (`stop`)。
+ * `room` を渡せばその置き場で起こす (片付けはしない)。`token` が null なら tls/pair-token の合言葉で組む
+ */
+async function spawnAgent(
+  port: number,
+  env: Record<string, string>,
+  { room: given, token = TOKEN }: { room?: string; token?: string | null } = {},
+) {
+  const room = given ?? mkdtempSync(join(tmpdir(), "denpa-agent-card-"));
   writeFileSync(join(room, "tuners.json"), TUNERS);
   writeFileSync(
     join(room, "channels.json"),
@@ -577,27 +938,27 @@ async function spawnAgent(port: number, env: Record<string, string>) {
       CHANNELS_FILE: join(room, "channels.json"),
       RAW_DIR: join(room, "recorded"),
       FAKE_TUNE: TUNE,
+      AGENT_PAIR_TOKEN: TOKEN,
       ...env,
     },
-    stdout: "ignore",
+    stdout: "pipe",
     stderr: "ignore",
   });
   const stop = async () => {
     other.kill("SIGKILL");
     await other.exited;
-    rmSync(room, { recursive: true, force: true });
+    if (given === undefined) rmSync(room, { recursive: true, force: true });
   };
-  for (let i = 0; i < 100; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/denpa/card`);
-      if (res.ok) return { card: (await res.json()) as CardStatus, stop };
-    } catch {
-      // まだ待ち受けていない
-    }
-    await sleep(100);
+  try {
+    const agent = await ready(port, join(room, "tls"), other, token, 10_000);
+    const card = (await (
+      await call(agent, "/denpa/card")
+    ).json()) as CardStatus;
+    return { card, agent, other, stop };
+  } catch (error) {
+    await stop();
+    throw error;
   }
-  await stop();
-  throw new Error(`:${port} のエージェントが応答しません`);
 }
 
 describe("カードとスクランブルの復号", () => {
@@ -622,7 +983,7 @@ describe("カードとスクランブルの復号", () => {
     expect((await get("/denpa/card/init")).status).toBe(404);
     expect((await post("/denpa/card/ecm", {})).status).toBe(404);
 
-    // 専用のポート。カードが無いので、理由を付けて 503
+    // 専用のポート。**平文の HTTP のまま** (LAN の中だけで配る。docs/agent.md)。カードが無いので、理由を付けて 503
     const init = await fetch(`${SHARE_BASE}/denpa/card/init`);
     expect(init.status).toBe(503);
     expect(
@@ -754,26 +1115,6 @@ describe("カードとスクランブルの復号", () => {
     30_000,
   );
 
-  /*
-   * **本文を読む API は JSON と名乗ったものしか受けない** (docs/agent.md「エージェントは認証を持たない」)。
-   * text/plain はブラウザが下調べなしに送れるので、外のサイトから書き込めてしまう
-   */
-  test("JSON と名乗らない本文は 415 で断る", async () => {
-    for (const [method, path] of [
-      ["POST", "/denpa/decode"],
-      ["PUT", "/denpa/tuners"],
-      ["PUT", "/denpa/channels"],
-    ]) {
-      const res = await fetch(`${BASE}${path}`, {
-        method,
-        headers: { "Content-Type": "text/plain" },
-        // 通ってしまっても何も書き換えない本文 (受けていれば 400 か 500)
-        body: "{}",
-      });
-      expect(res.status).toBe(415);
-    }
-  });
-
   test("復号の書き出し先がもうあれば上書きしない", async () => {
     writeFileSync(join(paths().recorded, "keep-in.ts"), new Uint8Array(188));
     writeFileSync(join(paths().recorded, "keep-out.ts"), "録画");
@@ -790,6 +1131,11 @@ describe("カードとスクランブルの復号", () => {
     );
   });
 
+  test("復号のパスが文字列でなければ 400", async () => {
+    const res = await post("/denpa/decode", { input: 5, output: "x.ts" });
+    expect(res.status).toBe(400);
+  });
+
   test("置き場の外は復号に回さない", async () => {
     const res = await post("/denpa/decode", {
       input: "../../etc/passwd",
@@ -803,7 +1149,7 @@ describe("カードとスクランブルの復号", () => {
 
   /*
    * **カードが無ければ復号できない。** ここにリーダーは無いので、確かめるのは
-   * 「復号できたか」ではなく **黙って壊れないこと** — 復号できなければ理由が返り、
+   * 「復号できたか」ではなく **黙って壊れないこと。** 復号できなければ理由が返り、
    * 復号できたなら掛かっていない TS が出る。
    *
    * 復号するのもカードを扱うのもエージェントの中なので、外から偽物を差し込めない
@@ -833,95 +1179,6 @@ describe("カードとスクランブルの復号", () => {
   });
 });
 
-/**
- * `Host` を指定して当てる。fetch は `Host` を URL から作るので、ソケットに手で書く。
- * `host` が null なら `Host` を付けない HTTP/1.0。状態コードと本文を返す
- */
-function rawGet(
-  path: string,
-  host: string | null,
-  port = PORT,
-): Promise<{ status: number; body: string }> {
-  return new Promise((done, fail) => {
-    const socket = connect(port, "127.0.0.1", () => {
-      socket.write(
-        host === null
-          ? `GET ${path} HTTP/1.0\r\n\r\n`
-          : `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`,
-      );
-    });
-    let text = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk: string) => {
-      text += chunk;
-    });
-    socket.on("error", fail);
-    socket.on("end", () => {
-      const status = Number(/^HTTP\/1\.\d (\d{3})/.exec(text)?.[1] ?? 0);
-      done({ status, body: text.slice(text.indexOf("\r\n\r\n") + 4) });
-    });
-  });
-}
-
-/*
- * **知らない名前で呼ばれたら答えない** (docs/agent.md「エージェントは認証を持たない」)。
- * 悪いサイトが自分の名前を 127.0.0.1 に向け直しても、ブラウザが付ける `Host` はそのサイトの名前のまま
- */
-describe("呼ばれる名前", () => {
-  test("denpa が繋いでくる名前なら答える", async () => {
-    for (const host of [
-      `tuner-agent:${PORT}`,
-      `tuner-agent.denpa.svc.cluster.local:${PORT}`,
-      `host.docker.internal:${PORT}`,
-      `127.0.0.1:${PORT}`,
-      `[::1]:${PORT}`,
-      `172.29.80.1:${PORT}`,
-      `my-mac.local:${PORT}`,
-    ]) {
-      expect({
-        host,
-        status: (await rawGet("/denpa/tuners", host)).status,
-      }).toEqual({ host, status: 200 });
-    }
-  });
-
-  test("知らない名前・名前の無い呼び出しには 403 で断り、足す先をログに出す", async () => {
-    for (const path of [
-      "/denpa/card",
-      "/denpa/logs",
-      "/denpa/tuners",
-      "/denpa/stream?type=GR&channel=T16",
-    ]) {
-      const res = await rawGet(path, `evil.example:${PORT}`);
-      expect({ path, status: res.status }).toEqual({ path, status: 403 });
-      expect(res.body).toContain("AGENT_ALLOWED_HOSTS");
-    }
-    expect((await rawGet("/denpa/tuners", null)).status).toBe(403);
-    expect(log).toContain("evil.example");
-    expect(log).toContain("AGENT_ALLOWED_HOSTS");
-  });
-
-  test("AGENT_ALLOWED_HOSTS に書いた名前なら答える", async () => {
-    const port = PORT + 2;
-    const { stop } = await spawnAgent(port, {
-      AGENT_ALLOWED_HOSTS: "tuner.example.com,.tail1234.ts.net",
-    });
-    try {
-      expect(
-        (await rawGet("/denpa/tuners", "tuner.example.com", port)).status,
-      ).toBe(200);
-      expect(
-        (await rawGet("/denpa/tuners", "agent.tail1234.ts.net", port)).status,
-      ).toBe(200);
-      expect((await rawGet("/denpa/tuners", "evil.example", port)).status).toBe(
-        403,
-      );
-    } finally {
-      await stop();
-    }
-  }, 30_000);
-});
-
 test("知らないエンドポイントは 404", async () => {
   expect((await get("/denpa/nope")).status).toBe(404);
 });
@@ -933,7 +1190,7 @@ test("知らないエンドポイントは 404", async () => {
 describe("機材の定義", () => {
   /**
    * **画面から書き換えられる。** 受け取るのはデバイスと種別と LNB だけで、
-   * 選局コマンドは持たない — 自由な文字列を受けると
+   * 選局コマンドは持たない。自由な文字列を受けると
    * 「denpa に入れた人がチューナー側で好きなコマンドを走らせられる」
    * ことになる (しかもあちらは privileged)
    */
@@ -1094,55 +1351,24 @@ describe("機材の定義", () => {
  */
 describe("止まれと言われたとき", () => {
   const PORT2 = PORT + 1;
-  const BASE2 = `http://127.0.0.1:${PORT2}`;
+  /** いま立てているほう (`spawnOther`) */
+  let second: Agent;
 
-  /** 別のエージェントを立てて、聞き始めるまで待つ。`stop` で必ず片付ける */
+  /** 別のエージェントを立てて、組むまで待つ。`stop` で必ず片付ける */
   async function spawnOther() {
-    const room = mkdtempSync(join(tmpdir(), "denpa-agent-stop-"));
-    writeFileSync(join(room, "tuners.json"), TUNERS);
-    writeFileSync(
-      join(room, "channels.json"),
-      JSON.stringify(channels(), null, 4),
-    );
-
-    const other = Bun.spawn(AGENT_CMD, {
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        AGENT_PORT: String(PORT2),
-        TUNERS_FILE: join(room, "tuners.json"),
-        CHANNELS_FILE: join(room, "channels.json"),
-        RAW_DIR: join(room, "recorded"),
-        FAKE_TUNE: TUNE,
-        FAKE_SLOTS: "4",
-        // 本番は 6 時間。テストなので短くするが、待つ流れは同じ
-        SHUTDOWN_WAIT: "30000",
-      },
-      stdout: "ignore",
-      stderr: "ignore",
+    const { agent, other, stop } = await spawnAgent(PORT2, {
+      FAKE_SLOTS: "4",
+      // 本番は 6 時間。テストなので短くするが、待つ流れは同じ
+      SHUTDOWN_WAIT: "30000",
     });
-
-    for (let i = 0; i < 100; i++) {
-      try {
-        if ((await fetch(`${BASE2}/denpa/tuners`)).ok) break;
-      } catch {
-        // まだ聞いていない
-      }
-      await sleep(100);
-    }
-
-    const stop = async () => {
-      other.kill("SIGKILL");
-      await other.exited;
-      rmSync(room, { recursive: true, force: true });
-    };
+    second = agent;
     return { other, stop };
   }
 
   /** 開いて最初の塊まで読む。`abort` で接続ごと切る */
   async function openOn(path: string) {
     const aborter = new AbortController();
-    const res = await fetch(`${BASE2}${path}`, { signal: aborter.signal });
+    const res = await call(second, path, { signal: aborter.signal });
     expect(res.ok).toBe(true);
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
     await reader.read();
@@ -1228,7 +1454,7 @@ describe("止まれと言われたとき", () => {
     const { other, stop } = await spawnOther();
     try {
       const aborter = new AbortController();
-      const events = await fetch(`${BASE2}/denpa/events`, {
+      const events = await call(second, "/denpa/events", {
         signal: aborter.signal,
       });
       expect(events.ok).toBe(true);
@@ -1246,4 +1472,135 @@ describe("止まれと言われたとき", () => {
       await stop();
     }
   }, 60_000);
+});
+
+/**
+ * デバッグ用の名指し。**ファイルの最後に置く。** 名指しで使ったチューナーに選局が余韻で残るので、
+ * 前提が崩れる (空いているチューナーが使われていない、など) テストが後ろにあると巻き込む。
+ */
+describe("チューナーの名指し", () => {
+  // 前の描画で定義を書き換えていても、顔ぶれ (gr0 / bs0 / bs1 / off0) をそろえてから始める
+  beforeAll(async () => {
+    const put = await request("PUT", "/denpa/tuners", {
+      tuners: [
+        { name: "gr0", types: ["GR"] },
+        { name: "bs0", types: ["BS", "CS"] },
+        { name: "bs1", types: ["BS", "CS"] },
+        { name: "off0", types: ["GR"], disabled: true },
+      ],
+    });
+    expect(put.status).toBe(200);
+  });
+
+  test("tuner を指定すると、順位が後ろでもそのチューナーで選局する", async () => {
+    const status = await tuners();
+    expect(status.map((t) => t.pin)).toEqual(["gr0", "bs0", "bs1", "off0"]);
+    const stream = await open(
+      "type=BS&channel=BS11:18000&use=pin%201&priority=5&tuner=bs1",
+    );
+    expect(stream.status).toBe(200);
+    await stream.reader?.read();
+
+    const after = await tuners();
+    expect(after[1].users).toEqual([]);
+    expect(after[2].users.map((u) => u.use)).toEqual(["pin 1"]);
+    stream.close();
+  });
+
+  test("tuner を指定しても、同じチャンネルをほかのチューナーが読んでいれば共有せず、指定のチューナーで選局する", async () => {
+    const a = await open(
+      "type=BS&channel=BS11:18000&use=pin%202&priority=5&tuner=bs0",
+    );
+    await a.reader?.read();
+    const b = await open(
+      "type=BS&channel=BS11:18000&use=pin%203&priority=5&tuner=bs1",
+    );
+    expect(b.status).toBe(200);
+    await b.reader?.read();
+
+    const status = await tuners();
+    expect(status[1].users.map((u) => u.use)).toEqual(["pin 2"]);
+    expect(status[2].users.map((u) => u.use)).toEqual(["pin 3"]);
+    a.close();
+    b.close();
+  });
+
+  test("tuner が無い・無効・その種別を受けられないときは 400 で理由を返す", async () => {
+    for (const tuner of ["none", "off0", "gr0"]) {
+      const res = await open(
+        `type=BS&channel=BS11:18000&use=pin%204&priority=5&tuner=${tuner}`,
+      );
+      expect(res.status).toBe(400);
+    }
+  });
+
+  test("指定のチューナーを同じか優先度の高い相手が使っていれば、空きがあっても 409 で断る", async () => {
+    const holder = await open(
+      "type=BS&channel=BS11:18000&use=rec%209&priority=10&tuner=bs1",
+    );
+    await holder.reader?.read();
+    const res = await open(
+      "type=BS&channel=BS03:16432&use=pin%205&priority=5&tuner=bs1",
+    );
+    expect(res.status).toBe(409);
+    // 空いている bs0 には振り替えない
+    expect((await tuners())[1].users).toEqual([]);
+    holder.close();
+  });
+
+  test("同じチューナーを名指しして同じチャンネルを見る 2 台目は、優先度が低くても選局を共有する", async () => {
+    const a = await open(
+      "type=BS&channel=BS11:18000&use=pin%206&priority=10&tuner=bs1",
+    );
+    await a.reader?.read();
+    const b = await open(
+      "type=BS&channel=BS11:18000&use=pin%207&priority=5&tuner=bs1",
+    );
+    expect(b.status).toBe(200);
+    await b.reader?.read();
+
+    const status = await tuners();
+    expect(status[2].users.map((u) => u.use)).toEqual(["pin 6", "pin 7"]);
+    a.close();
+    b.close();
+  });
+});
+
+describe("定義の書き換えと選局", () => {
+  const FOUR = [
+    { name: "gr0", types: ["GR"] },
+    { name: "bs0", types: ["BS", "CS"] },
+    { name: "bs1", types: ["BS", "CS"] },
+    { name: "off0", types: ["GR"], disabled: true },
+  ];
+
+  test("名前を変えずに無効にしたチューナーの選局は畳み、利用者を残さない", async () => {
+    expect(
+      (await request("PUT", "/denpa/tuners", { tuners: FOUR })).status,
+    ).toBe(200);
+    try {
+      const stream = await open("type=GR&channel=T16&use=epg%20T16&priority=3");
+      await stream.reader?.read();
+      expect((await tuners())[0].users.map((u) => u.use)).toEqual(["epg T16"]);
+
+      const off = FOUR.map((t) =>
+        t.name === "gr0" ? { ...t, disabled: true } : t,
+      );
+      expect(
+        (await request("PUT", "/denpa/tuners", { tuners: off })).status,
+      ).toBe(200);
+      // 畳まれたので読めなくなる。読めなくなること自体が合図
+      const ended = await Promise.race([
+        drain(stream.reader as ReadableStreamDefaultReader),
+        sleep(5000).then(() => null),
+      ]);
+      expect(ended).not.toBeNull();
+      const status = await tuners();
+      expect(status[0].users).toEqual([]);
+      expect(status[0].channel).toBeNull();
+    } finally {
+      // 途中で落ちても、後ろのテストに無効のまま残さない
+      await request("PUT", "/denpa/tuners", { tuners: FOUR });
+    }
+  });
 });

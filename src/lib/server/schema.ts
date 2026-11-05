@@ -27,17 +27,17 @@ import { config } from "./config";
  *   マイグレーションが出るので、一緒にコミットする。当てるのは起動時 (`db.ts`)
  *
  * 前は SQL の文字列 (`CREATE TABLE IF NOT EXISTS` + 後から足した列の一覧) と
- * TS の interface を別々に書いていた。列を足すときに3箇所を直すことになり、
+ * TS の interface を別々に書いていた。列を足すときに 3 箇所を直すことになり、
  * 片方だけ直しても TS は何も言わなかった (`queryOne<Recording>` はキャスト)。
  * 実際に本番が 500 を返したこともある (列を SQL に書いただけで、動いている DB には
  * 足されていなかった)。
  *
  * 真偽を 0/1 で持つ列 (`enabled` / `manual` / `encode` / `has_logo` / `is_free` など)
  * は `{ mode: 'boolean' }` で読み書きする。DB の中は今までどおり 0/1 で、既定値も
- * `sql\`1\`` のまま書く — `default(true)` にすると drizzle-kit が `DEFAULT true` を
+ * `sql\`1\`` のまま書く。`default(true)` にすると drizzle-kit が `DEFAULT true` を
  * 出して、中身の変わらないマイグレーション (テーブルの作り直し) が出てしまう。
- * snapshot (drizzle/meta/0000) の既定値もこの書き方 ("1") に手で揃えてある —
- * 数の 1 と `sql\`1\`` は同じ DDL になるのに、snapshot の上では別物と見なされるので
+ * snapshot (drizzle/meta/0000) の既定値もこの書き方 ("1") に手で揃えてある。
+ * 数の 1 と `sql\`1\`` は同じ DDL になるのに、snapshot の上では別物と見なされるため
  */
 
 /** 真偽の列。DB の中は 0/1 */
@@ -48,7 +48,7 @@ const flag = (name: string) => integer(name, { mode: "boolean" });
  *
  * drizzle の `{ mode: 'json' }` は使わない。あれは読めない行で例外を投げるが、
  * ここに入っているのは放送から取得したものや、取り込みの時期によって形式が違うもの
- * (古い行は `''`、EPGStation から来たジャンルは数の並び) で、1行が読めないせいで
+ * (古い行は `''`、EPGStation から来たジャンルは数の並び) で、1 行が読めないせいで
  * 一覧ごと出なくなるのは困る。読めない行はその列を「持っていない」ことにして、
  * 残りは見えるようにする。NULL の行は drizzle が読み取り関数を呼ばない (NULL のまま)
  */
@@ -123,17 +123,21 @@ const RECORDING_STATE = `
 /**
  * 画面に出す予約の状態。**録り始めてからは録画の行が決める。**
  *
- * DBに入っているのは `scheduled | conflict | skipped | canceled | missed` だけ。
+ * DB に入っているのは `scheduled | conflict | skipped | canceled | missed` だけ。
  * 予約 `r` と、その予約で録れた最新の録画 `rec` を LEFT JOIN した上で使う
  * (一覧と番組表の両方が要るので、式はここにしか置かない)。
- * どちらも `alias()` したものを渡してよい — 列は名指しなので別名がそのまま効く
+ * どちらも `alias()` したものを渡してよい。列は名指しなので別名がそのまま効く
  */
 export function reservationState(
   r: { started_at: AnySQLiteColumn; state: AnySQLiteColumn },
   rec: { state: AnySQLiteColumn },
 ) {
+  /*
+   * 録画の行が無ければ予約の状態のまま。録り始めてから同じ回をもう録ってあると分かってやめたもの
+   * (`skipped`。`recorder.skipDuplicate` が録画の行を消す) と、それを取り消したもの
+   */
   return sql<ReservationState>`CASE
-            WHEN ${r.started_at} IS NULL THEN ${r.state}
+            WHEN ${r.started_at} IS NULL OR ${rec.state} IS NULL THEN ${r.state}
             WHEN ${rec.state} = 'recording' THEN 'recording'
             WHEN ${rec.state} = 'failed' THEN 'failed'
             ELSE 'done'
@@ -151,7 +155,7 @@ export function lastEncodeError(recordingId: AnySQLiteColumn) {
         ORDER BY j2.id DESC LIMIT 1)`;
 }
 
-/** 録画の、動いている (待ち・実行中) エンコード。録画1本につき高々1つ (`encoder.enqueue` が重複を弾く) */
+/** 録画の、動いている (待ち・実行中) エンコード。録画 1 本につき高々 1 つ (`encoder.enqueue` が重複を弾く) */
 export function activeEncodeJobId(recordingId: AnySQLiteColumn) {
   return sql<
     number | null
@@ -187,14 +191,14 @@ export const webhooks = sqliteTable("webhooks", {
 });
 
 export const services = sqliteTable("services", {
-  /** 局の内部ID (tuner.ts の serviceKey) */
+  /** 局の内部 ID (tuner.ts の serviceKey) */
   id: integer("id").primaryKey(),
   service_id: integer("service_id").notNull(),
   network_id: integer("network_id").notNull(),
   name: text("name").notNull(),
   type: text("type").$type<ChannelType>().notNull(),
   /**
-   * ARIB のサービス種別 (STD-B10)。1 = デジタルTV、2 = デジタル音声、
+   * ARIB のサービス種別 (STD-B10)。1 = デジタル TV、2 = デジタル音声、
    * 192 = データ/ワンセグ、164 = エンジニアリング。録るのは 1 だけ
    */
   service_type: integer("service_type").notNull().default(1),
@@ -208,7 +212,7 @@ export const services = sqliteTable("services", {
 });
 
 /**
- * チャンネルを受信できたか。**番組表集めのついでに確かめる** (`reception.ts`)。
+ * チャンネルを受信できたか。**番組表の取得のついでに確かめる** (`reception.ts`)。
  *
  * BS と CS は放送の一覧 (NIT) から作るので、その家で受信できないチャンネルも入る
  * (CATV で一部の中継器しか通らない、など)。受信できないと分かったチャンネルの局は、
@@ -253,7 +257,7 @@ export const channelChanges = sqliteTable("channel_changes", {
 export const programs = sqliteTable(
   "programs",
   {
-    /** 番組ID (tuner.ts の programKey) */
+    /** 番組 ID (tuner.ts の programKey) */
     id: integer("id").primaryKey(),
     service_id: integer("service_id").notNull(),
     network_id: integer("network_id").notNull(),
@@ -280,7 +284,7 @@ export const programs = sqliteTable(
     /** 1080i / 480i など */
     video_resolution: text("video_resolution"),
     /**
-     * **コピー禁止の番組か** (EIT のデジタルコピー制御記述子)。禁止の番組は録らない —
+     * **コピー禁止の番組か** (EIT のデジタルコピー制御記述子)。禁止の番組は録らず、
      * 予約は「録画しない」になる (`scheduler.resolveConflicts`)。docs/data.md「コピー禁止の番組」
      */
     copy_never: flag("copy_never")
@@ -290,7 +294,7 @@ export const programs = sqliteTable(
      * **シリーズ** (EIT のシリーズ記述子)。載せる局のぶんだけ入り、載っていない番組は全部 NULL。
      * docs/data.md「シリーズ」
      */
-    /** シリーズの番号。**局の中でだけ決まる** — 比べるときは局 (`service_id`) と組にする */
+    /** シリーズの番号。**局の中でだけ決まる。** 比べるときは局 (`service_id`) と組にする */
     series_id: integer("series_id"),
     /**
      * 再放送の印 (repeat_label)。0 はオリジナル、それ以外はオリジナルと期間の重なる再放送。
@@ -324,7 +328,7 @@ export const rules = sqliteTable("rules", {
   search_fields: text("search_fields").notNull().default("name"),
   /** JSON 配列。NULL は全局 */
   service_ids: json("service_ids", numbers),
-  /** JSON 配列 (GR/BS/CS/SKY)。個別の局 (`service_ids`) とのORで効く */
+  /** JSON 配列 (GR/BS/CS/SKY)。個別の局 (`service_ids`) との OR で効く */
   service_types: json("service_types", strings),
   /** JSON 配列。`"7"` (大分類) か `"7-0"` (中分類まで)。NULL は全ジャンル */
   genres: json("genres", strings),
@@ -356,7 +360,7 @@ export const rules = sqliteTable("rules", {
     .default(sql`0`),
   /**
    * **前の回は録らない** (`episode.earlierAirings`)。同じシリーズで、先の回を録った・予約したあとに
-   * 流れる前の話数 (1〜3話の一挙放送など) は予約しない。番組名が同じまま1話から数え直すシリーズを
+   * 流れる前の話数 (1〜3 話の一挙放送など) は予約しない。番組名が同じまま 1 話から数え直すシリーズを
    * 飛ばしてしまうので、新しく作るルールも切った状態で始まる。列を足す前のルールも 0
    */
   skip_earlier: flag("skip_earlier")
@@ -371,7 +375,7 @@ export const rules = sqliteTable("rules", {
  * **よそで録った番組の控え** (EPGStation に残っている録画のうちルールで録ったものと、EDCB の録画済みの一覧から引き継いだもの。
  * `migrate.ts`・`migrate-edcb.ts`)。
  *
- * 録画の行にはしない — ファイルが無いので、録画の一覧や番組表に出ても開けない。読むのは
+ * 録画の行にはしない。ファイルが無いので、録画の一覧や番組表に出ても開けない。読むのは
  * 「録ったことのある回」(`rules.historyEpisodes`) だけで、ルールの「同じ回は最初の放送だけ」と
  * 「前の回は録らない」がそれを見る。denpa が自分で録ったものは `recordings` の行が同じ役をする。
  *
@@ -388,7 +392,7 @@ export const recordedHistory = sqliteTable("recorded_history", {
 });
 
 /**
- * DB に入る予約の状態。**録り始めてからの状態は持たない** — 録画の行から
+ * DB に入る予約の状態。**録り始めてからの状態は持たない。** 録画の行から
  * 決まるので、画面に出す `recording | done | failed` は録画から引く
  * (`types.ts` の ReservationState、上の `reservationState()`)
  */
@@ -404,7 +408,7 @@ export const reservations = sqliteTable(
   "reservations",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    /** 1番組1予約。複数ルールが同じ番組にマッチしても二重録画にならないようにする */
+    /** 1 番組 1 予約。複数ルールが同じ番組にマッチしても二重録画にならないようにする */
     program_id: integer("program_id").notNull().unique(),
     rule_id: integer("rule_id"),
     service_id: integer("service_id").notNull(),
@@ -418,7 +422,7 @@ export const reservations = sqliteTable(
       .default(sql`0`),
     /**
      * 「エンコードするか否か」だけは予約した時点で固定する (recorder が読む)。エンコード方法の細目
-     * (元のTSを残すか・CMの扱い・コーデック) は持たず、エンコードするときに settings を見る
+     * (元の TS を残すか・CM の扱い・コーデック) は持たず、エンコードするときに settings を見る
      */
     encode: flag("encode")
       .notNull()
@@ -426,6 +430,8 @@ export const reservations = sqliteTable(
     /**
      * missed = 始まらないまま放送が終わったもの (アプリが止まっていた等)。
      * skipped = **録らないと決めたもの** (コピー禁止の番組。`scheduler.resolveConflicts`)。
+     * 録り始めてから同じ回をもう録ってあると分かったもの (`recorder.skipDuplicate`) もここ。こちらは
+     * 録り始めた時刻 (`started_at`) が入ったままで、録画の行は無い。
      * 理由は `conflict_reason` に入る。放送が終わっても skipped のまま (録り逃しにしない。意図して録らなかったもの)
      */
     state: text("state", { enum: RESERVATION_STATES })
@@ -487,7 +493,7 @@ export const recordings = sqliteTable(
     start_at: integer("start_at").notNull(),
     end_at: integer("end_at").notNull(),
     audio_type: integer("audio_type"),
-    /** 元のTS。元のTSの置き場 (`config.rawDir`) からの相対で持つ (`mediaPath`) */
+    /** 元の TS。元の TS の置き場 (`config.rawDir`) からの相対で持つ (`mediaPath`) */
     ts_path: mediaPath("ts_path", () => config.rawDir),
     ts_size: integer("ts_size").notNull().default(0),
     /**
@@ -512,7 +518,7 @@ export const recordings = sqliteTable(
      * **エンコードの失敗はここに書かない** (encode_jobs.error が持っている)
      */
     error: text("error"),
-    /** 検出したCM区間の JSON。UIでの確認用 */
+    /** 検出した CM 区間の JSON。UI での確認用 */
     cm_ranges: json("cm_ranges", objects<Range>()),
     /** 番組表から写したジャンル (JSON: [{lv1, lv2}])。番組詳細のジャンルのラベルに使う */
     genre_detail: json("genre_detail", objects<Genre>()),
@@ -523,14 +529,14 @@ export const recordings = sqliteTable(
     audios: json("audios", objects<Audio>()),
     /**
      * 番組表から写したシリーズの話数と再放送の印 (`programs` の同じ名前の列)。番組詳細の
-     * 「第N話 (全M話)」「最終回」「再放送」と、同じ回の見分け (`episode.episodeOf`) に使う
+     * 「第 N 話 (全 M 話)」「最終回」「再放送」と、同じ回の見分け (`episode.episodeOf`) に使う
      */
     series_episode: integer("series_episode"),
     series_last_episode: integer("series_last_episode"),
     series_repeat: integer("series_repeat"),
     /** 実際に録れた長さ。番組表の尺 (end_at - start_at) は予定でしかない。取れていなければ NULL (古い行) */
     duration_ms: integer("duration_ms"),
-    /** エンコードしたもののコマ数 (30/60)。実測 (fpsDetect) か既定の60。未エンコード・fps記録前の古い行は NULL */
+    /** エンコードしたもののコマ数 (30/60)。実測 (fpsDetect) か既定の 60。未エンコード・fps 記録前の古い行は NULL */
     fps: integer("fps"),
     /** 消した時刻 (denpa から、または外から)。行は履歴として残す */
     deleted_at: integer("deleted_at"),
@@ -547,29 +553,29 @@ export const recordings = sqliteTable(
       .notNull()
       .generatedAlwaysAs(sql.raw(RECORDING_STATE), { mode: "virtual" }),
     /**
-     * CM検出が何をしたか。一覧には出さず、録画の詳細で見せる。
+     * CM 検出が何をしたか。一覧には出さず、録画の詳細で見せる。
      * **ロゴを使えたかどうかもここから読む** (`format.logoUnusable`)
      */
     cm_note: text("cm_note"),
     /**
-     * CM を切ってエンコードしたときに**残した区間** (入れ物の頭からの秒)。NULL は切っていない。
-     * 切ったものからは CM を戻せないので、CM検出のやり直しはこれを見て断る (再エンコードを促す)
+     * CM を切ってエンコードしたときに**残した区間** (入れ物の先頭からの秒)。NULL は切っていない。
+     * 切ったものからは CM を戻せないので、CM 検出のやり直しはこれを見て断る (再エンコードを促す)
      */
     cm_kept: json("cm_kept", objects<Range>()),
     /**
-     * エンコードするときに頭から捨てた長さ (秒。`encoder.inputSkip`)。エンコードしたものの時刻 = 入れ物の頭からの秒 − これ。
-     * 元のTSから CM を検出し直してエンコードしたものにチャプターを書くときに引く。NULL はエンコードしていない (取り込んだ録画など)
+     * エンコードするときに先頭から捨てた長さ (秒。`encoder.inputSkip`)。エンコードしたものの時刻 = 入れ物の先頭からの秒 − これ。
+     * 元の TS から CM を検出し直してエンコードしたものにチャプターを書くときに引く。NULL はエンコードしていない (取り込んだ録画など)
      */
     encode_skip: real("encode_skip"),
     /**
      * **実際に使えた区間** (前後マージン込み。NULL = 番組どおり丸ごと)。予約から写す。
-     * 一覧で「頭が欠けている」と言うのに要る — **番組の時刻 (`start_at`) は
+     * 一覧で「先頭が欠けている」と言うのに要る。**番組の時刻 (`start_at`) は
      * 動かさない**ので、そちらとの差が欠けた幅になる
      */
     record_from: integer("record_from"),
     record_to: integer("record_to"),
     /**
-     * **元の TS の頭 (再生位置 0 の手前) の放送時刻** (unix ms)。最初の TDT から、そこまでに PCR が進んだぶんを引いて測る
+     * **元の TS の先頭 (再生位置 0 の手前) の放送時刻** (unix ms)。最初の TDT から、そこまでに PCR が進んだぶんを引いて測る
      * (`ts/ts-head.ts`)。録っている間 (`recorder.ts`) と、エンコードのとき (`recorded-bml.ts`。空なら) に書く。
      * 実況のコメントを再生位置に合わせるのに使う。測れていない録画 (TDT を読めない・取り込んだ録画) は NULL で、
      * そのときは予定の時刻 (`record_from ?? start_at − START_MARGIN`) で代わりに合わせる (`server/jikkyo.ts`)
@@ -578,7 +584,7 @@ export const recordings = sqliteTable(
     /**
      * どこまで観たか (ms)。**続きから観るためだけの目印。** まだ観ていない・観終えたものは NULL。
      * 端末に持たせず DB に置くのは、居間のタブレットで観たものを机の PC で
-     * 続けられるようにするため (`api/recordings/<id>/resume`)。**元の TS の物差し** (入れ物の頭から) で覚え、
+     * 続けられるようにするため (`api/recordings/<id>/resume`)。**元の TS の物差し** (入れ物の先頭から) で覚え、
      * エンコードしたもので観るときに直す (`ts/watch.ts` の `Ruler`。CM を切ったものと追っかけで同じ場面を指すため)
      */
     resume_ms: integer("resume_ms"),
@@ -594,15 +600,15 @@ export const recordings = sqliteTable(
   (t) => [
     index("recordings_state").on(t.state),
     index("recordings_start").on(sql`${t.start_at} DESC`),
-    // 番組表は1マスごとに「この番組で録れたものはあるか」を引く。
-    // 無いと24時間ぶんのマスの数だけ録画一覧を全部読むことになる
+    // 番組表は 1 マスごとに「この番組で録れたものはあるか」を引く。
+    // 無いと 24 時間ぶんのマスの数だけ録画一覧を全部読むことになる
     index("recordings_program").on(t.program_id),
     // ルールの「前の回は録らない」は、当たった放送のシリーズ名で期間を切らずに引く (`rules.seriesEpisodes`)
     index("recordings_series").on(t.series),
   ],
 );
 
-/** **CM 検出の材料の控え** (録画1本に1行)。中身と使いみちは `cm-material.ts` */
+/** **CM 検出の材料の控え** (録画 1 本に 1 行)。中身と使いみちは `cm-material.ts` */
 export const cmMaterials = sqliteTable("cm_materials", {
   recording_id: integer("recording_id")
     .primaryKey()
@@ -653,7 +659,7 @@ export const encodeJobs = sqliteTable(
   },
   (t) => [
     index("encode_jobs_state").on(t.state, t.id),
-    // 録画一覧は1行ごとに「この録画の最新のジョブ」を2回引く (状態と失敗の理由)
+    // 録画一覧は 1 行ごとに「この録画の最新のジョブ」を 2 回引く (状態と失敗の理由)
     index("encode_jobs_recording").on(t.recording_id, t.id),
   ],
 );
@@ -662,7 +668,7 @@ export const encodeJobs = sqliteTable(
 const CLIP_PLACES = ["live", "chase", "watch"] as const;
 
 /**
- * **切り抜き** (観ている1コマを字幕・コメントごと写した静止画。`clips.ts`)。画像は置き場 (`clips.clipsDir`) に AVIF で置き (字幕・コメントを分けて受けたものは元の画像も)、
+ * **切り抜き** (観ている 1 コマを字幕・コメントごと写した静止画。`clips.ts`)。画像は置き場 (`clips.clipsDir`) に AVIF で置き (字幕・コメントを分けて受けたものは元の画像も)、
  * ここには探すための情報を持つ。世帯で共有し、誰が撮ったかは持たない。
  *
  * 番組の情報は**撮ったときの値を写して持つ** (番組表は流れて消え、録画も消える。切り抜きは残す)
@@ -676,7 +682,7 @@ export const clips = sqliteTable(
     place: text("place", { enum: CLIP_PLACES }).notNull(),
     /** 撮った録画。ライブは同じ番組を録っていればそれ。**録画を消したら NULL** (`files.deleteRecordingFiles`) */
     recording_id: integer("recording_id"),
-    /** 局の内部ID (`tuner.serviceKey`) */
+    /** 局の内部 ID (`tuner.serviceKey`) */
     service_id: integer("service_id").notNull(),
     /** 番組。引けなかった (番組表に無い時刻) なら NULL */
     event_id: integer("event_id"),
@@ -700,7 +706,7 @@ export const clips = sqliteTable(
     bytes: integer("bytes").notNull(),
     /**
      * 字幕・実況のコメントを分けて受けたか (元の画像を `<ID>.src/` に持っている)。撮ったときに出していたものだけ。
-     * 分けて受けていないもの (字幕を重ねて1枚にした古い切り抜き) は両方 0 で、出し入れできない
+     * 分けて受けていないもの (字幕を重ねて 1 枚にした古い切り抜き) は両方 0 で、出し入れできない
      */
     has_captions: flag("has_captions")
       .notNull()
@@ -727,7 +733,7 @@ export const clips = sqliteTable(
 export const sessions = sqliteTable(
   "sessions",
   {
-    /** 推測できない文字列 (32バイト) */
+    /** 推測できない文字列 (32 バイト) */
     id: text("id").primaryKey(),
     /** ID トークンの sub。誰であるかはこれだけが決める */
     subject: text("subject").notNull(),
@@ -747,9 +753,9 @@ export const sessions = sqliteTable(
  * **アプリに渡したアクセストークン** (device-auth.ts)。テレビのアプリ (danything/denpa-tv) などが
  * `Authorization: Bearer <アクセストークン>` で入るためのもの。
  *
- * **アクセストークンそのものは持たない。** 持つのは SHA-256 だけで、トークンは渡すときに1度だけ返す。
+ * **アクセストークンそのものは持たない。** 持つのは SHA-256 だけで、トークンは渡すときに 1 度だけ返す。
  * DB が漏れても、ここから入れるトークンは作れない。消さずに `revoked_at` で止める
- * (いつ・誰が許したかを設定画面に残すため)
+ * (いつ・誰が許したかを行に残す。設定画面に並ぶのは取り消していないものだけ)
  */
 export const apiTokens = sqliteTable("api_tokens", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -757,7 +763,7 @@ export const apiTokens = sqliteTable("api_tokens", {
   name: text("name").notNull(),
   token_hash: text("token_hash").notNull().unique(),
   created_at: integer("created_at").notNull(),
-  /** 最後に使われた時刻。1分に1度しか書かない (毎回書くと映像の Range ごとに書く) */
+  /** 最後に使われた時刻。1 分に 1 度しか書かない (毎回書くと映像の Range ごとに書く) */
   last_used_at: integer("last_used_at"),
   revoked_at: integer("revoked_at"),
   /** 許した人。OIDC なら sub、信頼するネットワークから許したなら 'trusted-network' */
@@ -768,10 +774,10 @@ export const apiTokens = sqliteTable("api_tokens", {
  * **ペアリングの途中** (device-auth.ts。OAuth のデバイス認可 (RFC 8628) と同じ方式)。
  *
  * 端末が持つ `device_code` は推測できない秘密で、持つのは SHA-256 だけ。QR に載る
- * `user_code` (ABCD-EFGH) は短いので、10分で切れる。開いた人が入れる人で、コードを見比べて
- * 「ペアリング」を押したら許し、端末が次に聞きに来たときにアクセストークンを作って1度だけ渡し、
+ * `user_code` (ABCD-EFGH) は短いので、10 分で切れる。開いた人が入れる人で、コードを見比べて
+ * 「ペアリング」を押したら許し、端末が次に聞きに来たときにアクセストークンを作って 1 度だけ渡し、
  * `consumed_at` を付ける。
- * 断る手順は持たない (家で使う前提。コードは10分で切れ、1度しか使えない)
+ * 断る手順は持たない (家で使う前提。コードは 10 分で切れ、1 度しか使えない)
  */
 export const deviceCodes = sqliteTable(
   "device_codes",
@@ -785,13 +791,9 @@ export const deviceCodes = sqliteTable(
     created_at: integer("created_at").notNull(),
     expires_at: integer("expires_at").notNull(),
     last_polled_at: integer("last_polled_at"),
-    /** 許された時刻と、許した人。**アクセストークンはまだ作らない** (渡すときに作る。生のトークンを DB に置かないため) */
+    /** 許された時刻と、許した人。**アクセストークンはまだ作らない** (渡すときに作る。平文のトークンを DB に置かないため) */
     approved_at: integer("approved_at"),
     approved_by: text("approved_by"),
-    /** 渡したアクセストークン */
-    approved_token_id: integer("approved_token_id").references(
-      (): AnySQLiteColumn => apiTokens.id,
-    ),
     consumed_at: integer("consumed_at"),
   },
   // 切れたものを片付けるときに引く
@@ -822,3 +824,40 @@ export const niconicoLink = sqliteTable("niconico_link", {
   /** 更新できなくなった時刻 */
   lost_at: integer("lost_at"),
 });
+
+/**
+ * **ロゴを取りに行った記録** (`logo-record.ts`)。設定の「その他」の「ロゴの取得を記録する」(`recordLogo`) がオンの間だけ、
+ * 当たりの中継で待つたびに 1 行足す。衛星のロゴはダウンロードの期間にしか流れず、期間がいつ来るかは分からないので、
+ * その来方 (間隔・長さ) を実測で知るためのもの (docs/logo.md「ロゴの取得を記録する」)。
+ * 新しい順で `LOGO_RECORD_KEEP` 行・`LOGO_RECORD_DAYS` 日ぶんまで残し、古いものから消す
+ */
+export const logoRecords = sqliteTable(
+  "logo_records",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** 開き始めた時刻 (unix ms) */
+    started_at: integer("started_at").notNull(),
+    /** 開いた中継 (`BS15:16625` など) */
+    channel: text("channel").notNull(),
+    /** 取りに行った経緯。`wait` = 空いたときに自分で開いた、`now` = 「ロゴをいますぐ集める」 */
+    origin: text("origin").$type<"wait" | "now">().notNull(),
+    /** 開いていた長さ (ms) */
+    opened_ms: integer("opened_ms").notNull(),
+    /** どう終わったか (`logo.ts` の `Outcome`) */
+    outcome: text("outcome").notNull(),
+    /** この回にカルーセルから 1 つでも受け取ったか */
+    received: flag("received").notNull(),
+    /** この回に取れた局の数 */
+    found: integer("found").notNull(),
+    /** 読んだ数 (`CarouselCounts`)。開けなかった回は 0 */
+    packets: integer("packets").notNull(),
+    errors: integer("errors").notNull(),
+    pmt: flag("pmt").notNull(),
+    es_pids: integer("es_pids").notNull(),
+    es_packets: integer("es_packets").notNull(),
+    dii: integer("dii").notNull(),
+    ddb: integer("ddb").notNull(),
+    sdtt: integer("sdtt").notNull(),
+  },
+  (t) => [index("logo_records_started").on(t.started_at)],
+);

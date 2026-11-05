@@ -2,12 +2,12 @@
  * データ放送と字幕、画面の放送の字を描くためのフォント (Denpa Font。danything/denpa-font のリリースの woff2 をそのまま)。
  *
  * - `denpa-font.woff2`: 基本の字 (JIS X 0208・ARIB の外字・JIS X 0213 の記号やかななど漢字でない字)。データ放送はこれだけで足りる
- * - `denpa-font-jisx0213.woff2`: JIS X 0213 で足された漢字 (第3・第4水準。字幕・番組表にはめったに出ない)
+ * - `denpa-font-jisx0213.woff2`: JIS X 0213 で足された漢字 (第 3・第 4 水準。字幕・番組表にはめったに出ない)
  * - `denpa-font.css`: 2 つを同じファミリ名で名乗らせる CSS (`#lib/server/font.ts` の `fontCss`)。
  *   後のほうは `unicode-range` 付きなので、その字が出たときだけブラウザが取りに来る
  *
  * BML は仕様で**等幅**を求めていて (狭い画面で空白を使って組むため)、
- * **丸ゴシック**を名指しし、**ARIB の外字**を使う。Denpa Font は3つとも満たす
+ * **丸ゴシック**を名指しし、**ARIB の外字**を使う。Denpa Font は 3 つとも満たす
  * ([docs/stream.md](../../../../../docs/stream.md#データ放送の統合))。
  * 字幕もブラウザがこの字で描くので、**データ放送と字幕で字形が揃う**。
  *
@@ -30,11 +30,14 @@ const DIR = "/usr/share/denpa-font";
 /** 入っているバージョン (`v2.1` など。Dockerfile が `DENPA_FONT_VERSION` を書く) */
 const VERSION = `${DIR}/VERSION`;
 
-/** 中身と指紋。字はイメージに組み込んであり、動いている間は変わらないので1度だけ読む */
-const loaded = new Map<string, { body: string | Buffer; tag: string } | null>();
+/**
+ * 指紋と、作った CSS (woff2 は null。中身は置き場から流すので持たない)。字はイメージに組み込んであり、
+ * 動いている間は変わらないので 1 度だけ読む
+ */
+const loaded = new Map<string, { css: string | null; tag: string } | null>();
 let installed: string | null = null;
 
-function read(file: string): { body: string | Buffer; tag: string } | null {
+function read(file: string): { css: string | null; tag: string } | null {
   const known = loaded.get(file);
   if (known !== undefined) return known;
   let body: string | Buffer | null = null;
@@ -54,7 +57,7 @@ function read(file: string): { body: string | Buffer; tag: string } | null {
     body === null
       ? null
       : {
-          body,
+          css: typeof body === "string" ? body : null,
           tag: `"${createHash("sha256").update(body).digest("base64url")}"`,
         };
   loaded.set(file, found);
@@ -68,7 +71,7 @@ export const GET: RequestHandler = ({ params, request, url }) => {
   const found = read(params.file);
   if (found === null) error(404, "フォントが入っていません");
   /*
-   * バージョン付きの URL でバージョンが合えば1年持たせる。それ以外は**持たせてよいが、毎回確かめさせる**
+   * バージョン付きの URL でバージョンが合えば 1 年持たせる。それ以外は**持たせてよいが、毎回確かめさせる**
    * (`no-cache` + ETag)。理由は `#lib/server/font.ts`
    */
   const headers = {
@@ -79,10 +82,6 @@ export const GET: RequestHandler = ({ params, request, url }) => {
   if (etagMatches(request, found.tag))
     return new Response(null, { status: 304, headers });
   // CSS は作ったもの、woff2 は置き場のファイルをそのまま流す
-  return new Response(
-    typeof found.body === "string"
-      ? found.body
-      : Bun.file(`${DIR}/${params.file}`).stream(),
-    { headers },
-  );
+  const body = found.css ?? Bun.file(`${DIR}/${params.file}`).stream();
+  return new Response(body, { headers });
 };

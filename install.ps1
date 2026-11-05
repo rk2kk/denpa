@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# denpa を Windows (x64) に立てる。**PowerShell の1行で、ブラウザが開くところまで。**
+# denpa を Windows (x64) に立てる。**PowerShell の 1 行で、ブラウザが開くところまで。**
 #
 #   irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1))) -Uninstall
@@ -9,7 +9,7 @@
 # **エージェントは Windows の上でそのまま動かし** (タスク スケジューラでログオン時に起こす)、**denpa 本体は
 # WSL のコンテナ (wslc) で動かす。** Docker Desktop は要らない (WSL に入っているので `wsl --update` だけで使える)。
 # コンテナには USB を渡せないので、チューナーとカードに触るエージェントはコンテナに入れられない。
-# **Windows で使えるチューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J**
+# **Windows で使えるチューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J と PIXELA PIX-DT295 (試験的)**
 # (DVB は無い)。ドライバを WinUSB にするのは人の手で (Zadig。docs/install-windows.md)。
 #
 # **WSL は勝手に入れない。** wslc が無いときはエージェントだけ入れて、入れ方を言って終わる。
@@ -17,11 +17,12 @@
 #
 # 置き場:
 #   ~/denpa (DENPA_HOME)                  denpa.env (コンテナの環境変数。無いときだけ雛形を作り、あれば触らない)・
-#                                         config/・denpa-agent.log
-#   %LOCALAPPDATA%\denpa-agent\           エージェント・px4-userland (px4d.exe・px4ctl.exe・切り出したファームウェア)・
+#                                         config/ (tls\pair-token は denpa とエージェントが組むときの合言葉。無いときだけ作る)・
+#                                         denpa-agent.log
+#   %LOCALAPPDATA%\denpa-agent\           エージェント・px4-userland (px4d.exe・px4ctl.exe・ライセンスの文書)・
 #                                         siano-userland・起こす .cmd と denpa-start.ps1
 #   C:\denpa-run                          px4d のソケットの置き場 (本人・SYSTEM・Administrators だけが書ける。px4d がそう決めている)
-#   ~/Videos/denpa/{recorded,library}     元のTS (エージェントとコンテナの両方が見る) と出来上がった録画
+#   ~/Videos/denpa/{recorded,library}     元の TS (エージェントとコンテナの両方が見る) と出来上がった録画
 #   wslc のボリューム denpa-data          DB (Windows のフォルダ越しだと SQLite のロックが当てにならない)
 #
 # 環境変数: DENPA_VERSION (v1.2.3 のように。既定は最新のリリース。CI はコミットを渡す)、DENPA_HOME、
@@ -41,10 +42,7 @@ $IsdbtRioSha256 = '054520642d5d09cb7ab7d08dbd6fd9ba9365de56adf2e7d7d06927f9845ff
 # 起動の不具合が直ったのが 0.2.1)
 # renovate: datasource=github-releases depName=Khronos31/px4-userland extractVersion=^v(?<version>.*)$
 $Px4UserlandVersion = '0.2.1'
-# IT930x のファームウェアは PLEX 公式ドライバから切り出す。取ってくる先と3つのハッシュは agent/Denpa.Agent/Px4Firmware.cs・install.sh と同じ
-$PlexDriverSha256 = 'bdf3b4eb84b69ccbacb4ba3df2f59c93c803ef6d3f61e7a90a531c22c301a200'
-$Pxw3u4SysSha256 = '8c7b526e2c92f9b42440b55b99b309c33f2011f4e11de310acf0c1da58038722'
-$It930xFirmwareSha256 = '5213a5a38872661277a2cc1b2dfdfe88faf06f41205f460f3b51857f0568b484'
+# IT930x のファームウェアはエージェントに同梱している (agent/Denpa.Agent/Px4Firmware.cs)。ここでは置かない
 # 配布 zip から取り出すもの。**使うのは px4d.exe と px4ctl.exe だけ** (受信機もカードも px4d の制御ソケットで直に話す)。
 # px4-ts.exe と WinSCard.dll (B25 のアプリの横に置く代わりの DLL) は置かない。残りはライセンスの文書
 $Px4Keep = @('px4d.exe', 'px4ctl.exe', 'LICENSE', 'DEPENDENCY-NOTICE.txt', 'THIRD_PARTY_NOTICES.md', 'libusb/*', 'toolchain/*')
@@ -53,7 +51,7 @@ $Repo = 'danything/denpa'
 $Url = 'http://localhost:3000'
 $DenpaDir = if ($env:DENPA_HOME) { $env:DENPA_HOME } else { Join-Path $env:USERPROFILE 'denpa' }
 $Prefix = Join-Path $env:LOCALAPPDATA 'denpa-agent'
-# px4d のソケットの置き場。**ユーザーのフォルダの下にしない** — ソケットのパスは UTF-8 で 108 バイトまでで、
+# px4d のソケットの置き場。**ユーザーのフォルダの下にしない。** ソケットのパスは UTF-8 で 108 バイトまでで、
 # 日本語のユーザー名だとすぐ溢れる。非 ASCII のパスだと px4d の ready の行も途切れる (px4-userland #52)
 $Px4Runtime = 'C:\denpa-run'
 $Media = Join-Path $env:USERPROFILE 'Videos\denpa'
@@ -68,7 +66,7 @@ $WslHelp = 'WSL を新しくしてください (PowerShell で wsl --update。WS
 function Say([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 
 # 取ってくる。PowerShell 5.1 の Invoke-WebRequest は遅い (進み具合の表示) ので、Windows 10 から入っている curl.exe で
-# **時間の上限を付ける。** 繋がったまま止まる相手 (落ちかけの PLEX のサイトや Internet Archive) だと、付けなければいつまでも待つ。
+# **時間の上限を付ける。** 繋がったまま止まる相手 (落ちかけのサイト) だと、付けなければいつまでも待つ。
 # 時間切れも --retry が試し直す
 function Get-Url([string]$From, [string]$To) {
     & curl.exe -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o $To $From
@@ -94,10 +92,50 @@ function Write-Text([string]$Path, [string]$Text, [Text.Encoding]$Encoding = (Ne
     [IO.File]::WriteAllText($Path, $Text, $Encoding)
 }
 
-# 録画中か (エージェントに聞く。答えなければ録画していないことにする)
-function Test-Recording {
+# denpa とエージェントが組むときの合言葉 (32 バイトの乱数を base64url で。docs/agent.md)。
+# **エージェント自身の置き場** (tuners.json の隣の tls\pair-token) に**一度だけ**作り、上げ直しても変えない。
+# エージェントには環境変数で渡さず、そこから読ませる (手で denpa-agent --pair を流しても同じ URL が出るように)。
+# denpa には TUNER_AGENT_URL の #pair= で同じものを渡す。エージェントが先に作っていればそれを使う
+function Get-PairToken {
+    $path = "$DenpaDir\config\tls\pair-token"
+    if (Test-Path -LiteralPath $path) {
+        $text = Get-Content -LiteralPath $path -Raw
+        if ($text -and $text.Trim()) { return $text.Trim() }
+    }
+    $bytes = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    Write-Text $path $token
+    return $token
+}
+
+# エージェントのいまの様子 (/denpa/tuners の JSON)。API は組んだ denpa (クライアント証明書) にしか答えないので、
+# denpa-agent --status に聞かせる (エージェント自身の証明書で呼ぶ)。置き場とポートは .cmd と同じものを渡す。
+# 答えなければ $null
+function Get-AgentStatus([string]$Exe) {
+    Use-Continue
+    if (-not (Test-Path -LiteralPath $Exe)) { return $null }
+    $saved = @($env:AGENT_PORT, $env:TUNERS_FILE)
+    $env:AGENT_PORT = [string]$Port
+    $env:TUNERS_FILE = "$DenpaDir\config\tuners.json"
     try {
-        $status = Invoke-RestMethod -TimeoutSec 5 "http://127.0.0.1:$Port/denpa/tuners"
+        $out = & $Exe --status 2>$null | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not $out.Trim()) { return $null }
+        return $out.Trim()
+    } finally {
+        $env:AGENT_PORT = $saved[0]
+        $env:TUNERS_FILE = $saved[1]
+    }
+}
+
+# 録画中か ($Exe の --status で聞く。答えなければ録画していないことにする)
+function Test-Recording([string]$Exe) {
+    $out = Get-AgentStatus $Exe
+    if (-not $out) { return $false }
+    try {
+        $status = ConvertFrom-Json $out
         return [bool]($status.tuners | ForEach-Object { $_.users } | Where-Object { $_.use -match '^rec( |$)' })
     } catch {
         return $false
@@ -107,14 +145,15 @@ function Test-Recording {
 # エージェントを止める。**録画中なら終わるまで待つ** (Windows はエージェントに「止まれ」を伝える手が無く、
 # 止めればその場で落ちる。Mac のように録画を待ってから畳むことができないので、ここで待つ)。
 # 起こした conhost・.cmd・エージェント・siano-ts・px4d を、コマンドラインに置き場が入っているもので見つけて落とす
-# (タスクを止めても、.cmd の下で起きたものまでは止まらない)。**px4d は先に落とさない** — エージェントが
+# (タスクを止めても、.cmd の下で起きたものまでは止まらない)。**px4d は先に落とさない。** エージェントが
 # 終われば px4d は標準入力が閉じたのを見て、後片付け (LNB を 0V に戻す・ソケットを消す) をして自分で終わる。
-# 10 秒待っても残っていれば落とす
-function Stop-Agent {
+# 10 秒待っても残っていれば落とす。
+# 録画中かを聞く denpa-agent は $Exe (上げ直すときは取ってきた新しいほう。古いものは --status を知らない)
+function Stop-Agent([string]$Exe) {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { return }
-    if (Test-Recording) {
+    if (Test-Recording $Exe) {
         Say '録画中です。終わるまでここで待ちます (Windows では録画の途中で止めると、その録画は切れます)'
-        while (Test-Recording) { Start-Sleep -Seconds 10 }
+        while (Test-Recording $Exe) { Start-Sleep -Seconds 10 }
     }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     for ($i = 0; $i -lt 30; $i++) {
@@ -131,7 +170,7 @@ function Stop-Agent {
 }
 
 # **stderr を捨てる外のコマンドの前に。** PowerShell 5.1 は、止める設定 (Stop) のまま 2>$null すると
-# stderr の1行目で止まる。呼んだ関数の中だけ Continue にする (Set-Variable -Scope 1)
+# stderr の 1 行目で止まる。呼んだ関数の中だけ Continue にする (Set-Variable -Scope 1)
 function Use-Continue { Set-Variable -Scope 1 -Name ErrorActionPreference -Value Continue }
 
 # wslc (WSL のコンテナ) が使えるか。駄目なら理由と入れ方を言って $false (-Quiet なら黙って)
@@ -154,7 +193,7 @@ function Test-Health {
 }
 
 # **前のバージョンは Docker Desktop の compose で動いていた。** DB (Docker のボリューム) を wslc のボリュームへ移して、
-# compose.yml を退ける。1度だけ (退けたあとはここに来ない)。録画中なら compose down が終わるまで待つ
+# compose.yml を退ける。一度だけ (退けたあとはここに来ない)。録画中なら compose down が終わるまで待つ
 function Move-FromDocker {
     Use-Continue
     $compose = Join-Path $DenpaDir 'compose.yml'
@@ -194,12 +233,13 @@ function Move-FromDocker {
 }
 
 # 起こすスクリプト。**起こすたびに作り直すかを決める**: コンテナから Windows のエージェントへは
-# Hyper-V の Default Switch の IP で届くが (host.docker.internal は無い)、その IP は再起動で変わりうる。
-# 宛先かバージョンか denpa.env が変わっていればコンテナを作り直す (環境変数は作るときに埋め込まれる。
-# DB はボリューム、録画は Windows のフォルダなので消えない)。
+# WSL のホスト接続名 host.wslc.internal で届く。仮想スイッチの有無には依存しない。
+# 宛先 (合言葉も込みの TUNER_AGENT_URL) かバージョンか denpa.env が変わっていればコンテナを作り直す
+# (環境変数は作るときに埋め込まれる。DB はボリューム、録画は Windows のフォルダなので消えない)。
+# denpa は組んだときの証明書そのもので確かめるので、この接続名でも TLS の認証は変わらない。
 # wslc には restart の指定が無いので、ログオン時のタスクがこれを流す。
 # **ポートは 0.0.0.0 に出す** (既定は 127.0.0.1 だけで、LAN のほかの機器から開けない)
-function Write-StartScript([string]$Image) {
+function Write-StartScript([string]$Image, [string]$Token) {
     $start = Join-Path $Prefix 'denpa-start.ps1'
     $body = @'
 # Written by install.ps1 (denpa). Re-run the installer instead of editing this file.
@@ -208,9 +248,8 @@ $image = '__IMAGE__'
 $envFile = '__ENVFILE__'
 $raw = '__RAW__'
 $encoded = '__ENCODED__'
-$ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias 'vEthernet (Default Switch)' -ErrorAction SilentlyContinue).IPAddress | Select-Object -First 1
-if (-not $ip) { $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -like 'vEthernet*' | Select-Object -First 1).IPAddress }
-$agent = "http://${ip}:__PORT__"
+# WSL のホスト接続名を使う。仮想スイッチや LAN の IP は構成・再起動で変わる。
+$agent = "https://host.wslc.internal:__PORT__#pair=__TOKEN__"
 # Env vars are baked in at creation, so a changed denpa.env also means recreating
 $envHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $envFile).Hash
 $info = & wslc inspect __NAME__ 2>$null | Out-String
@@ -230,14 +269,14 @@ exit $LASTEXITCODE
 '@
     $body = $body.Replace('__IMAGE__', $Image).Replace('__ENVFILE__', (Join-Path $DenpaDir 'denpa.env')).
         Replace('__RAW__', "$Media\recorded").Replace('__ENCODED__', "$Media\library").
-        Replace('__PORT__', [string]$Port).Replace('__NAME__', $Container).Replace('__VOLUME__', $Volume)
+        Replace('__PORT__', [string]$Port).Replace('__TOKEN__', $Token).Replace('__NAME__', $Container).Replace('__VOLUME__', $Volume)
     # 5.1 は BOM の無い .ps1 を ANSI で読む。パスに日本語が入りうるので BOM を付ける
     Write-Text $start $body (New-Object Text.UTF8Encoding $true)
     return $start
 }
 
 # denpa 本体を wslc で起こす。エージェントと同じバージョンのイメージ (x.y.z のときだけ。コミットなら latest)
-function Start-Denpa([string]$Ref, [switch]$NoOpen) {
+function Start-Denpa([string]$Ref, [string]$Token, [switch]$NoOpen) {
     $version = $Ref -replace '^v', ''
     $tag = if ($version -match '^\d+\.\d+\.\d+$') { $version } else { 'latest' }
     $image = "ghcr.io/$Repo`:$tag"
@@ -262,7 +301,7 @@ function Start-Denpa([string]$Ref, [switch]$NoOpen) {
     & wslc pull $image
     if ($LASTEXITCODE -ne 0) { throw "イメージを取れません: $image" }
     & wslc volume create $Volume *> $null
-    $start = Write-StartScript $image
+    $start = Write-StartScript $image $Token
 
     # ログオンしたら起こす (エージェントと同じく、自分のアカウントのタスク。窓は出さない)
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -291,7 +330,7 @@ function Start-Denpa([string]$Ref, [switch]$NoOpen) {
     throw "denpa が応答しません。wslc logs $Container を見てください"
 }
 
-# Siano のチューナーが刺さっていれば、ドライバが WinUSB かを見る (入れ替えは人の手で。Zadig)
+# Siano のチューナーが挿さっていれば、ドライバが WinUSB かを見る (入れ替えは人の手で。Zadig)
 function Show-Tuner {
     try {
         $sticks = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
@@ -311,14 +350,14 @@ function Show-Tuner {
     }
 }
 
-# zip を開く (PowerShell 5.1 でも。中身を1つずつ取り出すのに使う)
+# zip を開く (PowerShell 5.1 でも。中身を 1 つずつ取り出すのに使う)
 function Open-Zip([string]$Path) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     return [IO.Compression.ZipFile]::OpenRead($Path)
 }
 
 # px4-userland (PX-Q3U4 など) を $To に置く。**要るものだけ取り出す** ($Px4Keep)。
-# ファームウェアは Mac と同じく PLEX 公式ドライバから切り出す (再配布の許諾は誰も持っていない。docs/tuner-px4.md)
+# IT930x のファームウェアはエージェントに同梱しているので、ここでは置かない (docs/tuner-px4.md)
 function Get-Px4Userland([string]$Work, [string]$To) {
     Say "px4-userland $Px4UserlandVersion"
     $base = "https://github.com/Khronos31/px4-userland/releases/download/v$Px4UserlandVersion"
@@ -345,32 +384,6 @@ function Get-Px4Userland([string]$Work, [string]$To) {
     foreach ($exe in 'px4d.exe', 'px4ctl.exe') {
         if (-not (Test-Path -LiteralPath "$To\$exe")) { throw "$name に $exe が入っていません" }
     }
-
-    Say 'IT930x のファームウェアを PLEX のドライバから切り出します'
-    # PLEX のサイトが落ちていることがある (2026-10-30 はサーバーの「無効な URL」のページと別の証明書を返した)。
-    # 中身はハッシュで確かめるので、取れなければ Internet Archive の写し (同じハッシュ) から取る
-    try {
-        Get-Url 'https://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip' "$Work\plex.zip"
-    } catch {
-        Get-Url 'https://web.archive.org/web/20260927060746id_/http://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip' "$Work\plex.zip"
-    }
-    Assert-Hash "$Work\plex.zip" $PlexDriverSha256
-    $zip = Open-Zip "$Work\plex.zip"
-    try {
-        $entry = $zip.GetEntry('pxw3u4_BDA_ver1x64/PXW3U4.sys')
-        if (-not $entry) { throw 'PLEX のドライバに PXW3U4.sys が見当たりません' }
-        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "$Work\PXW3U4.sys", $true)
-    } finally {
-        $zip.Dispose()
-    }
-    Assert-Hash "$Work\PXW3U4.sys" $Pxw3u4SysSha256
-    $sys = [IO.File]::ReadAllBytes("$Work\PXW3U4.sys")
-    $firmware = New-Object byte[] 2169
-    [Array]::Copy($sys, 0x287d0, $firmware, 0, 2169)
-    New-Item -ItemType Directory -Force -Path "$To\firmware" | Out-Null
-    [IO.File]::WriteAllBytes("$To\firmware\it930x-firmware.bin", $firmware)
-    Assert-Hash "$To\firmware\it930x-firmware.bin" $It930xFirmwareSha256
-    Remove-Item -Force -LiteralPath "$Work\plex.zip", "$Work\PXW3U4.sys"
 }
 
 # px4d のソケットの置き場を作って整える。**持ち主は本人、書けるのは本人・SYSTEM・Administrators だけ**
@@ -388,7 +401,7 @@ function Set-Px4Runtime {
     foreach ($sid in $me, (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'), (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544')) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
     }
-    # Set-Acl は SACL まで書きにいって、2回目から SeSecurityPrivilege が要ると断られる。持ち主と DACL だけを書く
+    # Set-Acl は SACL まで書きにいって、2 回目から SeSecurityPrivilege が要ると断られる。持ち主と DACL だけを書く
     # (PowerShell 5.1 は DirectoryInfo のメソッド、7 は拡張メソッド)
     $info = Get-Item -LiteralPath $Px4Runtime
     try {
@@ -400,7 +413,7 @@ function Set-Px4Runtime {
 }
 
 # px4-userland のチューナーが WinUSB で使えるかを、px4d に聞いて言う (機種の表は持たない)。
-# **エージェントを止めている間に** — px4d が使っている機材は開けず、一覧に出ない
+# **エージェントを止めている間に聞く。** px4d が使っている機材は開けず、一覧に出ない
 function Show-Px4 {
     Use-Continue
     $px4d = "$Prefix\px4-userland\px4d.exe"
@@ -433,7 +446,7 @@ function Show-Px4 {
         }
         $why = if ($pnp -and $pnp.Service) { "ドライバが $($pnp.Service) なので" } else { 'ドライバが入っていないので' }
         Say ("$($device.model) (USB $($device.port)): ${why}開けません。Zadig (https://zadig.akeo.ie) で WinUSB にしてください " +
-            '(PX-Q3U4 / PX-W3U4 は USB の機材が2つ並ぶので両方。PLEX のドライバで TVTest などから使っていたなら、そちらからは見えなくなります。docs/install-windows.md)')
+            '(PX-Q3U4 / PX-W3U4 は USB の機材が 2 つ並ぶので両方。PLEX のドライバで TVTest などから使っていたなら、そちらからは見えなくなります。docs/install-windows.md)')
     }
     if ($enclosures.Count -eq 0 -and $devices.Count -eq 0) {
         Say 'px4-userland のチューナー (PX-Q3U4 など) は見当たりません。挿したら、Zadig でドライバを WinUSB にしてください (docs/install-windows.md)'
@@ -478,7 +491,7 @@ function Install-Agent([string]$Ref) {
         Get-ChildItem -Recurse -File "$work\new" | Unblock-File
 
         # --- 入れ替える。**揃ってから止める** (取ってこられなかったら、動いているものに触らない) ---
-        Stop-Agent
+        Stop-Agent "$work\new\bin\denpa-agent.exe"
         foreach ($dir in $Prefix, "$DenpaDir\config", "$Media\recorded", "$Media\library") {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
@@ -494,15 +507,16 @@ function Install-Agent([string]$Ref) {
     Set-Px4Runtime
     Show-Px4
 
-    # 起こす .cmd。環境変数はコンテナで既定にしている置き場を Windows の置き場に向け直すものだけ (Mac の plist と同じ)。
-    # **落ちたら5秒置いて起こし直す** (タスク スケジューラの「失敗したら再起動」は、終了コードでは効かない)。
-    # ログはここで足していく。**パスに日本語が入りうる**ので、1行目で cmd の文字コードを UTF-8 にしてから読ませる
+    # 起こす .cmd。環境変数はコンテナで既定にしている置き場を Windows の置き場に向け直すものだけ (Mac の plist と同じ。
+    # 合言葉は環境変数で渡さず、エージェントが tls\pair-token から読む。Get-PairToken)。
+    # **落ちたら 5 秒置いて起こし直す** (タスク スケジューラの「失敗したら再起動」は、終了コードでは効かない)。
+    # ログはここで足していく。**パスに日本語が入りうる**ので、1 行目で cmd の文字コードを UTF-8 にしてから読ませる
     # (そのままだとコンソールの文字コードで読み、それはユーザーの設定次第で決め打てない)
     $cmd = "$Prefix\denpa-agent.cmd"
     $vars = [ordered]@{
         AGENT_PORT = $Port; TUNERS_FILE = "$DenpaDir\config\tuners.json"; CHANNELS_FILE = "$DenpaDir\config\channels.json"
         SIANO_USERLAND_DIR = "$Prefix\siano-userland"; SIANO_FIRMWARE = "$Prefix\siano-userland\firmware\isdbt_rio.inp"
-        PX4_USERLAND_DIR = "$Prefix\px4-userland"; PX4_FIRMWARE = "$Prefix\px4-userland\firmware\it930x-firmware.bin"
+        PX4_USERLAND_DIR = "$Prefix\px4-userland"
         PX4_RUNTIME_DIR = $Px4Runtime
         RAW_DIR = "$Media\recorded"
     }
@@ -529,8 +543,8 @@ function Install-Agent([string]$Ref) {
 
     Say 'エージェントを起動しました。応答を待ちます'
     for ($i = 0; $i -lt 15; $i++) {
-        $tuners = & curl.exe -fs --max-time 5 "http://127.0.0.1:$Port/denpa/tuners"
-        if ($LASTEXITCODE -eq 0) {
+        $tuners = Get-AgentStatus "$Prefix\bin\denpa-agent.exe"
+        if ($tuners) {
             Write-Host $tuners
             return
         }
@@ -552,7 +566,7 @@ function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
             & wslc rm $Container *> $null
             $ErrorActionPreference = 'Stop'
         }
-        Stop-Agent
+        Stop-Agent "$Prefix\bin\denpa-agent.exe"
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $Prefix) { Remove-Item -Recurse -Force -LiteralPath $Prefix }
         if (Test-Path -LiteralPath $Px4Runtime) {
@@ -569,19 +583,22 @@ function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
     if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw '対応しているのは x64 の Windows だけです (px4-userland / siano-userland に ARM 用がありません)' }
 
     $ref = if ($env:DENPA_AGENT_ZIP) { '' } else { Get-Version }
+    # エージェントを起こす前に置いておく (無ければエージェントが自分で作り、そちらと食い違わないように)
+    $token = Get-PairToken
     Install-Agent $ref
     Show-Tuner
     if ($AgentOnly) {
-        Say "エージェントだけ入れました。denpa の TUNER_AGENT_URL に http://$($env:COMPUTERNAME):$Port を書いてください"
+        Say 'エージェントだけ入れました。denpa の TUNER_AGENT_URL に次を書いてください (#pair= の後ろは合言葉。人に見せない):'
+        Say "  https://$($env:COMPUTERNAME):$Port#pair=$token"
         Say "(LAN から繋ぐなら、Windows ファイアウォールでポート $Port への受信を許してください)"
         return
     }
     if (-not (Test-Wslc)) {
-        Say "エージェントは入っています (http://127.0.0.1:$Port)"
+        Say "エージェントは入っています (https://127.0.0.1:$Port)"
         return
     }
     # --- denpa 本体 (wslc)。エージェントと同じバージョンに。手元の zip を入れたときは latest ---
-    Start-Denpa $(if ($ref) { $ref } else { 'main' }) -NoOpen:$NoOpen
+    Start-Denpa $(if ($ref) { $ref } else { 'main' }) $token -NoOpen:$NoOpen
 }
 
 Invoke-Main -NoOpen:$NoOpen -Uninstall:$Uninstall -AgentOnly:$AgentOnly

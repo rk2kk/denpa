@@ -68,22 +68,22 @@ public sealed class Mb86h47 : II2c
     private const byte CommandIn = 0x83;
     private const int CommandWords = Mb86h47Programs.BulkChunk / 4 - 3;
 
-    // カードの UART (13.1)
-    private const uint CardEnable = 0xFEA000;
-    private const uint CardLines = 0xFEA004;
-    private const uint CardBaud = 0xFEA008;
-    private const uint CardSend = 0xFEA00C;
-    private const uint CardControl = 0xFEA010;
-    private const uint CardCount = 0xFEA014;
-    private const uint CardMask = 0xFEA018;
-    private const uint CardStatus = 0xFEA01C;
-    private const uint CardCwt = 0xFEA020;
-    private const uint CardBwt = 0xFEA024;
-    private const uint CardTx = 0xFEA028;
-    private const uint CardRx = 0xFEA02C;
-    private const uint CardPower = 0xFEA034;
-    private const uint CardTxLrc = 0xFEA038;
-    private const uint CardRxLrc = 0xFEA03C;
+    // カードの UART (13.1。PIX-DT295 の MB86M01 も同じアドレス)
+    internal const uint CardEnable = 0xFEA000;
+    internal const uint CardLines = 0xFEA004;
+    internal const uint CardBaud = 0xFEA008;
+    internal const uint CardSend = 0xFEA00C;
+    internal const uint CardControl = 0xFEA010;
+    internal const uint CardCount = 0xFEA014;
+    internal const uint CardMask = 0xFEA018;
+    internal const uint CardStatus = 0xFEA01C;
+    internal const uint CardCwt = 0xFEA020;
+    internal const uint CardBwt = 0xFEA024;
+    internal const uint CardTx = 0xFEA028;
+    internal const uint CardRx = 0xFEA02C;
+    internal const uint CardPower = 0xFEA034;
+    internal const uint CardTxLrc = 0xFEA038;
+    internal const uint CardRxLrc = 0xFEA03C;
 
     /// <summary>主 CPU の処理の書き換える 5 語と、電源投入時の値 (4.2)</summary>
     private static readonly uint[] PatchAt = [0xE9AC0, 0xE9AC4, 0xE9E0C, 0xE9E10, 0xE9D94];
@@ -408,7 +408,7 @@ public sealed class Mb86h47 : II2c
         Modify(0xFDBC14, 0, 0x00040000);
         Modify(0xFD80B4, 0, 4);
         Write32(0xFD8510, Mb86h47Programs.BulkChunk);
-        // 置き場の塊の頭を消す (電源投入時の SDRAM は不定。頭が 0 の塊は見ない)
+        // 置き場の塊の先頭を消す (電源投入時の SDRAM は不定。先頭が 0 の塊は見ない)
         for (var slot = 0; slot < Mb86h47Programs.BulkSlots; slot++) Write32(Mb86h47Programs.BulkBuffer + (uint)(slot * Mb86h47Programs.BulkChunk), 0);
         ArmCommandDma();
         Write32(Box(Mb86h47Programs.BoxBulkEnable), Mb86h47Programs.BulkEnable);
@@ -534,7 +534,7 @@ public sealed class Mb86h47 : II2c
             if (left <= 0) throw new IOException($"{Zd1j.Model} のブリッジのコア 1 が bulk の塊に答えません");
             var got = _usb.InterruptRead(CommandIn, reply, left);
             if (got < 8) continue;
-            // 答えの語の並びは、印 (0xA5) が頭か終わりかで見分ける (FIFO のバイトの並びは仕様書に無い)
+            // 答えの語の並びは、印 (0xA5) が先頭か終わりかで見分ける (FIFO のバイトの並びは仕様書に無い)
             if (reply[0] != Mb86h47Programs.BulkReplyMark && reply[3] == Mb86h47Programs.BulkReplyMark)
             {
                 for (var i = 0; i + 4 <= got; i += 4) reply.AsSpan(i, 4).Reverse();
@@ -768,8 +768,8 @@ public sealed class Mb86h47 : II2c
 
 /// <summary>
 /// 9.4 EP 0x81 から来る「4 バイトの到着時刻 + 188 バイトの TS」の 192 バイトの単位から取り出して、188 バイトのパケットにする。
-/// 読みの区切りは単位と揃わないので、TS の頭 (単位の 5 バイト目) の 0x47 と、192 バイト先の 0x47 の 2 つで揃える
-/// (TS の中の 0x47 は珍しくないので 1 つでは信じない)。揃えたあと頭が 0x47 でなくなったら揃え直す
+/// 読みの区切りは単位と揃わないので、TS の先頭 (単位の 5 バイト目) の 0x47 と、192 バイト先の 0x47 の 2 つで揃える
+/// (TS の中の 0x47 は珍しくないので 1 つでは信じない)。揃えたあと先頭が 0x47 でなくなったら揃え直す
 /// </summary>
 public sealed class Mb86h47Framer
 {
@@ -793,7 +793,7 @@ public sealed class Mb86h47Framer
         {
             if (!_locked)
             {
-                // 頭の候補: そこと 192 バイト先の両方の TS の頭が 0x47。192 バイト先がまだ来ていなければ次を待つ
+                // 先頭の候補: そこと 192 バイト先の両方の TS の先頭が 0x47。192 バイト先がまだ来ていなければ次を待つ
                 var found = -1;
                 for (var i = at; i + Unit + Stamp < length; i++)
                 {

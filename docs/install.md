@@ -1,6 +1,6 @@
 # 立てる
 
-README の手順の細かいところ。用意するもの、入れ方 (1行・Compose・1コンテナ・Helm・Talos Linux)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
+README の手順の細かいところ。用意するもの、入れ方 (1 行・Compose・1 コンテナ・Helm・Talos Linux)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
 Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [install-windows.md](install-windows.md) に。使う前に [使ってよい範囲](../README.md#使ってよい範囲) を読んでください。
 
 ## 用意するもの
@@ -8,12 +8,12 @@ Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [i
 チューナー・カードリーダー・OS の一覧と機材ごとのページは [tuners.md](tuners.md#要るもの) に。
 
 - イメージは amd64 と arm64 を同じタグにまとめてあり、自分のアーキテクチャのものが降ってきます
-- **Intel・AMD の GPU** — `/dev/dri` が見えれば起動時に見つけて GPU でエンコードします。compose.prod.yml では渡す行をコメントにしてあるので、
+- **Intel・AMD の GPU**: `/dev/dri` が見えれば起動時に見つけて GPU でエンコードします。compose.prod.yml では渡す行をコメントにしてあるので、
   `compose.override.yml` で渡します (Helm は既定で渡す)。Intel・AMD の GPU を使えるのは amd64 だけです
   ([encode.md](encode.md#gpu-でエンコードする-va-api))
-- **NVIDIA の GPU** — ホストにドライバ (530 以降) と NVIDIA Container Toolkit を入れ、GPU を予約して渡せば、H.264・H.265 と AV1 (RTX 40 以降) を
+- **NVIDIA の GPU**: ホストにドライバ (530 以降) と NVIDIA Container Toolkit を入れ、GPU を予約して渡せば、H.264・H.265 と AV1 (RTX 40 以降) を
   NVENC でエンコードします (amd64。[encode.md](encode.md#nvidia-でエンコードする))
-- **Rockchip (RK3588 / RK3588S)** — BSP カーネルの上で `/dev/mpp_service` と `/dev/dma_heap` を渡せば、H.264 と H.265 を
+- **Rockchip (RK3588 / RK3588S)**: BSP カーネルの上で `/dev/mpp_service` と `/dev/dma_heap` を渡せば、H.264 と H.265 を
   ハードウェアでエンコードします (arm64。[encode.md](encode.md#rockchip-rk3588-でエンコードする))
 
 ## 1行で入れる
@@ -28,10 +28,10 @@ curl -fsSL https://raw.githubusercontent.com/danything/denpa/main/install.sh | b
 irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1 | iex   # Windows (x64)
 ```
 
-- **Linux** (amd64 / arm64) — 全部 Docker Compose。`~/denpa` に compose.prod.yml を `compose.yml` として置いて起動します
-- **Mac** (Apple Silicon) — エージェントは Mac の上で直接 (LaunchAgent)、denpa 本体は Docker。USB をコンテナに渡せないため ([install-mac.md](install-mac.md))
-- **Windows** (x64) — エージェントは Windows の上で直接 (タスク スケジューラ)、denpa 本体は WSL のコンテナ (`wslc`)。Docker Desktop は要りません。
-  チューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J。ドライバは Zadig で WinUSB に ([install-windows.md](install-windows.md))
+- **Linux** (amd64 / arm64): 全部 Docker Compose。`~/denpa` に compose.prod.yml を `compose.yml` として置いて起動します
+- **Mac** (Apple Silicon): エージェントは Mac の上で直接 (LaunchAgent)、denpa 本体は Docker。USB をコンテナに渡せないため ([install-mac.md](install-mac.md))
+- **Windows** (x64): エージェントは Windows の上で直接 (タスク スケジューラ)、denpa 本体は WSL のコンテナ (`wslc`)。Docker Desktop は要りません。
+  チューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J と PIXELA PIX-DT295 (試験的)。ドライバは Zadig で WinUSB に ([install-windows.md](install-windows.md))
 - **Docker・WSL は入れません。** 無ければ入れ方を示して止まります (Linux は <https://get.docker.com>、
   Mac は Docker Desktop か OrbStack、Windows は `wsl --update`)
 - **入口は [genkan](https://github.com/danything/genkan)** (ホスト名で振り分けるリバースプロキシ。Linux・Mac)。
@@ -42,9 +42,12 @@ irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1 | iex   #
 - 置き場は `~/denpa` (`DENPA_HOME`)。`compose.yml` は更新のたびに上書きするので、
   **変えたいことは同じ場所の `compose.override.yml` に書きます** (Compose が重ねて読み、install.sh は触らない)。
   Windows は `~/denpa/denpa.env`
+- denpa とエージェントが組むときの合言葉 ([agent.md](agent.md)) は、install.sh が `~/denpa/.env` の `AGENT_PAIR_TOKEN` に、
+  install.ps1 が `~/denpa/config/tls/pair-token` (エージェント自身の置き場) に、無いときだけ作って両方へ渡します。Mac は `.env` と同じ値を
+  `~/denpa/config/tls/pair-token` にも書きます。上げ直しても変えません
 - もう一度流すと最新のリリースに上がります。`… | bash -s -- --uninstall` で止めて外します
   (`~/denpa`・録画・DB は残す)。ブラウザを開かないなら `--no-open`。Windows は `-Uninstall` / `-NoOpen`
-  (渡し方は install.ps1 の頭)
+  (渡し方は install.ps1 の冒頭)
 
 ### Docker Compose を手で置く
 
@@ -53,13 +56,17 @@ Linux ならこれだけです (エージェントは `tuner-agent` として一
 ```sh
 mkdir denpa && cd denpa
 curl -Lo compose.yml https://raw.githubusercontent.com/danything/denpa/main/compose.prod.yml
+# denpa とエージェントが組むときの合言葉 (agent.md)。一度作ったら変えない
+echo "AGENT_PAIR_TOKEN=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')" > .env
 docker compose up -d
 ```
 
+`.env` の `AGENT_PAIR_TOKEN` が無いと compose は止まります (install.sh は無いときだけ作ります)。
+
 ### 1つのコンテナで (`denpa-aio`)
 
-本体とエージェントを1つにまとめたイメージです。チューナーを挿した機械で全部動かすとき
-(NAS や、ほかの仕組みに載せるとき) 向け。中身は2つのイメージと同じです。
+本体とエージェントを 1 つにまとめたイメージです。チューナーを挿した機械で全部動かすとき
+(NAS や、ほかの仕組みに載せるとき) 向け。中身は 2 つのイメージと同じです。
 
 ```sh
 docker run -d --name denpa --restart unless-stopped --stop-timeout 21900 \
@@ -72,7 +79,8 @@ docker run -d --name denpa --restart unless-stopped --stop-timeout 21900 \
 ```
 
 - エージェントの設定 (`tuners.json` / `channels.json`) は `/config`、DB は `/data`、録画は `/media` の下
-  (元のTS は `raw`、エンコードしたものは `encoded`)。前のバージョンから上げるときは [config.md](config.md#置き場を変えた-前のバージョンから上げるとき)
+  (元の TS は `raw`、エンコードしたものは `encoded`)。前のバージョンから上げるときは [config.md](config.md#置き場を変えた-前のバージョンから上げるとき)
+- 本体とエージェントが組むときの合言葉 ([agent.md](agent.md)) は、入口が `/config/tls/pair-token` に無いときだけ作って両方に渡します
 - `--privileged` は要りません。USB (189) と DVB (212) のデバイスを開く許可と、pipe を広げる
   `SYS_RESOURCE` だけ渡します。デバイスはディレクトリごと見せるので、挿し直しても再起動は要りません
 - 止めるときは録画の終わりを待つので、`--stop-timeout` を長くしておきます (compose の `stop_grace_period` と同じ)。
@@ -93,7 +101,12 @@ helm install denpa oci://ghcr.io/danything/charts/denpa \
 
 チューナーを挿した機械にエージェントだけ置き、本体を別の所で動かすなら
 `oci://ghcr.io/danything/charts/denpa-agent` を使い、本体側は `TUNER_AGENT_URL` でそこを指します
-([agent.md](agent.md#エージェントは別イメージ別プロセス))。値の一覧と意味は
+([agent.md](agent.md#エージェントは別イメージ別プロセス))。`TUNER_AGENT_URL` には `#pair=<合言葉>` を付けます。
+合言葉は chart が Secret `tuner-agent-pair` に作り、読み方は `helm install` のあとに出ます。
+本体の chart はエージェントと組む合言葉を自分で作って両方に渡すので、何も書かなくて構いません
+(ArgoCD などの GitOps で入れるときは、合言葉を SOPS などで別の Secret に持ち、その名前を `agent.pairSecret` に書きます。
+ArgoCD はクラスタを見ずに描くので chart に作らせると値が変わり続け、Secret を同期しない設定ならそもそも作られません。
+`denpa-agent` の chart も同じで `pairSecret`)。値の一覧と意味は
 [charts/denpa/values.yaml](../charts/denpa/values.yaml) のコメントにあります。
 
 ### Talos Linux に OS ごと
@@ -132,7 +145,7 @@ install.sh / install.ps1 が確かめるのは、同じリリースに置いた 
 
 設定するまで全部断ります。compose の `TRUSTED_NETWORKS` の初期値は家の中 (`192.168.0.0/16,10.0.0.0/8`) で、ここからはログインなしで通ります。
 通るのは IP の直書きや `.local` などの名前で開いたときで、自分のドメインなどの名前で開くなら `ALLOWED_HOSTS` に書きます ([auth.md](auth.md#ログインなしで開ける名前-allowed_hosts))。
-画面をログインで守るなら OIDC の3つを渡します (リダイレクト URI は `https://<denpa>/login/callback`)。
+画面をログインで守るなら OIDC の 3 つを渡します (リダイレクト URI は `https://<denpa>/login/callback`)。
 
 ```yaml
 # ~/denpa/compose.override.yml
@@ -155,7 +168,7 @@ Windows は同じ名前を `KEY=値` で `~/denpa/denpa.env` に、Helm は `den
 **持っているドメインの名前を LAN の中のアドレスに向ければ、公開しないまま本物の証明書が
 使えます** (DNS-01 なら外から繋がる必要が無い。`.arpa` のような内側だけの名前は ACME で
 取れない)。ホーム画面に置けるのも全画面にできるのも https のページだけなので、PWA にも要ります。
-外向きと LAN 用の2つの名前で出すなら、ホーム画面の名前を分けられます ([watch.md](watch.md#ホーム画面に置く))。
+外向きと LAN 用の 2 つの名前で出すなら、ホーム画面の名前を分けられます ([watch.md](watch.md#ホーム画面に置く))。
 その名前で信頼するネットワークからログインなしで開くなら、名前を `ALLOWED_HOSTS` (か `PWA_NAMES`) に書きます
 ([auth.md](auth.md#ログインなしで開ける名前-allowed_hosts))。
 
@@ -181,7 +194,7 @@ kubectl debug -it deploy/denpa --image=busybox --target=denpa -n denpa
 - **`Host` をそのまま渡し、WebSocket を通します。** `Host` が書き換わると設定の保存などの POST が
   `403 Cross-site POST form submissions are forbidden` で断られ、WebSocket が通らないとライブが
   「繋がりませんでした」になります。Caddy・Traefik・Envoy (Gateway API) は何もしなくても満たします。
-  Nginx Proxy Manager は「Websockets Support」を入れます。nginx は自分で書きます:
+  Nginx Proxy Manager は「Websockets Support」を入れます。nginx は次のように書きます。
 
   ```nginx
   location / {
@@ -198,4 +211,4 @@ kubectl debug -it deploy/denpa --image=busybox --target=denpa -n denpa
 
 - **`/denpa` のような接頭辞の下にも置けます** (Home Assistant の Ingress など)。接頭辞は denpa に教えません。
   OIDC に渡す絶対 URL にだけ、前段が付ける `X-Forwarded-Prefix` (Home Assistant は `X-Ingress-Path`) を
-  頭に付けます (`paths.ts` の `publicBase`)
+  先頭に付けます (`paths.ts` の `publicBase`)

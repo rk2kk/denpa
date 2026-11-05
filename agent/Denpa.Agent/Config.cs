@@ -86,7 +86,7 @@ public sealed record TunerSpec(
 /// <para>
 /// 中身を作るのはどちらもこちらではない。総当たりの選局こそ任されるが、NIT も
 /// SDT も解析しないので「何があったか」は分からない。それでも控えを持つのはこちら側
-/// にする — アンテナに何が映るかも、何台刺さっているかも、機材ごとの話だから。
+/// にする。アンテナに何が映るかも、何台挿さっているかも、機材ごとの話だから。
 /// </para>
 /// </summary>
 public sealed class Config(string tunersFile, string channelsFile)
@@ -95,13 +95,19 @@ public sealed class Config(string tunersFile, string channelsFile)
     public string ChannelsFile { get; } = channelsFile;
 
     /// <summary>CECH-ZD1 J がチャンネルごとに覚えたロックの値 (tuners.json の隣。消してよい。Zd1j.cs の <see cref="Zd1jLocks"/>)</summary>
-    public string Zd1jLocksFile => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(TunersFile))!, "zd1j-locks.json");
+    public string Zd1jLocksFile => Path.Combine(Dir, "zd1j-locks.json");
 
     /// <summary>
-    /// px4-userland の機材に流し込む IT930x のファームウェアを、取ってきて置く場所 (tuners.json の隣。
-    /// イメージには入れない。<see cref="Px4Firmware"/>)
+    /// px4-userland の機材に流し込む IT930x のファームウェアを、書き出して置く場所 (tuners.json の隣。
+    /// 同梱のものを書き出す。<see cref="Px4Firmware"/>)
     /// </summary>
-    public string Px4FirmwareFile => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(TunersFile))!, Px4Firmware.FileName);
+    public string Px4FirmwareFile => Path.Combine(Dir, Px4Firmware.FileName);
+
+    /// <summary>自分の鍵と証明書・合言葉・組んだ denpa の置き場 (tuners.json の隣の tls/。<see cref="AgentTls"/>)</summary>
+    public string TlsDir => Path.Combine(Dir, "tls");
+
+    /// <summary>tuners.json のあるディレクトリ。機材のデータ・覚えた値・鍵はここに置く</summary>
+    public string Dir => Path.GetDirectoryName(Path.GetFullPath(TunersFile))!;
 
     public static Config FromEnvironment() => new(
         Environment.GetEnvironmentVariable("TUNERS_FILE") ?? Path.Combine(DefaultDir(), "tuners.json"),
@@ -109,7 +115,7 @@ public sealed class Config(string tunersFile, string channelsFile)
 
     /// <summary>
     /// 変数が無いときの置き場。Linux はコンテナの <c>/config</c>。Mac と Windows はインストーラと同じ
-    /// <c>DENPA_HOME</c> (既定 <c>~/denpa</c>) の <c>config</c> — 常駐を止めて手で <c>--tune</c> などを流したときに、
+    /// <c>DENPA_HOME</c> (既定 <c>~/denpa</c>) の <c>config</c>。常駐を止めて手で <c>--tune</c> などを流したときに、
     /// 書けない <c>/config</c> を見に行かず、常駐と同じファイルを使う
     /// </summary>
     private static string DefaultDir() => OperatingSystem.IsLinux()
@@ -141,7 +147,7 @@ public sealed class Config(string tunersFile, string channelsFile)
 
     internal static void WriteAtomic(string path, JsonNode body)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         // 書きかけを読ませない。GET /denpa/channels や選局 (TSID を引く) は、書いている最中にもこのファイルを読みに来る
         var working = $"{path}.writing";
         File.WriteAllText(working, body.ToJsonString(Json.Pretty));
@@ -189,10 +195,30 @@ public sealed class Config(string tunersFile, string channelsFile)
     }
 
     /// <summary>
+    /// 挿した機材のうち、定義に足すもの。**前に探したときに無かった (いま挿された) 機材だけ**を足す。
+    /// 挿したままの機材を定義から消したら、挿し直すまで戻さない (消したのに勝手に戻ると、消せない)。
+    /// 名前は定義の中で重ならないようにする (チューナーを名前で見分ける。TunerPool.Replace)
+    /// </summary>
+    public static List<TunerSpec> Additions(IReadOnlyList<TunerSpec> written, IReadOnlyList<TunerSpec> found, IReadOnlySet<string?> seen)
+    {
+        var known = written.Select(tuner => tuner.Device).ToHashSet();
+        var names = written.Select(tuner => tuner.Name).ToHashSet();
+        var added = new List<TunerSpec>();
+        foreach (var tuner in found.Where(tuner => !seen.Contains(tuner.Device) && !known.Contains(tuner.Device)))
+        {
+            var name = tuner.Name;
+            for (var n = 2; names.Contains(name); n++) name = $"{tuner.Name} ({n})";
+            names.Add(name);
+            added.Add(tuner with { Name = name });
+        }
+        return added;
+    }
+
+    /// <summary>
     /// 機材を決める。**書いてあればそれ、無ければ自分で見つける。**
     ///
     /// <para>
-    /// 自動で分かるのは「刺さっているデバイスと、それが受けられる方式」だけ。
+    /// 自動で分かるのは「挿さっているデバイスと、それが受けられる方式」だけ。
     /// LNB を足したい・1 台だけ止めたい、は人にしか決められないので、そのときは画面から書く。
     /// </para>
     /// </summary>
@@ -204,7 +230,7 @@ public sealed class Config(string tunersFile, string channelsFile)
         var found = DeviceProbe.Detect();
         Log.Write(found.Count == 0
             ? $"チューナーが見つかりません ({TunersFile} に書けば、そちらを使います)"
-            : $"{TunersFile} に定義が無いので、刺さっている機材を使います:");
+            : $"{TunersFile} に定義が無いので、挿さっている機材を使います:");
         foreach (var tuner in found) Log.Write($"  {tuner.Name} [{string.Join(", ", tuner.Types)}] {tuner.Device}");
         return (found, true);
     }

@@ -36,12 +36,12 @@ import { settings } from "#lib/server/settings.js";
 export type { Preview, PreviewRow, Verdict } from "#lib/server/rule-preview.js";
 
 /**
- * 1つの節に渡す上限。画面は先頭の数件だけ出し、「もっと見る」でここまで広げる。
+ * 1 つの節に渡す上限。画面は先頭の数件だけ出し、「もっと見る」でここまで広げる。
  * これより多いときは件数だけ本当の数を出し、言葉を足してもらう
  */
 const LIMIT = 100;
 
-/** 検索の結果に並べる切り抜きの数。1行に収まるくらい */
+/** 検索の結果に並べる切り抜きの数。1 行に収まるくらい */
 const CLIP_PREVIEW = 6;
 
 /**
@@ -87,13 +87,13 @@ function ruleById(raw: unknown) {
 
 /**
  * **検索の結果** (`/search?q=`)。GET なので URL をそのまま人に渡せる。
- * 番組表・録画・予約・ルール・切り抜きを1度に引き、節ごとに件数と先頭を返す (`#lib/server/search.ts`)。
+ * 番組表・録画・予約・ルール・切り抜きを 1 度に引き、節ごとに件数と先頭を返す (`#lib/server/search.ts`)。
  *
  * **右の「ルールとして保存」もここ。** 言葉で探して、その場で条件を詰めてルールにする。
  *
  * - `?rule=<ID>` そのルールを書く欄に読み込んで直す (URL のまま人に渡せる・戻れる)
  * - `?from=program:<ID>` / `?from=recording:<ID>` 詳細の「ルールを作る」から。シリーズ名を言葉にして出直す
- * - `?keyword=` `?serviceIds=` など書く欄の名前 — その値で書く欄を始める (前のルールの画面のリンク)
+ * - `?keyword=` `?serviceIds=` など書く欄の名前。その値で書く欄を始める (前のルールの画面のリンク)
  */
 export function load({ url }) {
   const params = url.searchParams;
@@ -192,7 +192,7 @@ export function load({ url }) {
 }
 
 export const actions = {
-  /** 番組を予約する。録画のしかたは設定画面の1箇所で決める (番組表の予約と同じ) */
+  /** 番組を予約する。録画のしかたは設定画面の 1 箇所で決める (番組表の予約と同じ) */
   reserve: async ({ request }) => {
     const refused = await reserveFromForm(await request.formData());
     if (refused !== null) return fail(400, { message: refused });
@@ -263,7 +263,7 @@ export const actions = {
     return { toggled: true };
   },
 
-  /** 直しているルールを消す (2回押し)。消したら画面は `?rule=` を外して出直す */
+  /** 直しているルールを消す (2 回押し)。消したら画面は `?rule=` を外して出直す */
   deleteRule: async ({ request }) => {
     const id = idOf(await request.formData());
     if (id === null) return fail(400, { message: "ルール ID が不正です" });

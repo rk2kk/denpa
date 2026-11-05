@@ -85,22 +85,26 @@
 
   /** 運転中の注意 (互換モード。`drive-gate.svelte.ts`)。押すまで再生を始めない */
   const drive = driveGate();
-  const player = livePlayer({ confirm: drive.confirm });
+  // 開いた名前が家の中か (サーバが決める)。「自動」の形式をライブと同じ決め方で決める
+  const player = livePlayer({
+    confirm: drive.confirm,
+    indoor: untrack(() => data.indoor),
+  });
   /** 映像と重ねもの (MediaStack が組む)。bind で受けるので開くまでは null */
   let video = $state<HTMLVideoElement | null>(null);
   let still = $state<HTMLCanvasElement | null>(null);
   let overlay = $state<HTMLCanvasElement | null>(null);
   /** 全画面にする枠 (`PlayerStage` が bind する)。キーの `f` から使う */
   let stageEl = $state<HTMLElement | null>(null);
-  /** 全画面の出入り (3画面共通。[fullscreen.svelte.ts](../../../lib/components/player/fullscreen.svelte.ts)) */
+  /** 全画面の出入り (3 画面共通。[fullscreen.svelte.ts](../../../lib/components/player/fullscreen.svelte.ts)) */
   const fullscreen = stageFullscreen(() => stageEl);
 
-  /** 右端を伸ばすための時計。1秒刻みで十分 (バーの目盛りより細かい) */
+  /** 右端を伸ばすための時計。1 秒刻みで十分 (バーの目盛りより細かい) */
   let clock = $state(Date.now());
 
   /**
-   * エンコードが終わったら観る画面へ案内する (CM飛ばし・チャプター・データ放送が揃う)。録画の通知が来るたびに
-   * 状態を読む。勝手には移らない — 観ている最中に位置が飛ぶ。途中の位置は続き再生が覚えている
+   * エンコードが終わったら観る画面へ案内する (CM 飛ばし・チャプター・データ放送が揃う)。録画の通知が来るたびに
+   * 状態を読む。勝手には移らない。移ると観ている最中に位置が飛ぶ。途中の位置は続き再生が覚えている
    */
   let encoded = $state(false);
   liveUpdates([], {
@@ -214,13 +218,13 @@
     player.chaseSeek(Math.max(0, Math.min(value, Math.max(0, recorded - 5))));
   }
 
-  /** いまの場所から送る・戻す。キーと端2回タップが使う */
+  /** いまの場所から送る・戻す。キーと端 2 回タップが使う */
   function seekBy(seconds: number): void {
     seekTo(pos + seconds);
   }
 
   /**
-   * 選んでいる速さ。端末ごとに覚え (観る画面と同じ `SPEED_KEY`)、プレイヤーを作り直しても当て直す —
+   * 選んでいる速さ。端末ごとに覚え (観る画面と同じ `SPEED_KEY`)、プレイヤーを作り直しても当て直す。
    * シークが読み直し (`openChase`) になると、押した覚えの無いまま等速へ戻る (`live-player` の `clear`)
    */
   let want = $state(1);
@@ -238,7 +242,7 @@
   });
 
   /**
-   * 視聴位置をサーバへ (15秒おき)。エンコードが終わったら、観る画面の続き再生がここから読む
+   * 視聴位置をサーバへ (15 秒おき)。エンコードが終わったら、観る画面の続き再生がここから読む
    * (送り方は観る画面と共通。`#lib/resume.ts`)
    */
   function sendResume(leaving = false): void {
@@ -247,7 +251,7 @@
     keepResume(data.rec.id, pos, total, "ts", leaving);
   }
 
-  /** 操作列の出し入れ。ライブ・観る画面と同じ */
+  /** 操作バーの出し入れ。ライブ・観る画面と同じ */
   const controls = playerControls();
   /** 止めている間も掛けたまま (ライブ・観る画面と同じ。あちらに理由) */
   const awake = screenAwake();
@@ -319,7 +323,7 @@
     stepVolume: volume.step,
   });
 
-  /** いまの1コマを字幕・コメントごと切り抜いてサーバに保存する (ライブ・観る画面と同じ。`shot.svelte.ts`) */
+  /** いまの 1 コマを字幕・コメントごと切り抜いてサーバに保存する (ライブ・観る画面と同じ。`shot.svelte.ts`) */
   const shooter = snapshotter(controls);
   const notices = $derived<Notice[]>([...shooter.notices, ...pip.notices]);
   function snapshot(): void {
@@ -379,7 +383,7 @@
         {/snippet}
       </MediaStack>
 
-      <!-- 右端の縦の列。**観る画面と同じ並び** (上から閉じる・切り抜き) -->
+      <!-- 右端の縦の列。**観る画面と同じ並び** (上から閉じる・切り抜き・コメントの一覧) -->
       <ControlBar side shown={controls.shown}>
         <CloseLink />
         <ControlButton
@@ -450,7 +454,7 @@
             />
           {/if}
 
-          <!-- 読みものは3画面共通の二段 (InfoBlock)。上が番組、下が位置 -->
+          <!-- 読みものは 3 画面共通の二段 (InfoBlock)。上が番組、下が位置 -->
           <InfoBlock
             range={{ start: data.rec.start_at, end: data.rec.end_at }}
             service={data.rec.service_name}
@@ -460,13 +464,14 @@
             {#snippet status()}
               <span class="clock num"
                 >{clockLabel(pos)} / {clockLabel(recorded)}</span
-              ><!-- 赤いのは点だけ (`.rec-dot`)。字まで赤くすると黒い操作バーの上で沈む -->{#if line !== null && !line.finished}・<span
+              ><!-- 赤いのは点だけ (`.rec-dot`)。字まで赤くすると黒い操作バーの上で沈む。
+                録画中は「・」で区切らない (区切りの「・」と赤い点が並んで詰まって見える)。点の前を空けて区切りにする -->{#if line !== null && !line.finished}<span
                   class="rec"><span class="rec-dot"></span>録画中</span
                 >{:else if line !== null}・録画済み{/if}
             {/snippet}
           </InfoBlock>
 
-          <!-- 速さはいつでも選べる (録れている範囲の中を進むだけ)。互換モードは等速だけ -->
+          <!-- 速さはいつでも選べる (録れている範囲の中を進むだけ)。canvas に描くとき (互換モード・MPEG-2) は等速だけ -->
           {#if !player.canvas}
             <Extras>
               <SpeedMenu
@@ -503,7 +508,8 @@
             codec={liveCodecs({
               icon: CODEC,
               choice: player.choice,
-              format: player.codec,
+              format: player.format,
+              step: player.step,
               hidden: data.hidden.length > 0,
               unavailable: player.unavailable,
               onselect: (next) => player.setChoice(next),
@@ -534,7 +540,7 @@
           {#snippet actions()}
             <button
               type="button"
-              class="small"
+              class="small secondary"
               onclick={() =>
                 video !== null &&
                 void player.openChase(video, data.rec.id, pos)}
@@ -559,7 +565,7 @@
             href={resolve(`watch/${data.rec.id}`)}
             data-testid="chase-to-watch"
           >
-            エンコードが終わりました — 続きは観る画面で
+            エンコードが終わりました。続きは観る画面で再生できます
           </a>
         </span>
       {:else}
@@ -606,14 +612,15 @@
   }}
 />
 
-<!-- 運転中の注意 (互換モードで初めて再生する前に1回)。押すまで再生を始めない -->
+<!-- 運転中の注意 (互換モードで初めて再生する前に 1 回)。押すまで再生を始めない -->
 <DriveNotice open={drive.open} onaccept={drive.accept} />
 
 <style>
   .rec {
     display: inline-flex;
     align-items: baseline;
-    gap: 0.25rem;
+    gap: 0.375rem;
+    margin-inline-start: 0.625rem;
   }
   /* 録画中の点 (`app.css` の `.rec-dot`。ゆっくり脈打つ) を字の真ん中に */
   .rec .rec-dot {
@@ -631,6 +638,6 @@
     text-underline-offset: 2px;
   }
   .to-watch:hover {
-    background: var(--dp-video-veil-strong);
+    background: var(--dp-on-video-hover);
   }
 </style>

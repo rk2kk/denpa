@@ -2,7 +2,7 @@
  * 文書 ([document.ts](document.ts)) をページに描く。
  *
  * - 作るのは絶対配置の div / span / br と、画像の img だけ。**innerHTML も属性の写しも
- *   使わない** — 字は textContent、見た目は確かめた値 (px の数・CLUT の色・列挙) から組んだ
+ *   使わない。** 字は textContent、見た目は確かめた値 (px の数・CLUT の色・列挙) から組んだ
  *   style だけ。放送の on* や任意の属性がページに出ることは無い
  * - 映像は動かさない。映像の object の場所を `onVideoRect` で知らせ、そこより前に描くものの
  *   背景には穴を開ける (映像は下にあって、穴から見える。web-bml の clipVideoPlane と同じ考え)
@@ -11,7 +11,7 @@
 
 import { cssColor, type Rgba } from "./clut";
 import { parseUrl } from "./css";
-import type { BmlDocument, BmlElement, BmlNode } from "./document";
+import type { BmlDocument, BmlElement, BmlText } from "./document";
 import { isDrcs, toDisplay } from "./euc";
 import { visibleFrames } from "./mng";
 import type { Computed } from "./style";
@@ -44,7 +44,7 @@ export interface RenderHost {
   drcs(unit: number, fontSize: number, family: string): string | null;
   /**
    * アニメーション (MNG) を決めた回数だけ動かし終えた。streamstatus を pause にし、出しているコマを
-   * streamposition にするのはエンジン (付属2 4.8.5.3「回し終えたら pause」)
+   * streamposition にするのはエンジン (付属 2 4.8.5.3「回し終えたら pause」)
    */
   finished(element: BmlElement, position: number): void;
 }
@@ -149,7 +149,7 @@ function hole(rect: Rect): string {
 
 export class Renderer {
   private readonly views = new Map<BmlElement, View>();
-  private readonly texts = new Map<BmlNode, TextView>();
+  private readonly texts = new Map<BmlText, TextView>();
   private drawn = -1;
   /** 最後に知らせた映像の場所 (初めの描画では必ず知らせる) */
   private lastVideo: string | null = null;
@@ -402,7 +402,7 @@ export class Renderer {
   }
 
   /**
-   * MNG を出す (付属2 4.8.5.3)。streamstatus が stop なら出さない、pause なら streamposition の
+   * MNG を出す (付属 2 4.8.5.3)。streamstatus が stop なら出さない、pause なら streamposition の
    * コマ、play ならそこから動かす (くり返しは TERM の回数 × streamlooping)。回し終えたら
    * 最後のコマのまま pause にする (エンジンが属性を書く)
    */
@@ -506,7 +506,7 @@ export class Renderer {
     img.style.cssText = "position:absolute;left:0;top:0;display:block;";
     img.src = source.url;
     const size = (width: number, height: number): void => {
-      // JPEG は 960x540 の画面で半分の大きさ (付属2 表5-3。960x540 で 960x540 の画像だけそのまま)
+      // JPEG は 960x540 の画面で半分の大きさ (付属 2 表 5-3。960x540 で 960x540 の画像だけそのまま)
       let w = width;
       let h = height;
       if (type === "image/jpeg" && this.host.resolution().width === 960) {
@@ -533,8 +533,7 @@ export class Renderer {
   }
 
   /** 字を描く。DRCS は 1 字ずつ mask の span に (色は字の色) */
-  private text(node: BmlNode, view: TextView): void {
-    if (node.kind !== "text") return;
+  private text(node: BmlText, view: TextView): void {
     const s = node.parent?.style();
     const family = s?.fontFamily ?? "";
     const size = s?.fontSize ?? 24;

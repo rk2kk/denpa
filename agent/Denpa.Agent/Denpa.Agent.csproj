@@ -7,7 +7,7 @@
         要らないことが条件なので、ここは外せない。
         出来上がるのは 13MB ほどの実行ファイル 1 個。
 
-        依存を 1 つも足していない。JSON は System.Text.Json.Nodes で木を直に組み、読む —
+        依存を 1 つも足していない。JSON は System.Text.Json.Nodes で木を直に組み、読む。
         AOT ではリフレクションを使う方式が素直に動かない (Json.cs)。
     -->
     <PropertyGroup>
@@ -28,5 +28,19 @@
         <InformationalVersion>dev</InformationalVersion>
         <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     </PropertyGroup>
+
+    <ItemGroup>
+        <!--
+            IT930x のファームウェア (ITE Tech. の許諾を得て無改変で同梱する。firmware/README.md)。
+            実行ファイルに埋め込み、1 個のまま配れるようにする。px4d に渡すときに書き出す (Px4Firmware.cs)
+        -->
+        <EmbeddedResource Include="firmware/it930x-firmware.bin" LogicalName="it930x-firmware.bin" />
+        <!--
+            PIX-DT295 の常駐方式で機材に入れる mAgicVISION のファームウェア (作者が再配布を認めている。firmware/README.md)。
+            その移植元のコードの MIT の表示も埋め込み、実行ファイルといっしょに配る (Dt295ResidentImage.cs)
+        -->
+        <EmbeddedResource Include="firmware/magicvision-firmware.bin" LogicalName="magicvision-firmware.bin" />
+        <EmbeddedResource Include="licenses/mAgicVISION.txt" LogicalName="mAgicVISION-LICENSE.txt" />
+    </ItemGroup>
 
 </Project>

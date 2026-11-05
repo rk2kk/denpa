@@ -30,7 +30,7 @@ test.describe("EPGStation からの引き継ぎ", () => {
     await syncEpg(request);
     await goto(page, "/settings/integrations");
     await page.getByTestId("epgstation-url").fill(stack.epgstationUrl);
-    // 既定は下見。チェックを入れない限りファイルもDBも触らない
+    // 既定は下見。チェックを入れない限りファイルも DB も触らない
     await expect(page.getByTestId("migrate-apply")).not.toBeChecked();
     await page.getByTestId("migrate-run").click();
     await expect(page.getByTestId("migrate-started")).toBeVisible();
@@ -52,7 +52,7 @@ test.describe("EPGStation からの引き継ぎ", () => {
     await expect(log).toContainText(
       "BS4K は denpa に無いので種別から外しました",
     );
-    // 取ってくる大きさと置き場の空き
+    // 取得する大きさと置き場の空き
     await expect(log).toContainText("取り込む 3 件");
     await expect(log).toContainText("空き");
     await expect(page.getByTestId("epgstation-url")).toHaveValue(

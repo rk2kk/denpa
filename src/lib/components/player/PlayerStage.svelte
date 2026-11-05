@@ -17,8 +17,8 @@
   import { PHONE_LANDSCAPE } from "./PlayerLayout.svelte";
 
   /**
-   * 映像を出す領域。3つの視聴画面で同じ配線を1本に: 操作列の出し入れとカーソル (`controls`)・キーボードで触っている
-   * 間は残す・全画面は枠ごと (iPhone は広げる。`data-pseudo`。テーブルトップはページごと)・枠の大きさから操作列の詰め方を決める (`compact`)。
+   * 映像を出す領域。3 つの視聴画面で同じ配線を 1 本に: 操作バーの出し入れとカーソル (`controls`)・キーボードで触っている
+   * 間は残す・全画面は枠ごと (iPhone は広げる。`data-pseudo`。テーブルトップはページごと)・枠の大きさから操作バーの詰め方を決める (`compact`)。
    * 中身は画面ごとに違うので snippet で受ける
    */
   interface Props {
@@ -36,7 +36,7 @@
     notes?: Snippet;
     /**
      * アンビエントモード (`ambient.svelte.ts`)。渡すと、映像の周りの地に映像の色を敷く (`AmbientGlow`)。
-     * 色は枠の外に出るだけで、枠の中 (映像・字幕・データ放送・操作列・通知) には重ならない。
+     * 色は枠の外に出るだけで、枠の中 (映像・字幕・データ放送・操作バー・通知) には重ならない。
      * テーブルトップ (`TABLETOP`) の間は、光の代わりに下の段へ映像の色の反射 (`FoldReflection`) を敷く。
      * 光が見えている間は、実況のコメントも枠の外を流れる (下の `outside`)
      */
@@ -56,7 +56,7 @@
     ambient,
   }: Props = $props();
 
-  // 中のメニュー (`stageMenu`) が「開いている間は操作列を残せ」と言う先。取り手で渡す (props は差し替わりうる)
+  // 中のメニュー (`stageMenu`) が「開いている間は操作バーを残せ」と言う先。取り手で渡す (props は差し替わりうる)
   setContext(PLAYER_CONTROLS, () => controls);
   /** テーブルトップか (`#lib/phone-form.ts` の `TABLETOP`)。並べ方は CSS、ここは光と反射のどちらを置くかだけ */
   const tabletop = new MediaQuery(TABLETOP);
@@ -93,7 +93,7 @@
   });
 
   /**
-   * 枠の大きさで操作列の詰め方を変える (操作列は 48px の丸を横に9個並べる作りで、狭い枠では折れて映像を覆った)。
+   * 枠の大きさで操作バーの詰め方を変える (操作バーは 48px の丸を横に 9 個並べる作りで、狭い枠では折れて映像を覆った)。
    * 決めるのは媒体の幅ではなく枠の大きさ (二段組かどうかで映像の幅がまるで違う)。
    *
    * - `compact` (幅 448px 未満・16:9 より低く抑えられて高さ 300px 未満・横にしたスマホ) … 押すものを 40px に縮め、
@@ -172,7 +172,7 @@
 
   /**
    * 下の操作バーの中身の高さ (px。上の影の余白は除く)。右端の縦の列はこの上で止め、入りきらないぶんは
-   * 左へもう1列に並べる (`ControlBar` の `.side`)。スマホの縦では列に4つ並ぶと全画面のボタンに重なっていた
+   * 左へもう 1 列に並べる (`ControlBar` の `.side`)。スマホの縦では列に 4 つ並ぶと全画面のボタンに重なっていた
    */
   let barHeight = $state(0);
   $effect(() => {
@@ -280,7 +280,7 @@
   });
 
   /**
-   * 操作列を出している間は、字幕を操作列の上まで持ち上げる (操作バーに潜っていた)。字を描く係が字の縦の範囲を
+   * 操作バーを出している間は、字幕を操作バーの上まで持ち上げる (操作バーに潜っていた)。字を描く係が字の縦の範囲を
    * `data-ink` に書くので、重なるぶんだけ canvas を `translate` でずらす (字は縮めない)。枠の上端より上へは
    * 出さず、操作バーを引っ込めている間は戻す
    */
@@ -289,7 +289,7 @@
     if (stage === null) return;
     const lifting = controls.shown;
     /*
-     * 位置は `offsetTop` で測る (ずらす前の位置)。データ放送の小窓の中 (`data-bml-window`) では動かさない —
+     * 位置は `offsetTop` で測る (ずらす前の位置)。データ放送の小窓の中 (`data-bml-window`) では動かさない。
      * 操作バーと重ならず、ずらすと小窓の端で切れる
      */
     const offsetIn = (el: HTMLElement): number | null => {
@@ -379,7 +379,7 @@
   {/if}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!--
-    映像の周りは黒 (letterbox の帯にテーマ色を出さない)。低くしすぎない (224px) — 上下と右に重ねる操作バーどうしが重なる
+    映像の周りは黒 (letterbox の帯にテーマ色を出さない)。低くしすぎない (224px)。上下と右に重ねる操作バーどうしが重なる
 -->
   <div
     bind:this={element}
@@ -424,7 +424,7 @@
     display: contents;
   }
   /*
-   * 枠の外を流れるコメントの所 (`outside`)。二段組 (下) のほかでは出さない — 縦に積むときは枠が窓の幅いっぱいで外が無く、
+   * 枠の外を流れるコメントの所 (`outside`)。二段組 (下) のほかでは出さない。縦に積むときは枠が窓の幅いっぱいで外が無く、
    * 置き場が箱を持たないので、置くと窓の別の所に出る
    */
   .outside {
@@ -433,7 +433,7 @@
   /*
      * 二段組では、枠を映像の形にして使える広さに収める (上の `aspect`)。幅は列の幅 (`100cqw`) と
      * 「高さ × 縦横比」(`100cqh`) の小さいほう。上に寄せて横は真ん中 (E2E の `expectSideFrame`)。
-     * 測る箱は `.room` — `<main>` の列にすると `position: absolute` の基準になり、`AmbientGlow` の位置がずれる
+     * 測る箱は `.room`。`<main>` の列にすると `position: absolute` の基準になり、`AmbientGlow` の位置がずれる
      */
   /* 横にしたスマホ (下) は 1000px を超えても二段組にしないので、ここから外す (`PlayerLayout` の `PHONE_LANDSCAPE`) */
   @media (min-width: 1000px) and (not ((orientation: landscape) and (max-height: 500px) and (pointer: coarse))) {
@@ -542,7 +542,7 @@
   }
   /*
      * 広げた全画面 (iPhone。`fullscreen.svelte.ts`)。画面いっぱいに被せ、縦横比・高さの上下限・余白は外す。
-     * 端は安全域の内側で止める (操作列を指の届く所に置く)。外側は `html[data-stage-fullscreen]` の黒 (`app.css`)
+     * 端は安全域の内側で止める (操作バーを指の届く所に置く)。外側は `html[data-stage-fullscreen]` の黒 (`app.css`)
      */
   .stage[data-pseudo] {
     position: fixed;

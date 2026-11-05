@@ -1,9 +1,11 @@
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Text;
 using System.Text.Json.Nodes;
 using Denpa.Agent;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 /*
  * チューナーエージェント。**機材に触るのはここだけ。**
@@ -14,7 +16,7 @@ using Microsoft.AspNetCore.Http.Features;
  *   macOS / Windows の USB リーダーだけは OS の PC/SC 越し)
  * - チューナーデバイス … `/dev/dvb/*` と `/dev/bus/usb` が見えているのはこちらだけ
  * - 選局そのもの … デバイスを使って ioctl で選局する (Tuning.cs)。px4-userland / siano-userland /
- *   asicen-userland の機材は同梱のものに USB を扱わせる (Px4.cs / Siano.cs / Asicen.cs)。CECH-ZD1 J は USB を直に持つ (Zd1j.cs)
+ *   asicen-userland の機材は同梱のものに USB を扱わせる (Px4.cs / Siano.cs / Asicen.cs)。CECH-ZD1 J と PIX-DT295 は USB を直に持つ (Zd1j.cs / Dt295.cs)
  *
  * **番組や局の中身は読まない。** NIT も SDT も EIT も解析せず、TS をそのまま流す (読むのは
  * 復号に要る PAT・PMT・ECM だけ。B25.cs)。番組や局を読むのは denpa (`packages/arib`) で、局を選り分けるのも番組表を組み立てるのも、
@@ -40,8 +42,41 @@ if (args is ["--version"])
 if (args.ElementAtOrDefault(0) == "--tune") return Probe.Run(args);
 if (args.ElementAtOrDefault(0) == "--decode-file") return Probe.Decode(args);
 if (args.ElementAtOrDefault(0) == "--card") return Probe.Card(args);
+
+var port = int.TryParse(Environment.GetEnvironmentVariable("AGENT_PORT"), out var configured)
+    ? configured
+    : 25252;
+var config = Config.FromEnvironment();
+
 /*
- * **知らない引数ではサーバを立てない。** 立ち上げると tuners.json が無ければ刺さっている機材を自分で見つけて使い始めるので、
+ * denpa と組むときの URL を出して終わる。サーバは立てない (鍵と合言葉が無ければここで作る。AgentTls.cs)。
+ * 組んだ相手がいて起動のログに出なくなってからも、これで見られる
+ */
+if (args is ["--pair"])
+{
+    // 標準出力には URL だけを出す (スクリプトで読めるように)。鍵を作ったなどの知らせは標準エラーへ
+    var stdout = Console.Out;
+    Console.SetOut(Console.Error);
+    stdout.WriteLine(AgentTls.Load(config.TlsDir, Environment.GetEnvironmentVariable("AGENT_PAIR_TOKEN")).PairUrl(port));
+    return 0;
+}
+/*
+ * 動いているエージェントの /denpa/tuners を自分の証明書で読んで出す (インストーラが様子を見る。AgentTls.Status)。
+ * 待ち受けを AGENT_HOST で絞っていればそのアドレスへ、そうでなければループバックへ繋ぐ
+ */
+if (args is ["--status"])
+{
+    var target = Environment.GetEnvironmentVariable("AGENT_HOST") is { Length: > 0 } bound
+        && IPAddress.TryParse(bound, out var address)
+        && !address.Equals(IPAddress.Any) && !address.Equals(IPAddress.IPv6Any)
+        ? bound
+        : "127.0.0.1";
+    return await AgentTls.Status(config.TlsDir, target, port);
+}
+// PIX-DT295 を確かめる。常駐イメージを入れて (引き継いで) 選局し、受信の統計を出す (Dt295ResidentProbe.cs)
+if (args.ElementAtOrDefault(0) == "--dt295-probe") return Dt295ResidentProbe.Run(args);
+/*
+ * **知らない引数ではサーバを立てない。** 立ち上げると tuners.json が無ければ挿さっている機材を自分で見つけて使い始めるので、
  * 打ち間違い (`--help` など) で本番と同じ機材を取り合うことになる
  */
 if (args.Length > 0)
@@ -49,17 +84,17 @@ if (args.Length > 0)
     Console.Error.WriteLine($"知らない引数です: {string.Join(" ", args)}");
     Console.Error.WriteLine("usage: denpa-agent                     (引数なしでサーバとして立ち上がる)");
     Console.Error.WriteLine("       denpa-agent --version");
+    Console.Error.WriteLine("       denpa-agent --pair                (denpa と組むときの URL を出す)");
+    Console.Error.WriteLine("       denpa-agent --status              (動いているエージェントの /denpa/tuners を出す)");
     Console.Error.WriteLine($"       {Probe.TuneUsage}");
     Console.Error.WriteLine($"       {Probe.DecodeUsage}");
     Console.Error.WriteLine($"       {Probe.CardUsage}");
+    Console.Error.WriteLine($"       {Dt295ResidentProbe.Usage}");
     return 2;
 }
 
-var port = int.TryParse(Environment.GetEnvironmentVariable("AGENT_PORT"), out var configured)
-    ? configured
-    : 25252;
 /*
- * 待ち受けるアドレス (AGENT_HOST)。既定は全部のインターフェース。**エージェントは認証を持たない**ので、
+ * 待ち受けるアドレス (AGENT_HOST)。既定は全部のインターフェース。組んだ denpa しか通さない (AgentTls.cs) が、
  * 同じ機械の denpa からしか繋がない構成ではループバック (127.0.0.1) に絞る (Mac の install.sh)。
  * 鍵を配るポート (CARD_SHARE_PORT) はこれに従わない (LAN の別の拠点に配るので。CardShareServer.cs)
  */
@@ -75,11 +110,21 @@ if (Environment.GetEnvironmentVariable("AGENT_HOST") is { Length: > 0 } hostText
  * `/media/raw`)。掛かったまま録れた TS を後から復号する (/denpa/decode) ときに読むので、denpa と
  * 同じ実体を同じ名前で見せる。ここの外のファイルは求められても触らない
  */
-var recorded = Path.GetFullPath(
+// 末尾の `/` は落とす (置き場の中かを `<置き場>/` で始まるかで見るので、`/media/raw/` だとどれも外になる)
+var recorded = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
     Environment.GetEnvironmentVariable("RAW_DIR")
-    ?? Path.Combine(Environment.GetEnvironmentVariable("MEDIA_DIR") ?? "/media", "raw"));
+    ?? Path.Combine(Environment.GetEnvironmentVariable("MEDIA_DIR") ?? "/media", "raw")));
 
-var config = Config.FromEnvironment();
+// 自分の鍵と証明書、合言葉、組んだ denpa (tuners.json の隣の tls/。AgentTls.cs)
+var tls = AgentTls.Load(config.TlsDir, Environment.GetEnvironmentVariable("AGENT_PAIR_TOKEN"));
+/*
+ * 合言葉が短いと、組むやり取りを覗いた人が証し (HMAC) から手元で総当たりできる。インストーラや chart が
+ * 作るもの (43 字) なら当たらない。手で短いものを渡されたときだけ言う
+ */
+if (tls.Token.Length < 32)
+{
+    Log.Write($"AGENT_PAIR_TOKEN が短すぎます ({tls.Token.Length} 字)。推測されないよう 32 字以上の乱数にしてください (docs/agent.md)");
+}
 // CECH-ZD1 J がチャンネルごとに覚えたロックの値 (tuners.json の隣。Zd1j.cs)
 Zd1jBoard.Locks = new Zd1jLocks(config.Zd1jLocksFile);
 var events = new Events();
@@ -107,7 +152,7 @@ if (cardLan.Port == port)
 var sharing = cardLan.Port is { } sharePort ? new CardShareServer(cardLan, sharePort) : null;
 
 /*
- * CARD_URL は「手元にカードが無い拠点」だけ。指定しなければ自分に刺さって
+ * CARD_URL は「手元にカードが無い拠点」だけ。指定しなければ自分に挿さって
  * いるカードを読む (CardShare.cs)。
  */
 var cardUrl = Environment.GetEnvironmentVariable("CARD_URL");
@@ -128,13 +173,68 @@ void PrepareDaemons()
     UserlandDaemon.Prepare(AsicenUserland.IdsIn(pool.Tuners).ToList(), AsicenDaemon.For);
 }
 
+/*
+ * **挿した機材を、そのまま使えるようにする** (DeviceWatch が抜き差しを受け取ったら呼ぶ)。
+ * 定義を書いてあれば、前に探したときに無かった (いま挿された) 機材を、有効なチューナーとして末尾に書き足す
+ * (Config.Additions)。抜いた機材は定義から消さない (挿し直したときに名前や「使う」の設定が戻るように)。
+ * 定義を書いていなければ、見つけたもので置き換える。
+ * 画面からの書き換え (PUT /denpa/tuners) と同じロックで、書き足しと書き換えが混ざらないようにする
+ */
+var tunersGate = new Lock();
+// 前に探したときに挿さっていた機材。起きたときに挿さっていたものは、挿されたとは数えない
+HashSet<string?> seen = [];
+
+// 定義を書き、読み直したものに入れ替える。tunersGate の中で呼ぶ
+void ApplyTuners(List<TunerSpec> next)
+{
+    config.SaveTuners(next);
+    var (resolved, auto) = config.ResolveTuners();
+    pool.Detected = auto;
+    pool.Replace(resolved);
+}
+
+void Rescan()
+{
+    lock (tunersGate)
+    {
+        var found = DeviceProbe.Detect();
+        var written = config.LoadTuners();
+        var added = Config.Additions(written, found, seen);
+        seen = [.. found.Select(tuner => tuner.Device)];
+        if (written.Count == 0)
+        {
+            if (found.Select(tuner => tuner.Device).SequenceEqual(pool.Tuners.Select(tuner => tuner.Device))) return;
+            Log.Write($"挿さっている機材が変わりました ({found.Count} 台)");
+            pool.Replace(found);
+        }
+        else
+        {
+            if (added.Count == 0) return;
+            foreach (var tuner in added) Log.Write($"挿した機材を定義に足しました: {tuner.Name} [{string.Join(", ", tuner.Types)}] {tuner.Device}");
+            ApplyTuners([.. written, .. added]);
+        }
+    }
+    PrepareDaemons();
+}
+
 var builder = WebApplication.CreateSlimBuilder(args);
 // 鍵を配るポートだけは待ち受けを自分で作る (IPv4 と IPv6 を分けて TTL を付ける。CardShareServer.cs)
 if (sharing is { } server) builder.WebHost.UseSockets(sockets => sockets.CreateBoundListenSocket = server.Bind);
+/*
+ * **普通のポートは HTTPS だけ。クライアント証明書を必須にする** (出さない相手は TLS の段で落ちる。ブラウザはここで止まる)。
+ * TLS の段ではどの証明書も受け、見分けるのは下のチェック (AgentTls.Decide)。鍵を配るポートは平文のまま (CardShareServer.cs)
+ */
+var https = new HttpsConnectionAdapterOptions
+{
+    ServerCertificate = tls.Certificate,
+    ClientCertificateMode = ClientCertificateMode.RequireCertificate,
+    ClientCertificateValidation = (_, _, _) => true,
+    SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+};
 builder.WebHost.ConfigureKestrel(options =>
 {
-    if (host is null) options.ListenAnyIP(port);
-    else options.Listen(host, port);
+    if (host is null) options.ListenAnyIP(port, listen => listen.UseHttps(https));
+    else options.Listen(host, port, listen => listen.UseHttps(https));
     sharing?.Listen(options);
     // 選局は何時間も開きっぱなしになる。既定のまま切られると録画が落ちる
     options.Limits.KeepAliveTimeout = TimeSpan.FromDays(365);
@@ -143,9 +243,9 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Logging.ClearProviders();
 
 /*
- * **録画中に止められたら、終わるまで居座る** (denpa の `SHUTDOWN_WAIT` と同じ考え)。
+ * **録画中に止められたら、録画が終わるまで止まらない** (denpa の `SHUTDOWN_WAIT` と同じ考え)。
  *
- * これが無かった頃は、**Pod を入れ替えるだけで録画が落ちた** — denpa 側は録画が
+ * これが無かった頃は、**Pod を入れ替えるだけで録画が落ちた。** denpa 側は録画が
  * 終わるまで待つのに、TS を流しているこちらが先に消える。実機で 30 分番組を
  * 始まって 10 秒で失っている。Kestrel に任せられない理由は Drain。
  *
@@ -164,40 +264,27 @@ var app = builder.Build();
 if (sharing is not null) app.Use(sharing.Serve);
 
 /*
- * **知らない名前で呼ばれたら答えない** (403。AgentHosts.cs)。アドレスで届く範囲を絞っても、
- * 悪いサイトが自分の名前を 127.0.0.1 に向け直せば、そのサイトを開いたブラウザから読み出しの GET が届く
- */
-var hosts = AgentHosts.FromEnvironment();
-app.Use(async (HttpContext http, RequestDelegate next) =>
-{
-    var named = http.Request.Headers.Host.ToString();
-    if (hosts.Allows(named))
-    {
-        await next(http);
-        return;
-    }
-    var shown = named.Length > 0 ? named : "(名前なし)";
-    if (hosts.FirstRefusal(shown))
-    {
-        Log.Write($"知らない名前「{shown}」で呼ばれたので断りました (403)。この名前で繋ぐなら AGENT_ALLOWED_HOSTS に足してください (docs/agent.md)");
-    }
-    await Respond.Error(http, $"「{shown}」という名前では答えません。この名前で繋ぐなら AGENT_ALLOWED_HOSTS に足してください", 403);
-});
-
-/*
- * **本文を読む API (PUT / POST) は application/json しか受けない** (415)。ブラウザは text/plain などの
- * POST を下調べ (preflight) なしに送るので、受けていると、開いた外のサイトから LAN の中の
- * エージェントへ書き込めてしまう。JSON と名乗れば下調べが入り、エージェントは CORS に答えないので止まる
+ * **組んだ denpa しか通さない** (AgentTls.cs)。相手の証明書の指紋が clients にあれば通し、
+ * 無ければ組む API (POST /denpa/pair) だけ受ける
  */
 app.Use(async (HttpContext http, RequestDelegate next) =>
 {
-    var method = http.Request.Method;
-    if ((HttpMethods.IsPost(method) || HttpMethods.IsPut(method)) && !Json.IsJsonContentType(http.Request.ContentType))
+    var peer = http.Connection.ClientCertificate is { } client ? AgentTls.FingerprintOf(client) : null;
+    switch (tls.Decide(peer, http.Request.Method, http.Request.Path.Value ?? ""))
     {
-        await Respond.Error(http, "本文は application/json で送ります", 415);
-        return;
+        case AgentTls.Gate.Pass:
+            await next(http);
+            return;
+        case AgentTls.Gate.Pair:
+            var result = tls.Pair(peer, await Respond.Read(http));
+            if (result.Proof is { } proof) await Respond.Write(http, new JsonObject { ["proof"] = proof });
+            else await Respond.Error(http, result.Error!, result.Status);
+            return;
+        default:
+            // paired: false は denpa が「組み直せば通る」と見分ける印 (文言は変わりうるので見ない。agent-client.ts)
+            await Respond.Write(http, new JsonObject { ["error"] = AgentTls.NotPaired, ["paired"] = false }, 403);
+            return;
     }
-    await next(http);
 });
 
 // --- 選局。**エージェントの表看板** ---------------------------------------
@@ -215,11 +302,19 @@ app.MapGet("/denpa/stream", async (HttpContext http) =>
     var use = query["use"].ToString() is { Length: > 0 } named ? named : "不明";
     // 引き継ぎ。この利用者たちは、もう離れたものとして選ぶ (TunerPool.Open。何度でも書ける)
     var after = query["after"].Where(value => !string.IsNullOrEmpty(value)).Select(value => value!).ToHashSet();
+    // デバッグ用の名指し。指定のデバイスのチューナーだけで選局する (TunerPool.Open の pin)
+    var pin = query["tuner"].ToString() is { Length: > 0 } pinned ? pinned : null;
 
     Sink sink;
     try
     {
-        sink = pool.Open(type, channel, priority, use, after);
+        sink = pool.Open(type, channel, priority, use, after, pin);
+    }
+    catch (TunerPool.TunerPinException error)
+    {
+        // 指定のチューナーが無い・無効・その種別を受けられない。ほかへ振り替えないので 400 で理由を返す
+        await Respond.Error(http, error.Message, 400);
+        return;
     }
     catch (TunerPool.TunerBusyException error)
     {
@@ -318,7 +413,7 @@ app.MapGet("/denpa/events", async (HttpContext http) =>
         /*
          * **止まるときはこちらから閉じる。** Kestrel は開いている応答が終わるのを 30 秒 (既定の ShutdownTimeout)
          * 待ってから止まり、その間は待ち受けだけ閉じている。denpa は通知を開きっぱなしにするので、録画が無いときの
-         * 入れ替えでも古い Pod が 30 秒居残り、その間に始まった録画の頭が欠けていた (実機で約 35 秒。下の Drain)
+         * 入れ替えでも古い Pod が 30 秒残り、その間に始まった録画の頭が欠けていた (実機で約 35 秒。下の Drain)
          */
         using var stopping = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, app.Lifetime.ApplicationStopping);
         var ct = stopping.Token;
@@ -380,10 +475,10 @@ app.MapPut("/denpa/tuners", async (HttpContext http) =>
         return;
     }
 
-    config.SaveTuners([.. next.OfType<TunerSpec>()]);
-    var (resolved, auto) = config.ResolveTuners();
-    pool.Detected = auto;
-    pool.Replace(resolved);
+    lock (tunersGate)
+    {
+        ApplyTuners([.. next.OfType<TunerSpec>()]);
+    }
     // 新しく書かれた筐体があれば px4d / asicend を起こす。数秒かかるので返事は待たせない
     _ = Task.Run(PrepareDaemons);
     await Respond.Write(http, TunerList());
@@ -410,6 +505,13 @@ app.MapPut("/denpa/channels", async (HttpContext http) =>
         return;
     }
 
+    // 文字列でない値は、読むところ (ここと Config.SaveChannels) で投げて 500 になるので先に断る
+    if (!scanned.All(node => Respond.IsText(node))
+        || !found.All(entry => entry is null || (entry is JsonObject item && Respond.IsText(item["type"]) && Respond.IsText(item["channel"]))))
+    {
+        await Respond.Error(http, "scanned と、channels の type・channel は文字列で書きます", 400);
+        return;
+    }
     var types = scanned.Select(node => node?.GetValue<string>() ?? "").ToHashSet();
     var merged = config.SaveChannels(found, types);
     Log.Write($"チャンネルを保存しました: {found.Count} 件 ({string.Join(", ", types)})");
@@ -434,6 +536,11 @@ app.MapGet("/denpa/card", async (HttpContext http) =>
 app.MapPost("/denpa/decode", async (HttpContext http) =>
 {
     var body = await Respond.Read(http);
+    if (!Respond.IsText(body?["input"]) || !Respond.IsText(body?["output"]))
+    {
+        await Respond.Error(http, "input と output は文字列で書きます", 400);
+        return;
+    }
     var result = Scramble.Decode(recorded, body?["input"]?.GetValue<string>(), body?["output"]?.GetValue<string>());
     await Respond.Write(http, result, result["ok"]!.GetValue<bool>() ? 200 : 500);
 });
@@ -465,6 +572,20 @@ _ = Task.Run(() =>
 });
 
 /*
+ * 機材の抜き差しを受け取ったら、定義に足す (Rescan。DeviceWatch.cs)。偽の選局で動かす適合テストでは受け取らない。
+ * 先にいま挿さっている機材を控えてから受け取り始める (起きたときに挿さっていたものを、挿されたと数えない)
+ */
+DeviceWatch? watch = null;
+if (tune.FakeTune is null)
+{
+    _ = Task.Run(() =>
+    {
+        lock (tunersGate) seen = [.. DeviceProbe.Detect().Select(tuner => tuner.Device)];
+        watch = new DeviceWatch(Rescan);
+    });
+}
+
+/*
  * **選局を離すのは `ApplicationStopping` で。** これが来るのは `Drain` が録画を待ち終えてからなので、録画は切らない
  * (止まれの合図のその場で来ていた頃は、録画中のチューナーまで離していた。上の 30 分番組はこれ)。
  * ここで離さないと、番組表やライブの選局が残っている間 Kestrel が 30 秒待ち、そのぶん入れ替えの隙間が伸びる。
@@ -480,11 +601,19 @@ app.Lifetime.ApplicationStopped.Register(() =>
     pool.CloseAll();
     // CECH-ZD1 J は眠らせて LED を緑に戻してから閉じる (カードのために開いていても)
     Zd1jBoard.CloseAll();
+    // PIX-DT295 は常駐イメージを機材に残したまま手放してから閉じる (カードのために開いていても)
+    Dt295ResidentBoard.CloseAll();
     // 利用者を全部離してから px4d / asicend を止める。SIGTERM で LNB を 0V に戻して終わる
     UserlandDaemon.StopAll();
 });
 
-Log.Write($"listening on {(host is null ? $"*:{port}" : new IPEndPoint(host, port).ToString())} (tuners: {config.TunersFile} / channels: {config.ChannelsFile})");
+Log.Write($"listening on https://{(host is null ? $"*:{port}" : new IPEndPoint(host, port).ToString())} (tuners: {config.TunersFile} / channels: {config.ChannelsFile})");
+Log.Write($"証明書 {tls.Fingerprint[..16]}… / 組んだ denpa {tls.Clients.Count} 台 ({tls.Dir})");
+/*
+ * **組む URL は、組んだ相手がまだいないときだけ出す。** 標準出力にだけ書き、/denpa/logs には残さない
+ * (あちらは組んだ denpa が読み、不具合報告に入る。合言葉を載せない)
+ */
+if (tls.Clients.Count == 0) Console.WriteLine($"[agent] denpa と組むときの URL: {tls.PairUrl(port)}");
 if (sharing is not null)
 {
     var limit = cardLan.MaxRoundTrip is { } max ? $"{max.TotalMilliseconds}ms まで" : "見ない";
@@ -493,6 +622,8 @@ if (sharing is not null)
 if (cardUrl is { Length: > 0 }) Log.Write($"鍵を {cardUrl} から受け取ります (TTL {cardLan.Hops})");
 Log.Write($"チューナー {pool.Tuners.Count} 台 / チャンネル {config.LoadChannels().Count} 件");
 await app.RunAsync();
+// 抜き差しを受け取るもの (タイマーと inotify) を、止まるまで手放さない
+watch?.Dispose();
 return 0;
 
 /// <summary>HTTP に JSON を書く / 読む。中身の作りは <see cref="Json"/></summary>
@@ -507,6 +638,9 @@ internal static class Respond
 
     public static Task Error(HttpContext http, string message, int status) =>
         Write(http, new JsonObject { ["error"] = message }, status);
+
+    /// <summary>無いか文字列か (<c>GetValue&lt;string&gt;</c> で読んでも投げない)</summary>
+    public static bool IsText(JsonNode? node) => node is null || (node is JsonValue value && value.TryGetValue<string>(out _));
 
     public static async Task<JsonNode?> Read(HttpContext http)
     {
@@ -541,7 +675,7 @@ internal static class Respond
 /// **待っている間も、新しい選局は断らない** (denpa の scheduler.ts の「止められている最中でも始める」と同じ考え)。
 /// <c>Recreate</c> なので新しい Pod はこちらが終わるまで立たず、断ってもその間に始まる録画の頭が欠けるだけ。
 /// 来た録画は録り終えるまで待つ (待ちは伸びるが <c>SHUTDOWN_WAIT</c> が歯止め)。ライブや番組表は受けるが
-/// 待たず、録画が終われば一緒に切れる。**録画が無ければすぐ畳む** — 待っても入れ替えの隙間が伸びるだけ。
+/// 待たず、録画が終われば一緒に切れる。**録画が無ければすぐ畳む。** 待っても入れ替えの隙間が伸びるだけ。
 /// </para>
 /// </summary>
 internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetime lifetime)
@@ -561,7 +695,7 @@ internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetim
 
     private void Handle(PosixSignalContext context)
     {
-        // 既定の即死を止める。畳むのはこちらから指示する
+        // 既定ではその場で終了する。それを止め、畳むのはこちらから指示する
         context.Cancel = true;
         if (Interlocked.Exchange(ref _stopping, 1) == 1) return;
         _ = Task.Run(WaitThenStop);

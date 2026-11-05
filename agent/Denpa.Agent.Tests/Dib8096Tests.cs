@@ -67,7 +67,7 @@ public class Dib8096Tests
         var gate = i2c.Log.IndexOf("D1025=C000");
         await Assert.That(gate).IsGreaterThan(i2c.Log.IndexOf("D1028=0000", i2c.Log.IndexOf("D565?")));
         await Assert.That(gate).IsLessThan(i2c.Log.FindIndex(line => line.StartsWith('T')));
-        // ゲートを閉じる書き込み (D[1025] = 0x0100) は初期化の頭の 2 回だけ
+        // ゲートを閉じる書き込み (D[1025] = 0x0100) は初期化の始めの 2 回だけ
         await Assert.That(i2c.Log.Count(line => line == "D1025=0100")).IsEqualTo(2);
         await Assert.That(i2c.Log.Skip(gate).Any(line => line == "D1025=0100")).IsFalse();
     }
@@ -245,7 +245,7 @@ public class Dib8096Tests
     [Test]
     public async Task 待ちの丸め上げ()
     {
-        // 既定は参考の実装と同じ: 0.1ms 単位の t を floor(10 × (t + 99) / 100) ms。t = 0 でも 9ms
+        // 参考の実装と同じく、0.1ms 単位の t を floor(10 × (t + 99) / 100) ms。t = 0 でも 9ms
         var (dib, _, _, time) = Make();
         dib.Initialize();
         time.Sleeps.Clear();

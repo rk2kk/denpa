@@ -3,11 +3,13 @@
  *
  * - XML として 1 か所でも崩れていると、DOMParser は文書ごと `parsererror` にする。放送の
  *   文書は受信機向けに作られていて、閉じ忘れや `&` をそのまま書いたものがあっても受信機は読む。
- *   こちらも寛容に読む (閉じていない要素は親が閉じるときに閉じる、知らない実体参照はそのまま)
+ *   こちらも寛容に読む (閉じていない要素は親が閉じるときに閉じる、ほかの実体参照はそのまま)
  * - 単体テスト (bun) に DOM が無くても動く
  *
  * 名前は小文字にそろえる。`bml:` などの前置きは落とす (C プロファイルの名残)。
  */
+
+import { replaceBlocks } from "./css";
 
 interface XmlText {
   kind: "text";
@@ -15,7 +17,7 @@ interface XmlText {
   /** CDATA か (空白の扱いが違う) */
   cdata: boolean;
   /**
-   * 実体参照を開く前の字 (CDATA でないものだけ)。空白を詰めるのはこちらで見る — `&#x20;` のように
+   * 実体参照を開く前の字 (CDATA でないものだけ)。空白を詰めるかはこちらで見る。`&#x20;` のように
    * 参照で書いた空白は、詰める対象の「制御符号」ではない
    */
   raw?: string;
@@ -44,7 +46,7 @@ const ENTITIES: Record<string, string> = {
   apos: "'",
 };
 
-/** 実体参照を開く。知らないものはそのまま残す */
+/** 実体参照を開く。`ENTITIES` の 5 つと数字の参照のほかはそのまま残す */
 export function decodeEntities(text: string): string {
   if (!text.includes("&")) return text;
   return text.replace(
@@ -62,21 +64,6 @@ export function decodeEntities(text: string): string {
       return ENTITIES[body] ?? whole;
     },
   );
-}
-
-/** 注釈 (`<!-- -->`) を落とす。閉じないものは残す */
-function dropComments(text: string): string {
-  let out = "";
-  let at = 0;
-  for (;;) {
-    const start = text.indexOf("<!--", at);
-    if (start === -1) break;
-    const end = text.indexOf("-->", start + 4);
-    if (end === -1) break;
-    out += text.slice(at, start);
-    at = end + 3;
-  }
-  return out + text.slice(at);
 }
 
 function localName(name: string): string {
@@ -222,7 +209,7 @@ export function parseXml(source: string): XmlElement | null {
         // CDATA が幾つあってもつなぐ。外の注釈 (<!-- -->) は捨て、外の字は実体参照を開く
         // 正規表現の `[\s\S]*?` は閉じない `<![CDATA[`・`<!--` が並ぶと 2 乗かかるので、位置で探す
         const outside = (part: string): string =>
-          decodeEntities(dropComments(part));
+          decodeEntities(replaceBlocks(part, "<!--", "-->", ""));
         let text = "";
         let from = 0;
         for (;;) {

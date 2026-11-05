@@ -7,8 +7,8 @@
  */
 
 /**
- * 一覧の下に被さるもの (下のタブと、そのすぐ上に貼り付いた操作の1行) の高さ。
- * 操作の1行を出すのはスマホの形だけで、いつも下に貼り付く (`home.css`)。上に被さるものは日付の見出しだけ
+ * 一覧の下に被さるもの (下のタブと、そのすぐ上に貼り付いた操作の 1 行) の高さ。
+ * 操作の 1 行を出すのはスマホの形だけで、いつも下に貼り付く (`home.css`)。上に被さるものは日付の見出しだけ
  */
 function bottomCover(): number {
   const tab =
@@ -26,7 +26,7 @@ function bottomCover(): number {
 
 /**
  * 開いたときの位置に送る。線を見えている所の 7 割ほどの高さに置き (上に新しい録画、下に次の予約が入る)、
- * `target` (映したい録画の行の鍵) があって線のままでは見えなければ、その行が上の端 (貼り付いた日付の見出しの下)
+ * `target` (映したい録画の行のキー) があって線のままでは見えなければ、その行が上の端 (貼り付いた日付の見出しの下)
  * に来るまで戻す。閉じた番組の中にあれば、その見出し (`data-group-rows`)。
  *
  * **新しい順で表示 (`reversed`) のときは、線を上から 3 割ほどの高さに置く。** 上に近い予約、下に新しい録画が入る。
@@ -44,7 +44,7 @@ export function placeTimeline(
     topEdge(list) +
     (list.querySelector<HTMLElement>(".t-day")?.offsetHeight ?? 32);
   const bottom = window.innerHeight - bottomCover();
-  // 見えている所の高さ (上はヘッダーと見出し、スマホの形は下のタブと操作の1行が被さる)
+  // 見えている所の高さ (上はヘッダーと見出し、スマホの形は下のタブと操作の 1 行が被さる)
   const view = bottom - line;
   /*
    * **録画中は線を見せない** (`TimelineHeading`。読み上げの見出しだけ残す)。見せていない線は流れの外に置かれ、
@@ -155,7 +155,7 @@ interface Anchor {
   offset: number;
 }
 
-/** 見えている所の上のほうで、頭から見えている最初の行の鍵と位置 (貼り付いた日付の見出しの下) */
+/** 見えている所の上のほうで、頭から見えている最初の行のキーと位置 (貼り付いた日付の見出しの下) */
 export function topRow(list: HTMLElement): Anchor | null {
   const top = topEdge(list);
   for (const row of list.querySelectorAll<HTMLElement>("[data-key]")) {
@@ -241,7 +241,7 @@ export function topDay(list: HTMLElement): number | null {
 }
 
 /**
- * その日の見出しを頭に送る (カレンダーで日を押したとき)。包みの頭を見えている所の上端に合わせる —
+ * その日の見出しを頭に送る (カレンダーで日を押したとき)。包みの頭を見えている所の上端に合わせる。
  * 見出しは貼り付くので、見出しの位置では送り先が決まらない。見出しが無ければ (まだ描いていない) 送らない。
  *
  * **見出しの上の離れ (`margin-top`。いちばん上の包みだけ 0) のぶんも送る。** 包みの頭だけを合わせていた頃は、

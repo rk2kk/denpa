@@ -2,15 +2,16 @@
  * 偽チューナーエージェント。denpa の E2E で、実チューナー無しに全体を動かす。
  *
  * **電波の組み立ては `broadcast.ts` に置いてある。** 同じものを本物の
- * エージェントにも食わせているため (`tune.ts`)。こちらが受け持つのは
+ * エージェントにも渡しているため (`tune.ts`)。こちらが受け持つのは
  * 「denpa から見た API」だけで、取り合いもスキャンも本物らしく見えるだけの作り物。
  *
- * エージェント自身のふるまい (取り合い・殺し方・スキャンの総当たり) は
+ * エージェント自身のふるまい (取り合い・止め方・スキャンの総当たり) は
  * ここでは試せない。それは `agent/conformance.test.ts` が本物に当てている。
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { answerPairing, fakeAgentTls } from "../../src/lib/server/fake-agent";
 import {
   broadcast,
   channels,
@@ -20,8 +21,13 @@ import {
 } from "./broadcast";
 import type { FakeService } from "./services";
 
+/**
+ * ポートは 2 つ。denpa が繋ぐのは TLS のほう (本物と同じく HTTPS で、合言葉で組む。`FAKE_AGENT_TLS_PORT`、既定は +1)。
+ * 平文のほう (`FAKE_AGENT_PORT`) はテストが `/__control/...` を呼び、API の中身を確かめるため
+ */
 const PORT = Number(process.env["FAKE_AGENT_PORT"] ?? 25252);
-/** denpa の元のTSの置き場。本物では同じものをエージェント側にも見せてある */
+const TLS_PORT = Number(process.env["FAKE_AGENT_TLS_PORT"] ?? PORT + 1);
+/** denpa の元の TS の置き場。本物では同じものをエージェント側にも見せてある */
 const RECORDED = resolve(process.env["RAW_DIR"] ?? "/media/raw");
 
 /** テストから切り替えるつまみ。本物では `tune.ts` がファイル越しに読む */
@@ -35,7 +41,7 @@ let busyTuners = false;
 /**
  * エージェントのログ (`GET /denpa/logs`)。本物と同じ形 (`{"lines":[{"at","text"}]}`。新しいほうから 2000 行まで、古い順)。
  * 中身は伏せる処理を確かめるための作り物で、カードの番号・IP アドレス・ホスト名と、伏せない番組名を混ぜてある。
- * `off` は前のバージョンのエージェント (404)、`many` は URL の上限を確かめる長いログ。
+ * `off` は答えを返せないエージェント (500)、`many` は URL の上限を確かめる長いログ。
  *
  * **伏せるものを含む行は、読まれた時点で出たばかりのエラーにしておく。** Issue の URL に入るログは
  * 警告とエラーを先に、それぞれ新しいほうから選ぶ (`#lib/issue-report.ts`)。同じワーカーで先に流れたテストが
@@ -79,7 +85,7 @@ function agentLogLines(): { at: number; text: string }[] {
 /**
  * エージェント自身のこと (`GET /denpa/about`)。本物と同じ形 (agent/Denpa.Agent/About.cs)。
  * バージョンは本物のイメージと同じく `DENPA_VERSION` から (tests/stack.ts が denpa と同じものを渡す)。
- * `off` は前のバージョンのエージェント (404)、`mac` は macOS のエージェントで、バージョンが denpa と違う
+ * `off` は答えを返せないエージェント (500)、`mac` は macOS のエージェントで、バージョンが denpa と違う
  */
 let aboutMode: "normal" | "off" | "mac" = "normal";
 
@@ -103,10 +109,10 @@ function agentAbout() {
 }
 
 /**
- * 偽のスクランブル解除。本物の復号はせず、4バイト目の
+ * 偽のスクランブルの復号。本物の復号はせず、4 バイト目の
  * transport_scrambling_control を落とすだけ。
  *
- * 本物と同じく、渡されるのは元のTSの置き場からの相対パス。
+ * 本物と同じく、渡されるのは元の TS の置き場からの相対パス。
  */
 function unscramble(
   input: string,
@@ -232,8 +238,13 @@ const OPENS_KEEP = 200;
 
 function tunerStatus() {
   return TUNERS.map((plain) => {
-    // 選ぶ順は定義の順 (下の `pick` は前から空きを取る)。無効なチューナーは使わないので null
-    const tuner = { ...plain, rank: plain.disabled ? null : plain.index };
+    // 選ぶ順は定義の順 (下の `pick` は前から空きを取る)。無効なチューナーは使わないので null。
+    // 名指しの目印はデバイス、無ければ名前 (本物の `TunerPool.PinKey`)
+    const tuner = {
+      ...plain,
+      rank: plain.disabled ? null : plain.index,
+      pin: plain.device ?? plain.name,
+    };
     /*
      * 塞がっているのは**衛星のチューナー**にしてある。地上波を塞ぐと、
      * 同時に走っている局ロゴのテストが「地上波の空きが無い」で
@@ -284,10 +295,10 @@ function vacate(index: number): void {
  * - 引き継ぐ利用者 (`after`) しかいないチューナー。その利用者は正常に終わらせる
  * - 同じチャンネルを優先度の低い利用者しか読んでいないチューナー。選局し直さずに共有する (`join`)
  *
- * **空きが無ければ、自分より優先度の低い利用者しかいないチューナーを取り上げて使う** (約束の2)。ライブが録画に
+ * **空きが無ければ、自分より優先度の低い利用者しかいないチューナーを取り上げて使う** (約束の 2)。ライブが録画に
  * チューナーを取り上げられる場面 (`34-live-yield.spec.ts`) を作るため。本物は空きがあっても順の前のチューナーを取り上げるが、
- * ここでは**空きが無いときだけ**にしてある — 偽エージェントは spec をまたいで共有で、空きがあるのに
- * 取り上げると、裏で回っている番組表集めやロゴ集めの見え方まで変わる
+ * ここでは**空きが無いときだけ**にしてある。偽エージェントは spec をまたいで共有で、空きがあるのに
+ * 取り上げると、裏で回っている番組表の取得やロゴの取得の見え方まで変わる
  */
 function pick(
   type: string,
@@ -333,7 +344,7 @@ function pick(
 
 /*
  * 起きたことを知らせるエンドポイント (SSE)。本物では `/denpa/events`。
- * denpa はこれを聞いてチューナー画面を更新し、スキャンの進み具合を出す
+ * denpa はこれを読んでチューナーの画面を更新し、局が入れ替わったら取り込み直す (`agent-events.ts`)
  */
 const listeners = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
@@ -385,7 +396,7 @@ function openStream(url: URL, signal: AbortSignal): Response {
     return json({ error: "type と channel が必要です" }, 400);
   const services = on(type, channel);
 
-  // 優先度が自分と同じか高い利用者が同じチャンネルを読んでいれば選局を共有 (約束の3)。無ければ選ぶ
+  // 優先度が自分と同じか高い利用者が同じチャンネルを読んでいれば選局を共有 (約束の 3)。無ければ選ぶ
   let index = [...leases.entries()].find(
     ([, lease]) =>
       lease.type === type &&
@@ -398,7 +409,7 @@ function openStream(url: URL, signal: AbortSignal): Response {
       return json({ error: `${type} のチューナーに空きがありません` }, 409);
     index = picked.index;
     /*
-     * **放送の無いチャンネルは、チューナーを取ってから選局に落ちる** (本物と同じ順)。1バイトも送る前なので、
+     * **放送の無いチャンネルは、チューナーを取ってから選局に落ちる** (本物と同じ順)。1 バイトも送る前なので、
      * 理由を付けて 500 で返す (docs/agent.md「選局は、利用者が切るまで終わらない」)。
      * 空けたチューナー (取り上げた・引き継いだ相手) は戻らない。選局が無いまま空きになる
      */
@@ -482,7 +493,7 @@ const options: Bun.ServeOptions = {
      * **繋ぎを壊す。Pod を入れ替えたのと同じ形。**
      *
      * 接続ごと落として、その場で立て直す。読んでいる側には
-     * `The socket connection was closed unexpectedly` が飛ぶ — 本物で
+     * `The socket connection was closed unexpectedly` が飛ぶ。本物で
      * エージェントの Pod が入れ替わったときと同じ壊れ方。
      *
      * **ストリームを `controller.error()` で壊すのでは足りない。** それだと
@@ -496,6 +507,8 @@ const options: Bun.ServeOptions = {
       setTimeout(() => {
         server.stop(true);
         server = Bun.serve(options);
+        secure.stop(true);
+        secure = Bun.serve(secureOptions);
       }, 50);
       return json({ cut: true });
     }
@@ -575,7 +588,7 @@ const options: Bun.ServeOptions = {
           ) {
             return json({ error: "channels と scanned が必要です" }, 400);
           }
-          // 1件も無いまま上書きすると、今まで録れていた局まで消える
+          // 1 件も無いまま上書きすると、今まで録れていた局まで消える
           if (body.channels.length === 0)
             return json({ error: "チャンネルが 1 件もありません" }, 400);
           const scanned = body.scanned as string[];
@@ -590,8 +603,8 @@ const options: Bun.ServeOptions = {
 
     if (url.pathname === "/denpa/card") {
       /*
-       * 本物と同じ形 (agent/Denpa.Agent/Card.cs)。**予備のリーダーも1つ置く** —
-       * 使うのは1枚だけで、チューナーが並ぶのは使用中の行だけ、を画面で確かめる
+       * 本物と同じ形 (agent/Denpa.Agent/Card.cs)。**予備のリーダーも 1 つ置く。**
+       * 使うのは 1 枚だけで、チューナーが並ぶのは使用中の行だけ、を画面で確かめる
        */
       return json(
         knobs.scrambled
@@ -625,12 +638,11 @@ const options: Bun.ServeOptions = {
       );
     }
     if (url.pathname === "/denpa/logs" && request.method === "GET") {
-      if (logsMode === "off") return new Response("not found", { status: 404 });
+      if (logsMode === "off") return new Response("failed", { status: 500 });
       return json({ lines: agentLogLines() });
     }
     if (url.pathname === "/denpa/about" && request.method === "GET") {
-      if (aboutMode === "off")
-        return new Response("not found", { status: 404 });
+      if (aboutMode === "off") return new Response("failed", { status: 500 });
       return json(agentAbout());
     }
     if (url.pathname === "/denpa/decode" && request.method === "POST") {
@@ -646,4 +658,17 @@ const options: Bun.ServeOptions = {
 
 let server = Bun.serve(options);
 
-console.log(`fake tuner agent listening on :${PORT}`);
+/** denpa が繋ぐほう。組む受け答え (`POST /denpa/pair`) を前に挟むだけで、中身は平文のほうと同じ */
+const secureOptions: Bun.ServeOptions = {
+  ...options,
+  port: TLS_PORT,
+  tls: fakeAgentTls(),
+  async fetch(request, srv) {
+    return (
+      (await answerPairing(request)) ?? options.fetch.call(srv, request, srv)
+    );
+  },
+};
+let secure = Bun.serve(secureOptions);
+
+console.log(`fake tuner agent listening on :${PORT} (TLS :${TLS_PORT})`);

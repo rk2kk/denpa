@@ -130,7 +130,7 @@ public partial class DeviceStreamTests
 
     /*
      * **選局し直す前に、前のチャンネルの残りを捨てる** (`DvbTuner.Tune`)。dvr は選局を跨いで開いたままで、
-     * 溜まっているぶんは DMX_START でも消えない。残すと前のチャンネルの PAT が次の選局の頭に乗り、
+     * 溜まっているぶんは DMX_START でも消えない。残すと前のチャンネルの PAT が次の選局の先頭に混じり、
      * 衛星の局ロゴが当たりの中継を「外れ」と控えていた
      */
     [Test]
@@ -311,6 +311,10 @@ public class DeviceStreamPipedTests
         var (read, left) = await reading.WaitAsync(TimeSpan.FromSeconds(5), cancel);
 
         await Assert.That(read).IsEqualTo(0);
-        await Assert.That(left).IsLessThan(TimeSpan.FromMilliseconds(100));
+        /*
+         * 200ms ごとに起きるだけなら、止めてから戻るまで 180ms ほど掛かる。それより短ければ止めたことで起きている。
+         * 100ms にしていた頃は、混んだ Windows のランナーで 131ms になって落ちた (起きてから戻るまでのスレッドの待ち)
+         */
+        await Assert.That(left).IsLessThan(TimeSpan.FromMilliseconds(160));
     }
 }

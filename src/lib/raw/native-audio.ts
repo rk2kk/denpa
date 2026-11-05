@@ -1,5 +1,5 @@
 /**
- * ライブの映像は <video> のまま、音声だけ既存の WASM デコーダーと Web Audio で再生する。
+ * ライブの映像は <video> のまま、音声だけ WASM のデコーダ (canvas に描く worker と同じ。`wasm-audio.ts`) と Web Audio で再生する。
  * WebKit の MSE → MediaElementAudioSource が音声を渡さない問題を避ける (WebKit だけ。`native-audio-choice.ts`)。
  * 同期は映像の時計に合わせ、AudioContext 上では連続する音声の間隔を保つ。
  *
@@ -18,7 +18,7 @@ import {
 
 const TICK_MS = 20;
 /**
- * 復号した PCM を持つ上限。**止めていても増え続けない**ための天井で、`HISTORY_SECONDS` とは別の歯止め。
+ * デコードした PCM を持つ上限。**止めていても増え続けない**ための天井で、`HISTORY_SECONDS` とは別の歯止め。
  * float の 48kHz 2ch なら約 43 秒ぶん (このときは `HISTORY_SECONDS` が先に効く)、5.1ch なら約 14 秒ぶん
  */
 const PCM_LIMIT = 16 * 1024 * 1024;
@@ -43,7 +43,7 @@ export class NativeAudio {
   private readonly outlet: Outlet;
   private readonly muteGain: GainNode;
   private readonly timer: ReturnType<typeof setInterval>;
-  /** `<video>`・window に付けた受け口。畳むときにまとめて外す */
+  /** `<video>`・window に付けたリスナー。畳むときにまとめて外す */
   private readonly listening = new AbortController();
   private frames: Frame[] = [];
   private nodes = new Set<AudioBufferSourceNode>();
@@ -88,8 +88,7 @@ export class NativeAudio {
     }
     this.worker.onmessage = (event: MessageEvent<AudioOutput>) =>
       this.receive(event.data);
-    this.worker.onerror = () =>
-      this.fail("音声デコーダーでエラーが発生しました");
+    this.worker.onerror = () => this.fail("音声のデコーダが止まりました");
     this.send({ type: "load", base: decoder });
     const signal = this.listening.signal;
     const bind = (event: string, fn: () => void) =>
@@ -211,7 +210,7 @@ export class NativeAudio {
       return;
     const rate = video.playbackRate;
     const follow = (last: Clock) => last.position + (now - last.at) * last.rate;
-    // 映像と音の対応は1つに保つ。21ms の AAC の1コマごとに video.currentTime を読み直すと、
+    // 映像と音の対応は 1 つに保つ。21ms の AAC の 1 コマごとに video.currentTime を読み直すと、
     // 時刻の揺れがそのまま音の隙間・重なりになる。大きくずれたときだけ組み直す
     if (
       this.last !== null &&
