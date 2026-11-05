@@ -1,6 +1,6 @@
 # PIX-DT295 + denpa 実験総括
 
-最終更新: 2026-11-03
+最終更新: 2026-11-05
 
 ## 1. 目的
 
@@ -32,7 +32,9 @@ denpa をフォークして画質プリセットを UI から選べるように�
   - 画面: 放送から -0.4 秒
   - 音声は AAC で再エンコード (esds に AudioSpecificConfig が必要なため)
   - フォールバック: コピーが 0 パケットなら自動でエンコードへ
-- denpa を v2.26.0 に更新 (upstream 112 コミットマージ、`origin/main` = `97f47ec3`)
+- denpa を v2.31.0 に更新 (upstream 507 コミットマージ、`origin/main` = `ff7711ed`)
+  - 公式エージェントが DT295 を常駐方式で扱うようになった (#2173)。ただしオンボード変換は無いので、
+    画質プリセットは引き続き `dt295-agent` (pix-ts-legacy) 側で担う
   - `codecsFor` が `lib/live.ts` へ移動。コーデックの選択が `LiveChoice` (自動/AV1/H.265/H.264/MPEG-2) に統一され、
     プリセットは同じ選択肢の末尾に並ぶ (`tuner:` キー)
 - 字幕 PID のオプショナル化 (`?` 付き map)
@@ -101,7 +103,7 @@ passthrough 後も denpa で CS が視聴できない問題が発生。原因:
 | ------------------ | ---------------------------------------- |
 | Raspberry Pi 5     | 稼働中                                   |
 | tuner-agent        | dt295-agent:local (0.3.2-dt295)          |
-| denpa              | denpa-fork:prod (v2.26.0 + DT295 パッチ) |
+| denpa              | denpa-fork:prod (v2.31.0 + DT295 パッチ) |
 | pix-ts-legacy      | v0.1.4 (upstream merge 済み)             |
 | CS プロファイル    | passthrough (MPEG-2)                     |
 | GR/BS プロファイル | 720p8m (H.264, 7,644 kbps)               |

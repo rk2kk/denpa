@@ -11,7 +11,7 @@
  * | `nvram://~/N`・`nvram://~/ext/N`・`nvram://common/N` | BS の事業者・共通 | 0〜15・16〜63・0〜15 |
  * | `nvram://receiverinfo/zipcode` など | 受信機の設定 (読むだけ。郵便番号と都道府県は denpa が渡す) | |
  *
- * 1 ブロック 64 バイト (TR-B15 第一分冊 8.2 表8-1: BS の事業者の領域は 64 バイト × 16 ブロック、
+ * 1 ブロック 64 バイト (TR-B15 第一分冊 8.2 表 8-1: BS の事業者の領域は 64 バイト × 16 ブロック、
  * 8.2.2: 違う名前で読み書きしたら読むのは null・書くのは NaN)。番号の外・64 バイトを超える書き込みは
  * 失敗にして知らせる。中身は置き場 (`store`) に base64 で置く。BS の事業者の区別
  * (broadcaster_id) は BIT が要るが denpa はデコードしないので、サービスごとに分ける (混ざらない側に倒す)。
@@ -28,7 +28,7 @@ export interface Store {
 export interface ReceiverInfo {
   /** 郵便番号 (数字 7 桁)。無ければ空 */
   zipcode: string;
-  /** 都道府県の番号 (STD-B10 付録G 表G-2 の県域。`#lib/prefecture.js`)。無ければ 255 */
+  /** 都道府県の番号 (STD-B10 付録 G 表 G-2 の県域。`#lib/prefecture.js`)。無ければ 255 */
   prefecture: number;
 }
 
@@ -55,7 +55,7 @@ function areaOf(prefix: string): (typeof AREAS)[string] | undefined {
   return Object.hasOwn(AREAS, prefix) ? AREAS[prefix] : undefined;
 }
 
-/** 局の領域を分ける頭 (置き場の名前の真ん中) */
+/** 置き場の名前の真ん中に入れる、領域を分ける部分 */
 function scopeOf(kind: Scope, who: Who): string {
   // BS・CS (original_network_id 4・6・7) は局どうしで同じ番号なので、局の領域もサービスで分ける
   const network = who.originalNetworkId;
@@ -67,10 +67,10 @@ function scopeOf(kind: Scope, who: Who): string {
 }
 
 /**
- * 置き場の名前 (`Nvram` が `store` に使う鍵) が、その局から読み書きできるものか。
+ * 置き場の名前 (`Nvram` が `store` に使うキー) が、その局から読み書きできるものか。
  * **Hybridcast のアプリへは、起動した局から見える分だけ写して渡す** (写すのは `DataBroadcast.svelte`、
  * 受けるのは `hybridcast/compat.ts`)。
- * アプリが書いてきた鍵もこれで確かめるので、`Nvram` が作らない形式 (番号の外など) は通さない
+ * アプリが書いてきたキーもこれで確かめるので、`Nvram` が作らない形式 (番号の外など) は通さない
  */
 export function visibleFrom(key: string, who: Who): boolean {
   const match = /^([^:]+):([^:]*):(\d+)$/.exec(key);

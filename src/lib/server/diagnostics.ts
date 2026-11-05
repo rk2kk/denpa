@@ -2,6 +2,7 @@ import { arch, release, type } from "node:os";
 
 import { type AgentAbout, guessLevel, type LogLine } from "../issue-report";
 import { type Known, MASK, redact } from "../redact";
+import { agentFetch, agentHostname, agentSecrets } from "./agent-client";
 import { config } from "./config";
 import { orm } from "./db";
 import { serverLogs } from "./log-buffer";
@@ -12,7 +13,7 @@ import { webhooks } from "./schema";
  *
  * エージェントのログは `GET /denpa/logs` (`{"lines":[{"at":<epoch ms>,"text":"…"}]}`。新しいほうから 2000 行まで、古い順)。
  * エージェント自身のことは `GET /denpa/about` (`{"version","os","arch","runtime","ccidDriver"}`。agent/Denpa.Agent/About.cs)。
- * どちらも前のバージョンのエージェントには無いので、取れなければ理由を返して画面は止めない
+ * 取れなければ理由を返して画面は止めない
  */
 
 interface AgentLogs {
@@ -21,7 +22,7 @@ interface AgentLogs {
   error: string | null;
 }
 
-/** 来たものを疑って読む。形が違う行は捨てる (`tolerate` と同じく止めない) */
+/** 来たものを疑って読む。形式が違う行は捨てる (`shape.tolerate` と同じく止めない) */
 function readAgentLogs(raw: unknown): LogLine[] {
   const lines =
     typeof raw === "object" && raw !== null && "lines" in raw
@@ -45,17 +46,10 @@ function readAgentLogs(raw: unknown): LogLine[] {
 
 export async function agentLogs(known: Known): Promise<AgentLogs> {
   try {
-    const res = await fetch(`${config.agentUrl}/denpa/logs`, {
+    const res = await agentFetch("/denpa/logs", {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.status === 404) {
-      return {
-        lines: [],
-        error:
-          "このエージェントはログを返しません (前のバージョンです)。エージェントを新しくすると読めます",
-      };
-    }
     if (!res.ok)
       return {
         lines: [],
@@ -79,7 +73,7 @@ interface AgentAboutResult {
   error: string | null;
 }
 
-/** 来たものを疑って読む。項目ごとに、形が違えば null にして続ける */
+/** 来たものを疑って読む。項目ごとに、形式が違えば null にして続ける */
 function readAgentAbout(raw: unknown): AgentAbout {
   const body =
     typeof raw === "object" && raw !== null
@@ -107,17 +101,10 @@ function readAgentAbout(raw: unknown): AgentAbout {
 /** エージェントのバージョン・OS・arch と、macOS なら CCID ドライバ (`GET /denpa/about`) */
 export async function agentAbout(known: Known): Promise<AgentAboutResult> {
   try {
-    const res = await fetch(`${config.agentUrl}/denpa/about`, {
+    const res = await agentFetch("/denpa/about", {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.status === 404) {
-      return {
-        about: null,
-        error:
-          "このエージェントはバージョンと OS を返しません (前のバージョンです)。エージェントを新しくすると出ます",
-      };
-    }
     if (!res.ok)
       return {
         about: null,
@@ -133,28 +120,25 @@ export async function agentAbout(known: Known): Promise<AgentAboutResult> {
 }
 
 /**
- * **サーバの設定と DB にある、形では見分けられない値。** 画面に送る前にログから消す
+ * **サーバの設定と DB にある、形式では見分けられない値。** 画面に送る前にログから消す
  * (OIDC のクライアントシークレット・登録してある Webhook の URL は、画面にも出さない)。
  * ホスト名は画面にはそのまま出し、Issue に貼るときに伏せる (`redact`)。
- * エージェントに繋がらないときの一言 (`agentLogs` の `error`) だけは、ここでホスト名ごと伏せて返す
+ * エージェントに繋がらないときの一言 (`agentLogs`・`agentAbout` の `error`) だけは、ホスト名ごと伏せて返す
  */
 export function knownValues(requestHost: string): {
   secrets: string[];
   hosts: string[];
 } {
-  const secrets = [config.oidcClientSecret];
+  const secrets = [config.oidcClientSecret, ...agentSecrets()];
   try {
     for (const row of orm().select({ url: webhooks.url }).from(webhooks).all())
       secrets.push(row.url);
   } catch {
-    // DB が読めなくても、形で伏せるぶんは効く
+    // DB が読めなくても、形式で伏せるぶんは効く
   }
   const hosts = [requestHost];
-  try {
-    hosts.push(new URL(config.agentUrl).hostname);
-  } catch {
-    // 宛先が URL の形でなければ使わない
-  }
+  const agentHost = agentHostname();
+  if (agentHost !== null) hosts.push(agentHost);
   for (const pair of config.pwaNames.split(",")) {
     const host = pair.split("=")[0]?.trim();
     if (host) hosts.push(host);

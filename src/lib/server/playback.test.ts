@@ -19,12 +19,17 @@ import {
 } from "@danything/arib/synth-av";
 import { eq } from "drizzle-orm";
 
-import { ORIGIN_HEADER } from "#lib/ts/playback.js";
+import {
+  CODEC_HEADER,
+  ORIGIN_HEADER,
+  PACE_HEADER,
+  RUNG_HEADER,
+} from "#lib/ts/playback.js";
 import { sinceHead } from "#lib/ts/seek.js";
 
 /**
  * **録画の観方を決めて流す** (`server/playback.ts`)。ffprobe は偽物 (ファイル名で中身を答える)、
- * 元の TS は合成したもの。DB は一時ファイルへ (ほかの試験と同じプロセスで走るので、変えた設定は戻す)
+ * 元の TS は合成したもの。DB は一時ファイルへ (変えた設定は終わったら戻す)
  */
 const dir = mkdtempSync(join(tmpdir(), "denpa-playback-"));
 const { config } = await import("./config");
@@ -63,7 +68,9 @@ const { orm } = await import("./db");
 const { recordings } = await import("./schema");
 const { saveSettings } = await import("./settings");
 const { holdTranscode, transcodesInUse } = await import("./transcode");
+const { readPace } = await import("./pace");
 const {
+  audioOnlyArgs,
   copyArgs,
   fileTranscodeArgs,
   mediaInfo,
@@ -194,7 +201,7 @@ describe("何を出せるか (playbackPlan)", () => {
     expect(plan?.skip).toBe(0.5);
   });
 
-  test("CM を切った録画・捨てた頭を覚えていない録画では MPEG-2 を出さない", async () => {
+  test("CM を切った録画・捨てた先頭を覚えていない録画では MPEG-2 を出さない", async () => {
     const cut = await playbackPlan(
       seed({
         library_path: h264,
@@ -212,7 +219,7 @@ describe("何を出せるか (playbackPlan)", () => {
     );
   });
 
-  // アプリは再生位置を元の TS の時刻に戻し、録画の頭の放送時刻に足して実況のコメントを合わせる (docs/api.md)
+  // アプリは再生位置を元の TS の時刻に戻し、録画の先頭の放送時刻に足して実況のコメントを合わせる (docs/api.md)
   test("エンコードした物差しには、元の TS の時刻に戻す直し方 (ruler) を付ける。元の TS の物差しには付けない", async () => {
     const cut = await playbackPlan(
       seed({
@@ -234,7 +241,7 @@ describe("何を出せるか (playbackPlan)", () => {
     expect(tsOnly?.info.ruler).toBeUndefined();
   });
 
-  test("元の TS だけ: TS から変換と MPEG-2。物差しは TS の頭、尺は尻の映像まで", async () => {
+  test("元の TS だけ: TS から変換と MPEG-2。物差しは TS の先頭、尺は最後の映像まで", async () => {
     const plan = await playbackPlan(seed({ ts_path: ts }));
     expect(plan?.info.axis).toBe("ts");
     expect(plan?.info.offers).toEqual([
@@ -299,7 +306,7 @@ describe("何を出せるか (playbackPlan)", () => {
 });
 
 describe("エンコード済みが無い録画のチャプター (tsChapters)", () => {
-  test("検出した CM の区間 (元の TS の頭からの秒) から、本編と CM を交互に並べる", async () => {
+  test("検出した CM の区間 (元の TS の先頭からの秒) から、本編と CM を交互に並べる", async () => {
     saveSettings({ cmCut: "chapter" });
     const rec = seed({ ts_path: ts, cm_ranges: [{ start: 10, end: 25 }] });
     const chapters = await tsChapters(rec);
@@ -372,6 +379,66 @@ describe("ffmpeg の引数", () => {
     expect(args[args.indexOf("-output_ts_offset") + 1]).toBe("-12345.500000");
   });
 
+  test("段を下げた変換: 30 コマにして縮め、音声は 96k。時刻の運び方は同じ", () => {
+    const file = fileTranscodeArgs("/m/a.mkv", 30, 0, "h264", null, 2).join(
+      " ",
+    );
+    expect(file).toContain("-ss 30.000 -copyts -i /m/a.mkv");
+    expect(file).toContain("-vf fps=30000/1001,scale=-2:540");
+    expect(file).toContain("-c:a aac -b:a 96k");
+    const track = { id: "0:main", stream: 0, side: "both" as const, label: "" };
+    const fromTs = tsTranscodeArgs(1024, track, "h264", null, 0, 1).join(" ");
+    expect(fromTs).toContain(
+      "-vf bwdif=mode=send_frame:deint=interlaced,fps=30000/1001,scale=-2:720",
+    );
+    expect(fromTs).toContain("-fps_mode passthrough");
+  });
+
+  test("段を下げた変換: 元が 30 コマ以下なら、コマを足さずにそのままのコマ数で縮める", () => {
+    const film = fileTranscodeArgs(
+      "/m/a.mkv",
+      0,
+      0,
+      "h264",
+      null,
+      2,
+      24000 / 1001,
+    ).join(" ");
+    expect(film).toContain("-vf scale=-2:540");
+    expect(film).not.toContain("fps=");
+    expect(film).toContain("-g 24");
+    // 60 コマの録画は今までどおり 30 コマに間引く
+    const smooth = fileTranscodeArgs(
+      "/m/a.mkv",
+      0,
+      0,
+      "h264",
+      null,
+      2,
+      60000 / 1001,
+    ).join(" ");
+    expect(smooth).toContain("-vf fps=30000/1001,scale=-2:540");
+    expect(smooth).toContain("-g 30");
+  });
+
+  test("音声だけ: 映像を出さず、AAC 96k の fMP4 を同じ物差しで", () => {
+    const file = audioOnlyArgs({ path: "/m/a.mkv", from: 12, audio: 1 });
+    const joined = file.join(" ");
+    expect(joined).toContain("-ss 12.000 -copyts -i /m/a.mkv -map 0:a:1? -vn");
+    expect(joined).toContain("-c:a aac -b:a 96k");
+    expect(file).not.toContain("-c:v");
+    expect(file.at(-1)).toBe("pipe:1");
+    const track = { id: "0:sub", stream: 0, side: "sub" as const, label: "" };
+    const fromTs = audioOnlyArgs({
+      program: 1024,
+      audio: track,
+      offset: -5,
+    }).join(" ");
+    expect(fromTs).toContain("-f mpegts -i pipe:0 -map 0:p:1024:a:0?");
+    expect(fromTs).toContain("-af pan=stereo|c0=c1|c1=c1");
+    expect(fromTs).toContain("-output_ts_offset -5.000000");
+  });
+
   test("一周の手前 60 秒に入った PTS は、ffmpeg が負にする", () => {
     expect(presented(90_000 * 100)).toBe(100);
     expect(presented(WRAP - 120 * CLOCK)).toBe((WRAP - 120 * CLOCK) / CLOCK);
@@ -395,7 +462,7 @@ describe("流す (streamResponse)", () => {
     expect(origin).toBe(TS_START + 0.5 * CLOCK);
     const head = new Uint8Array(await res.arrayBuffer()).subarray(0, 32);
     expect(head[0]).toBe(SYNC);
-    // 頭のパケットは映像の PES の頭。物差しで 20 秒の 1 秒手前 (`LEAD`) あたり
+    // 先頭のパケットは映像の PES の先頭。物差しで 20 秒の 1 秒手前 (`LEAD`) あたり
     const pts =
       ((head[13]! >> 1) & 0x07) * 2 ** 30 +
       (head[14]! << 22) +
@@ -440,6 +507,76 @@ describe("流す (streamResponse)", () => {
     expect(transcodesInUse()).toBe(0);
     saveSettings({ transcodeLimit: null });
   });
+
+  test("段を下げるなら同じコーデックでも変換し、選んだコーデック・段・具合の id をヘッダで返す", async () => {
+    // 何も出さずに待つ ffmpeg (閉じるまで枠を持ったままにする)
+    const slow = join(dir, "slow-ffmpeg");
+    writeFileSync(slow, "#!/bin/sh\nexec sleep 5\n");
+    chmodSync(slow, 0o755);
+    config.ffmpeg = slow;
+    const res = await streamResponse(
+      seed({ library_path: h264 }),
+      new URLSearchParams({ codec: "h264", rung: "1", playable: "av1,h264" }),
+    );
+    // GPU が無いのでソフトウェアの H.264
+    expect(res.headers.get(CODEC_HEADER)).toBe("h264");
+    expect(res.headers.get(RUNG_HEADER)).toBe("1");
+    const pace = res.headers.get(PACE_HEADER)!;
+    expect(readPace(pace)).toEqual({ backlog: 0, dropped: 0, speed: null });
+    // 変換なので枠を使う
+    expect(transcodesInUse()).toBe(1);
+    await res.body?.cancel();
+    expect(transcodesInUse()).toBe(0);
+    expect(readPace(pace)).toBeNull();
+  });
+
+  test("段を下げるなら H.265 のエンコード済みからも変換できる。下げないなら写すだけ", async () => {
+    config.ffmpeg = "true";
+    const rec = seed({ hevc_path: hevc });
+    const lowered = await streamResponse(
+      rec,
+      new URLSearchParams({ codec: "hevc", rung: "2", playable: "hevc,h264" }),
+    );
+    // H.265 を GPU でエンコードできないので H.264
+    expect(lowered.headers.get(CODEC_HEADER)).toBe("h264");
+    expect(lowered.headers.get(RUNG_HEADER)).toBe("2");
+    await lowered.body?.cancel();
+    const copy = await streamResponse(
+      rec,
+      new URLSearchParams({ codec: "hevc" }),
+    );
+    expect(copy.headers.get(CODEC_HEADER)).toBe("hevc");
+    expect(copy.headers.get(RUNG_HEADER)).toBe("0");
+    await copy.body?.cancel();
+  });
+
+  test("段を下げる変換も、枠が埋まっていれば 503", async () => {
+    saveSettings({ transcodeLimit: 1 });
+    const held = holdTranscode();
+    await expect(
+      streamResponse(
+        seed({ library_path: h264 }),
+        new URLSearchParams({ codec: "h264", rung: "3" }),
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+    held?.();
+    saveSettings({ transcodeLimit: null });
+  });
+
+  test("音声だけは枠を使わない", async () => {
+    config.ffmpeg = "true";
+    saveSettings({ transcodeLimit: 1 });
+    const held = holdTranscode();
+    const res = await streamResponse(
+      seed({ ts_path: ts }),
+      new URLSearchParams({ codec: "audio" }),
+    );
+    expect(res.headers.get("Content-Type")).toBe("audio/mp4");
+    expect(res.headers.get(CODEC_HEADER)).toBe("audio");
+    await res.body?.cancel();
+    held?.();
+    saveSettings({ transcodeLimit: null });
+  });
 });
 
 describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
@@ -461,7 +598,7 @@ describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
           blame: (failed) => blamed.push(failed),
         },
       ],
-      "[試験]",
+      "[テスト]",
       () => done++,
     );
     expect(await new Response(body).text()).toBe("ok");
@@ -472,13 +609,13 @@ describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
   test("標準入力へ流し込む", async () => {
     const body = transcodeBody(
       [{ argv: ["cat"], input: () => new Blob(["流し込んだもの"]).stream() }],
-      "[試験]",
+      "[テスト]",
       () => undefined,
     );
     expect(await new Response(body).text()).toBe("流し込んだもの");
   });
 
-  /** 畳まれるまで待つ (上限を超えてから見張りが気づくまでの間がある) */
+  /** 畳まれるまで待つ (上限を超えてから定期チェックが畳むまでの間がある) */
   const until = async (ok: () => boolean) => {
     for (let i = 0; i < 500 && !ok(); i++) await Bun.sleep(10);
   };
@@ -492,7 +629,7 @@ describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
     let done = 0;
     const body = transcodeBody(
       [{ argv: ["sh", "-c", "sleep 0.3; printf ok"] }],
-      "[試験]",
+      "[テスト]",
       () => done++,
       {
         limit: 2000,
@@ -507,7 +644,7 @@ describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
     let done = 0;
     const body = transcodeBody(
       [{ argv: ["sh", "-c", "exec sleep 30"] }],
-      "[試験]",
+      "[テスト]",
       () => done++,
       {
         limit: 200,
@@ -523,7 +660,7 @@ describe("ffmpeg の出口を本文にする (transcodeBody)", () => {
     // 上限は `sh` の起動より十分長く (最初の読みが「何も出さない」で切られないように)
     const body = transcodeBody(
       [{ argv: ["sh", "-c", "yes"] }],
-      "[試験]",
+      "[テスト]",
       () => done++,
       {
         limit: 1000,
@@ -546,7 +683,7 @@ describe("ffprobe の読み (mediaInfo)", () => {
   const probe = (streams: unknown[], duration = "1800.5") =>
     JSON.stringify({ streams, format: { duration } });
 
-  test("H.264 High / Level 4.0 と Opus 2本", () => {
+  test("H.264 High / Level 4.0 と Opus 2 本", () => {
     const json = probe([
       { codec_type: "video", codec_name: "h264", profile: "High", level: 40 },
       { codec_type: "audio", codec_name: "opus", tags: { title: "主音声" } },
@@ -559,6 +696,7 @@ describe("ffprobe の読み (mediaInfo)", () => {
       audio: "opus",
       audios: ["主音声", ""],
       duration: 1800.5,
+      fps: null,
     });
   });
 
@@ -612,7 +750,20 @@ describe("ffprobe の読み (mediaInfo)", () => {
       audio: null,
       audios: [],
       duration: null,
+      fps: null,
     });
+  });
+
+  test("コマ数は平均のコマ数から読む。読めない (0/0) なら null", () => {
+    const fps = (avg_frame_rate: string) =>
+      mediaInfo(
+        "encoded",
+        probe([{ codec_type: "video", codec_name: "h264", avg_frame_rate }]),
+      ).fps;
+    expect(fps("24000/1001")).toBeCloseTo(23.976, 3);
+    expect(fps("60000/1001")).toBeCloseTo(59.94, 2);
+    expect(fps("0/0")).toBeNull();
+    expect(fps("")).toBeNull();
   });
 });
 
@@ -635,7 +786,7 @@ describe("続きの位置の物差し", () => {
     ).toBeNull();
   });
 
-  test("名指しされたらそれ。alt も同じ切り方 (2本目は1本目と同じ区間で切る)", () => {
+  test("名指しされたらそれ。alt も同じ切り方 (2 本目は 1 本目と同じ区間で切る)", () => {
     expect(rulerOf(encoded, "ts")).toBeNull();
     expect(rulerOf(encoded, "encoded")).toEqual({ kept, skip: 3 });
     expect(rulerOf(encoded, "alt")).toEqual({ kept, skip: 3 });
@@ -643,7 +794,7 @@ describe("続きの位置の物差し", () => {
 });
 
 /**
- * 一覧の「残り」(`watchProgress`)。**位置と尺を同じ物差しで比べる** — 位置は元の TS の物差しで覚えていて、
+ * 一覧の「残り」(`watchProgress`)。**位置と尺を同じ物差しで比べる。** 位置は元の TS の物差しで覚えていて、
  * 尺はエンコードし終えると出来上がりの長さになるので、そのまま引くと CM を切ったものでは食い違う
  */
 describe("一覧の残り", () => {
@@ -669,7 +820,7 @@ describe("一覧の残り", () => {
     });
   });
 
-  test("切っていないものは、捨てた頭のぶんだけずらす", () => {
+  test("切っていないものは、捨てた先頭のぶんだけずらす", () => {
     const plain = {
       library_path: "/library/a.mkv",
       cm_kept: null,
@@ -706,9 +857,9 @@ describe("一覧の残り", () => {
     });
   });
 
-  test("続きが無い・直すと頭になるものは出さない", () => {
+  test("続きが無い・直すと先頭になるものは出さない", () => {
     expect(watchProgress({ ...cut, resume_ms: null })).toBeNull();
-    // 元の TS の頭 5 秒は、残した区間 (10 秒から) の前
+    // 元の TS の先頭 5 秒は、残した区間 (10 秒から) の前
     expect(watchProgress({ ...cut, resume_ms: 5_000 })).toBeNull();
   });
 });

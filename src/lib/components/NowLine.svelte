@@ -3,12 +3,12 @@
    * **「いま」の線** (いまの境目。名前だけで、目に見える線は引かない。docs/design.md)。ホームの一覧 (`home/TimelineHeading`) と番組表で同じ見た目にする:
    * 赤い太字の時刻。ホームは頭に赤い点を付けて地に置き、すぐ後ろに一言を続ける。番組表は時刻を操作の層のカプセルに乗せる (点は付けない)。
    *
-   * - `inline` (ホーム) … 時刻 (地に置く) と控えた字の一言 (`status`) を左から1行に並べる。幅が足りなければ一言を短い形 (`status.short`) に替え、それでも入らなければ「…」で切る (折り返さない)
+   * - `inline` (ホーム) … 時刻 (地に置く) と控えた字の一言 (`status`) を左から 1 行に並べる。幅が足りなければ一言を短い形 (`status.short`) に替え、それでも入らなければ「…」で切る (折り返さない)
    * - `overlay` (番組表) … 時刻のカプセルだけを時の列のいまの位置に置き、左端に貼り付ける (`sticky`)。表を横切る線は引かない
    *   (過ぎた所はマスを沈めて見せる)。目に見えるのは分だけ (時は同じ時の列に出ている。読み上げには時まで渡す)。
    *   時の数字の上に乗るので、カプセルの面で読ませる
    *
-   * 読み上げは「いま 18:01、次の録画まで 3時間59分」。短い形は目に見えるだけで、読み上げはいつも長い形
+   * 読み上げは「いま 18:01、次の録画まで 3 時間 59 分」。短い形は目に見えるだけで、読み上げはいつも長い形
    */
   import type { HTMLAttributes } from "svelte/elements";
 
@@ -90,7 +90,7 @@
     background: var(--dp-rec);
   }
 
-  /* ---- 1行に並べる (ホーム) ---- */
+  /* ---- 1 行に並べる (ホーム) ---- */
   .inline {
     container-type: inline-size;
     display: flex;
@@ -101,7 +101,7 @@
   .inline .now-time {
     flex-shrink: 0;
     padding-right: 0;
-    font-size: var(--now-time-size, 0.875rem);
+    font-size: var(--now-time-size, var(--dp-text-sm));
   }
   /* 一言は時刻のすぐ後ろに控えた字で (補足なので、時刻ほど目立たせない) */
   .now-status {
@@ -109,7 +109,7 @@
     min-width: 0;
     overflow: hidden;
     color: var(--dp-muted);
-    font-size: 0.8125rem;
+    font-size: var(--dp-text-sm);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -151,7 +151,7 @@
     background: var(--dp-float);
     box-shadow: var(--dp-shadow-pop);
     transform: translateY(-50%);
-    font-size: 0.6875rem;
+    font-size: var(--dp-text-2xs);
     line-height: 1rem;
   }
   /* 時の列の幅に収めるため、点は付けない */

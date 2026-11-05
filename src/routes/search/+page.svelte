@@ -78,8 +78,8 @@
   }
 
   /**
-   * **言葉なしで開いたら欄に入る** (下のタブの「検索」から来たとき)。結果を見に来たときは入らない —
-   * 狭い画面でキーボードが出て結果を隠す。欄は画面の外 (`SearchField`。広い形はヘッダー、スマホの形は上の1行)
+   * **言葉なしで開いたら欄に入る** (下のタブの「検索」から来たとき)。結果を見に来たときは入らない。
+   * 狭い画面でキーボードが出て結果を隠す。欄は画面の外 (`SearchField`。広い形はヘッダー、スマホの形は上の 1 行)
    * にあるので、見えているほうに入る
    */
   onMount(() => {
@@ -176,7 +176,7 @@
     if (focus !== null) show({ ...focus, program_id: focus.id }, focus);
   });
 
-  /** 削除は2回押させる (ホームと同じ。[arming.svelte.ts](../../lib/arming.svelte.ts)) */
+  /** 削除は 2 回押させる (ホームと同じ。[arming.svelte.ts](../../lib/arming.svelte.ts)) */
   const deleting = arming(
     '[data-testid="search-delete"], [data-testid="search-delete-confirm"]',
   );
@@ -216,7 +216,7 @@
   function verdictOf(id: number) {
     return preview?.verdicts[id] ?? null;
   }
-  /** ルールの削除の2回押し (書く欄の「削除」) */
+  /** ルールの削除の 2 回押し (書く欄の「削除」) */
   const ruleDeleting = arming('[data-testid^="rule-delete"]');
 
   const notices = $derived.by(() => {
@@ -257,7 +257,7 @@
 -->
 <div class="search-layout" class:drafting>
   <div class="search-page">
-    <!-- 検索の欄はこの画面には置かない。ヘッダー (スマホの形では上の1行) の欄がそのまま言葉を持っている -->
+    <!-- 検索の欄はこの画面には置かない。ヘッダー (スマホの形では上の 1 行) の欄がそのまま言葉を持っている -->
     {#if q === ""}
       {#if drafting}
         <!--
@@ -276,7 +276,7 @@
               data-testid="recent-clear">履歴を消す</button
             >
           </div>
-          <ul class="hits" data-testid="recent-searches">
+          <ul class="item-list" data-testid="recent-searches">
             {#each recent as word (word)}
               <li class="hit item">
                 <a
@@ -316,7 +316,7 @@
         {#if data.programs.total === 0}
           <p class="none small muted">番組表に一致する番組はありません</p>
         {:else}
-          <ul class="hits">
+          <ul class="item-list">
             {#each shown("programs", data.programs.rows) as program (program.id)}
               {@const verdict = verdictOf(program.id)}
               <li
@@ -405,7 +405,7 @@
         {#if data.recordings.total === 0}
           <p class="none small muted">一致する録画はありません</p>
         {:else}
-          <ul class="hits">
+          <ul class="item-list">
             {#each shown("recordings", data.recordings.rows) as rec (rec.id)}
               {@const link = watchLink(rec)}
               <li
@@ -506,7 +506,7 @@
         {#if data.reservations.total === 0}
           <p class="none small muted">一致する予約はありません</p>
         {:else}
-          <ul class="hits">
+          <ul class="item-list">
             {#each shown("reservations", data.reservations.rows) as res (res.id)}
               <li
                 class="hit item"
@@ -573,7 +573,7 @@
         {#if data.rules.total === 0}
           <p class="none small muted">一致するルールはありません</p>
         {:else}
-          <ul class="hits">
+          <ul class="item-list">
             {#each shown("rules", data.rules.rows) as rule (rule.id)}
               <li class="hit item" data-testid="search-rule">
                 <a class="hit-main" href={resolve(`search?rule=${rule.id}`)}>
@@ -639,7 +639,7 @@
     {:else if preview.programs.length === 0}
       <p class="none small muted">いまの番組表では 1 件も一致しません</p>
     {:else}
-      <ul class="hits">
+      <ul class="item-list">
         {#each preview.programs as row (row.id)}
           <li
             class="hit item"
@@ -674,7 +674,7 @@
                 {/if}
               </span>
             </button>
-            <!-- 1件ずつ: 立っている予約は取り消し、録る行はその1本だけ予約できる (ホーム・結果の行と同じ action) -->
+            <!-- 1 件ずつ: 立っている予約は取り消し、録る行はその 1 本だけ予約できる (ホーム・結果の行と同じ action) -->
             <div class="row-actions">
               {#if row.reservation_id !== null && row.reservation_state !== "skipped"}
                 <ActionButton
@@ -708,7 +708,7 @@
   </section>
 {/snippet}
 
-<!-- 行の2段目の頭 (局のロゴと名前) と、状態のバッジ -->
+<!-- 行の 2 段目の頭 (局のロゴと名前) と、状態のバッジ -->
 {#snippet service(row: {
   service_id: number;
   has_logo: boolean | null;
@@ -842,15 +842,15 @@
     .sheet-bar:not(:has(:focus-visible)) {
     transform: translateY(calc(var(--dp-tabbar, 0px) + 0.375rem + 100%));
   }
-  /* 書く欄の条件では録らない行。消さずに出すが、録るものより沈める */
-  .hit.dim > * {
-    opacity: 0.5;
+  /* 書く欄の条件では録らない行。消さずに出すが、控えた字にして録るものより沈める (透かすと 4.5:1 を割る) */
+  .hit.dim {
+    color: var(--dp-muted);
   }
   .summary {
     margin: 0;
   }
   /*
-     * **節は見出しだけ** (カードで囲まず、線も引かない)。行は名前と小さな説明の2段で、
+     * **節は見出しだけ** (カードで囲まず、線も引かない)。行は名前と小さな説明の 2 段で、
      * ホームの行と同じく 1 件ずつ件の面に乗せ、件の間は `--dp-list-gap`。指を乗せると面が一段変わる (押せる範囲は行の中身いっぱい)
      */
   .hits-section {
@@ -902,30 +902,16 @@
     font-weight: var(--dp-weight);
     font-variant-numeric: tabular-nums;
   }
-  .hits {
-    display: flex;
-    flex-direction: column;
-    gap: var(--dp-list-gap);
-    margin: 0;
-    padding: 0;
-  }
-  /* 件は件の面 (`app.css` の `.item`) に乗せる */
+  /* 件は件の面 (`app.css` の `.item`) に乗せ、並べ方は `.item-list` */
   .hit {
     display: flex;
     align-items: center;
     gap: var(--dp-space-2);
-    margin: 0;
     padding-inline-end: var(--dp-space-2);
-    list-style: none;
   }
-  /* 2段の件は 64px、指で押す端末では 72px (docs/design.md の「何行かある一覧」。ホームの行と同じ)。1段の最近の検索は除く */
+  /* 2 段の件は `--dp-item-h` (docs/design.md の「何行かある一覧」。ホームの行と同じ)。1 段の最近の検索は除く */
   .hit:has(.hit-meta) {
-    min-height: 4rem;
-  }
-  @media (pointer: coarse) {
-    .hit:has(.hit-meta) {
-      min-height: 4.5rem;
-    }
+    min-height: var(--dp-item-h);
   }
   .hit-main {
     display: flex;

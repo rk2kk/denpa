@@ -63,7 +63,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     );
   });
 
-  /** スマホでは、ログの押すものと絞り込みを1行にまとめ、節へ飛ぶ行のすぐ上に浮かべる (docs/design.md の「浮かせ方」) */
+  /** スマホでは、ログの押すものと絞り込みを 1 行にまとめ、節へ飛ぶ行のすぐ上に浮かべる (docs/design.md の「浮かせ方」) */
   test("スマホではログの操作と絞り込みが下の1行に出る", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await goto(page, "/settings/general#logs");
@@ -202,7 +202,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
       .getAttribute("href"))!;
     expect(longer.length).toBeLessThanOrEqual(8000);
     await expect(dialog.getByTestId("issue-length")).toContainText(
-      "ログの頭の",
+      "ログの先頭の",
     );
   });
 
@@ -236,7 +236,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await expect(environment).toHaveValue(/CCID ドライバ: macOS の標準のもの/);
   });
 
-  test("ログを返さないエージェントでも、一言出して画面は止めない", async ({
+  test("エージェントからログを取れなくても、一言出して画面は止めない", async ({
     page,
     request,
     stack,
@@ -245,11 +245,11 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await request.post(`${stack.agentUrl}/__control/about?mode=off`);
     await goto(page, "/settings/general");
     await expect(page.getByTestId("agent-logs-error")).toContainText(
-      "前のバージョン",
+      "エージェントからログを取得できません (500)",
     );
-    // バージョンと OS を返さないエージェントでも、理由を1行出す
+    // バージョンと OS を取れなくても、理由を 1 行出す
     await expect(page.getByTestId("diag-agent-version")).toContainText(
-      "前のバージョン",
+      "エージェントからバージョンを取得できません (500)",
     );
     await expect(page.getByTestId("diag-agent-system")).toHaveCount(0);
     await expect(
@@ -259,7 +259,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await expect(
       page.getByTestId("issue-dialog").getByTestId("issue-field-logs"),
     ).toHaveValue(
-      /--- エージェントのログ \(0 行\) ---\n\(このエージェントはログを返しません/,
+      /--- エージェントのログ \(0 行\) ---\n\(エージェントからログを取得できません \(500\)\)/,
     );
   });
 });

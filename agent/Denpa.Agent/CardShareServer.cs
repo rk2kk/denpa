@@ -14,13 +14,13 @@ namespace Denpa.Agent;
 /// <para>
 /// **普通の API (<c>AGENT_PORT</c>) とは別のポートで受ける** (<see cref="CardLanPolicy.Port"/>)。
 /// 鍵を配るために普通の API まで開かずに済むように (普通の API も /denpa/stream が復号済みの TS を返すので、
-/// 世帯の外へは出さない。docs/agent.md「エージェントは認証を持たない」)。このポートで答えるのは
-/// <c>/denpa/card/init</c> と <c>/denpa/card/ecm</c> だけで、どちらも相手のアドレスと
+/// 組んだ denpa しか通さない。docs/agent.md「denpa とは TLS で組む」)。**このポートは平文の HTTP のまま**で、答えるのは
+/// <c>/denpa/card/init</c> と <c>/denpa/card/ecm</c> だけ。どちらも相手のアドレスと
 /// (決めてあれば) 往復時間を確かめてから答える。接続には TTL を付ける (<see cref="CardLan"/>)。
 /// </para>
 ///
 /// <para>
-/// **自分にカードが刺さっていなければ、503 を返すだけ。**
+/// **自分にカードが挿さっていなければ、503 を返すだけ。**
 /// </para>
 /// </summary>
 internal sealed class CardShareServer(CardLanPolicy policy, int port)
@@ -125,19 +125,17 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
 
     private static async Task Ecm(HttpContext http)
     {
-        using var body = new MemoryStream();
-        await http.Request.Body.CopyToAsync(body);
-        if (body.Length == 0)
+        var ecm = await CardWire.ReadUpTo(http.Request.Body, CardWire.MaxEcm);
+        if (ecm is null)
+        {
+            await Respond.Error(http, $"ECM が長すぎます ({CardWire.MaxEcm} バイトまで)", 400);
+            return;
+        }
+        if (ecm.Length == 0)
         {
             await Respond.Error(http, "ECM が入っていません", 400);
             return;
         }
-        if (body.Length > 4096)
-        {
-            await Respond.Error(http, $"ECM が長すぎます ({body.Length} バイト。4096 バイトまで)", 400);
-            return;
-        }
-        var ecm = body.ToArray();
         await Reply(http, () => CardWire.Pack(Keys.Local.Ecm(ecm)));
     }
 

@@ -5,10 +5,10 @@ import type { PlayAxis } from "./ts/playback";
 
 /**
  * どこまで観たかをサーバへ (`POST /api/recordings/<id>/resume`)。
- * **観る画面と追っかけで同じ扱いにする** — 別々に書いていた頃は、
+ * **観る画面と追っかけで同じ扱いにする**。別々に書いていた頃は、
  * 追っかけに `sendBeacon` もオフラインの控えも無く、閉じ際の位置が落ちえた。
  *
- * - 出ていく間際 (`leaving`) は `sendBeacon` で投げる。画面を畳んだあとの
+ * - 出ていく間際 (`leaving`) は `sendBeacon` で送る。画面を畳んだあとの
  *   `fetch` はブラウザに捨てられることがあり、**最後に観たところがいちばん要る**
  * - 届かなければ端末に覚えて、オンライン復帰時にまとめて送る
  *   (`offline.svelte.ts` の resume の控え)

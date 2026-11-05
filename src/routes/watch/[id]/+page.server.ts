@@ -14,12 +14,13 @@ import { encodedFile, rulerOf } from "#lib/server/playback.js";
 import { recordingFromForm } from "#lib/server/recording.js";
 import { lastEncodeError, recordings } from "#lib/server/schema.js";
 import { settings } from "#lib/server/settings.js";
+import { viewingOptions } from "#lib/server/viewing.js";
 import { tsPathOf } from "#lib/source.js";
 import { fromTsTime } from "#lib/ts/watch.js";
 import type { Recording } from "#lib/types.js";
 
 /**
- * 録画を観る画面。一覧のポップアップではなく1枚の画面にするのは、端末の「戻る」がそのまま効き、URL が残るため。
+ * 録画を観る画面。一覧のポップアップではなく 1 枚の画面にするのは、端末の「戻る」がそのまま効き、URL が残るため。
  * 何で観るかは開いてから決める (`api/recordings/<id>/playback`。`ts/playback.ts`)。録っている最中だけ追っかけ再生
  * (`/chase`) へ送り、エンコード済みも元の TS も無ければ「まだ観られません」と理由を出す
  */
@@ -94,11 +95,13 @@ export function load({ params, url }) {
     clips: countClips({ recording: id }),
     /** コーデックのメニューから外すもの (世帯の設定。`#lib/live-choice.ts` の `HIDDEN_CODECS`) */
     hidden: hideH264Hevc ? [...HIDDEN_CODECS] : [],
+    /** 開いた名前が家の中か (`#lib/host.ts` の `indoorHost`)。録画しか無いときの「自動」の順に効く (`ts/playback.ts` の `pickOffer`) */
+    indoor: viewingOptions(url).indoor,
   };
 }
 
 export const actions = {
-  /** 観終わったその場で消す (末尾はたいてい CM なので、流したまま消せる。2回押させるのは一覧と同じ) */
+  /** 観終わったその場で消す (末尾はたいてい CM なので、流したまま消せる。2 回押させるのは一覧と同じ) */
   delete: async ({ request, url }) => {
     const form = await request.formData();
     const recording = recordingFromForm(form);

@@ -15,9 +15,11 @@
  * | 元の TS | MPEG-2 | TS を飛び先から流す (`raw`。画面が自分で再生する) |
  * | エンコード済みだけ | MPEG-2 | 出さない |
  * | CM を切ってエンコードした録画 | MPEG-2 | 出さない (時刻が合わない) |
+ * | エンコード済みか元の TS | 段を下げる (`?rung=`) | 同じコーデックでも変換 (`stream`)。コーデックはサーバが選び、H.265 も GPU があれば作る |
+ * | エンコード済みか元の TS | 音声だけ (`?codec=audio`) | 音声だけを AAC にして流す (`stream`) |
  *
- * 時刻の物差しは 1 ページで 1 つ (`PlayAxis`): エンコード済みがあればその時刻、無ければ元の TS の頭を 0。
- * どの出し方でもストリームの時刻はこの物差しに乗せる — 字幕・チャプター・データ放送・続きの位置を
+ * 時刻の物差しは 1 ページで 1 つ (`PlayAxis`)。エンコード済みがあればその時刻、無ければ元の TS の先頭を 0 にする。
+ * どの出し方でもストリームの時刻はこの物差しに乗せる。字幕・チャプター・データ放送・続きの位置を
  * `currentTime` のまま引けるようにするため。
  *
  * ## 飛び方
@@ -47,15 +49,19 @@ import {
 import { encodedCodec } from "#lib/encoded-codec.js";
 import type { HwCodec } from "#lib/hw.js";
 import { codecsFor, type LiveCodec } from "#lib/live.js";
+import { LOWEST_RUNG, parseRung, type Rung } from "#lib/rungs.js";
 import { type FileSource, tsPathOf } from "#lib/source.js";
 import {
   BUSY,
+  CODEC_HEADER,
   type EncodedSource,
   ORIGIN_HEADER,
+  PACE_HEADER,
   type PlayAudio,
   type PlaybackInfo,
   type PlayCodec,
   type PlayOffer,
+  RUNG_HEADER,
 } from "#lib/ts/playback.js";
 import {
   lastVideoPts,
@@ -76,15 +82,19 @@ import {
   audioArgs,
   blameLiveHw,
   panArgs,
+  parsePlayable,
   pickLiveHw,
+  rungCodec,
+  softwareEncodes,
   videoArgs,
 } from "./live";
+import { openPace, StreamPace } from "./pace";
 import { settings } from "./settings";
 import { endInput, run } from "./stream";
 import { holdTranscode } from "./transcode";
 
 /** エンコード済みのファイル 1 本の中身 (ffprobe で読む。`probeMedia`) */
-export interface MediaFile {
+interface MediaFile {
   source: EncodedSource;
   /** 映像の codecs 文字列 (`avc1.640028` / `av01.0.08M.08`)。読めない・無ければ null */
   video: string | null;
@@ -94,6 +104,8 @@ export interface MediaFile {
   audios: string[];
   /** 尺 (秒)。読めなければ null */
   duration: number | null;
+  /** 映像のコマ数 (毎秒)。段を下げた変換で、30 コマ以下ならそのままのコマ数で縮める (`live.videoArgs`)。読めなければ null */
+  fps: number | null;
 }
 
 interface ProbedStream {
@@ -102,10 +114,20 @@ interface ProbedStream {
   profile?: string;
   level?: number;
   pix_fmt?: string;
+  /** 平均のコマ数 (`30000/1001`。読めなければ `0/0`) */
+  avg_frame_rate?: string;
   tags?: { title?: string; TITLE?: string };
 }
 
-/** H.264 の profile 名 → codecs の頭 (profile_idc と制約の印) */
+/** ffprobe のコマ数 (`24000/1001`) を数にする。読めない・0 なら null */
+function frameRate(stream: ProbedStream | undefined): number | null {
+  const match = /^(\d+)\/(\d+)$/.exec(stream?.avg_frame_rate ?? "");
+  if (match === null) return null;
+  const rate = Number(match[1]) / Number(match[2]);
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
+}
+
+/** H.264 の profile 名 → codecs の先頭 (profile_idc と制約の印) */
 const AVC_PROFILES: Record<string, string> = {
   Baseline: "4200",
   "Constrained Baseline": "42e0",
@@ -173,18 +195,20 @@ export function mediaInfo(source: EncodedSource, json: string): MediaFile {
   const streams = parsed.streams ?? [];
   const audios = streams.filter((stream) => stream.codec_type === "audio");
   const duration = Number(parsed.format?.duration);
+  const video = streams.find((stream) => stream.codec_type === "video");
   return {
     source,
-    video: videoCodec(streams.find((stream) => stream.codec_type === "video")),
+    video: videoCodec(video),
     audio: audioCodec(audios[0]),
     audios: audios.map(
       (stream) => stream.tags?.title ?? stream.tags?.TITLE ?? "",
     ),
     duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+    fps: frameRate(video),
   };
 }
 
-/** ffprobe の待ち時間の上限。壊れたファイルで居座らせない */
+/** ffprobe の待ち時間の上限。壊れたファイルで待ち続けない */
 export const PROBE_TIMEOUT = 15_000;
 
 /** 読んだ中身の控え。開くたびに聞くので、同じファイル (パスと更新時刻) なら読み直さない */
@@ -192,7 +216,7 @@ const probed = new Map<string, { mtime: number; file: MediaFile }>();
 /** 控えの上限。古いものから捨てる */
 const KEEP = 64;
 
-/** 控えに入れる。新しいものを後ろに置き、上限を超えたら古いもの (頭) から捨てる */
+/** 控えに入れる。新しいものを後ろに置き、上限を超えたら古いもの (先頭) から捨てる */
 function keep<T>(memo: Map<string, T>, path: string, value: T): void {
   memo.delete(path);
   memo.set(path, value);
@@ -249,17 +273,17 @@ interface TsFile {
   size: number;
   /** 入れ物の始まり (90kHz。`ts/seek.ts` の `tsHead`) */
   head: number;
-  /** 頭から尻の映像まで (秒)。読めなければ null */
+  /** 先頭から最後の映像まで (秒)。読めなければ null */
   duration: number | null;
 }
 
 /** 決めたこと。画面へ渡すもの (`info`) と、流すときに要るもの */
-export interface PlaybackPlan {
+interface PlaybackPlan {
   info: PlaybackInfo;
   encoded: EncodedFile[];
   /** 元の TS。録り終えていて、読めるときだけ */
   ts: TsFile | null;
-  /** 物差しの 0 が、TS の頭から何秒か (`encode_skip`)。TS が物差しなら 0 */
+  /** 物差しの 0 が、TS の先頭から何秒か (`encode_skip`)。TS が物差しなら 0 */
   skip: number;
   /** TS の音声 (`arib.audioTracks`)。TS から変換するときに使う */
   tracks: AudioTrack[];
@@ -277,7 +301,7 @@ function codecOf(video: string | null): HwCodec | null {
 
 /**
  * fMP4 にしたときの音声の codecs。H.264 は AAC、AV1 は Opus (ライブと同じ組。`live.audioArgs`)。
- * H.265 は AAC — H.265 を MSE で受け取りたいのは AV1 をデコードできない端末 (Safari など) で、MP4 の Opus を
+ * H.265 は AAC。H.265 を MSE で受け取りたいのは AV1 をデコードできない端末 (Safari など) で、MP4 の Opus を
  * 受け取れるとは限らないため
  */
 function streamAudio(codec: HwCodec): string {
@@ -299,13 +323,13 @@ function reader(path: string): ReadAt {
     );
 }
 
-/** 頭と尻を読む量。頭は映像と音声の最初の PES が必ず入る長さ、尻は最後の映像の PES が入る長さ */
+/** 先頭と末尾を読む量。先頭は映像と音声の最初の PES が必ず入る長さ、末尾は最後の映像の PES が入る長さ */
 const PROBE_BYTES = 4 * 1024 * 1024;
 
 /** 読んだ TS の控え。開くたびに聞くので、同じファイル (パス・大きさ・更新時刻) なら読み直さない */
 const tsProbed = new Map<string, { key: string; ts: TsFile | null }>();
 
-/** 元の TS の頭と尺を読む。読めなければ null */
+/** 元の TS の先頭と尺を読む。読めなければ null */
 async function probeTs(path: string): Promise<TsFile | null> {
   let size = 0;
   let mtime = 0;
@@ -405,7 +429,7 @@ export async function playbackPlan(
     });
   }
   /*
-   * H.265 は詰め替えだけ (エンコード済みの H.265 があるときだけ)。その場の変換では H.265 を作らない —
+   * H.265 は詰め替えだけ (エンコード済みの H.265 があるときだけ)。その場の変換では H.265 を作らない。
    * ブラウザの H.265 は端末しだいで、AV1 か H.264 に変換すれば足りる (docs/encode.md「H.265 は GPU でだけ」)
    */
   const hevc = known.find((file) => file.codec === "hevc");
@@ -430,7 +454,7 @@ export async function playbackPlan(
   }
   /*
    * MPEG-2 は元の TS の時刻をそのまま運ぶので、物差しに乗せられるときだけ。CM を切ったものは
-   * 途中が詰まっていて合わない。捨てた頭を覚えていない古い録画も合わせようがない
+   * 途中が詰まっていて合わない。捨てた先頭を覚えていない古い録画も合わせようがない
    */
   if (
     ts !== null &&
@@ -482,7 +506,7 @@ const FMP4_OUT = [
   "mp4",
   "-movflags",
   "+empty_moov+default_base_moof+frag_discont+negative_cts_offsets",
-  // 1秒ずつ。キーフレームごと (数秒) だと、頭の映像が出るまでそのぶん待つ
+  // 1 秒ずつ。キーフレームごと (数秒) だと、最初の映像が出るまでそのぶん待つ
   "-frag_duration",
   "1000000",
   "pipe:1",
@@ -490,8 +514,8 @@ const FMP4_OUT = [
 
 /**
  * **エンコード済みを詰め替える引数** (映像は写すだけ。音声は H.264・H.265 なら AAC、AV1 なら Opus。`streamAudio`)。
- * H.265 は `hvc1` と名乗らせる — mp4 の muxer の既定は `hev1` で、Safari は `hev1` を受け取らない。
- * `hvc1` は「パラメータセットは入れ物の頭に」の印で、GPU のエンコーダがキーフレームごとに中にも
+ * H.265 は `hvc1` と名乗らせる。mp4 の muxer の既定は `hev1` で、Safari は `hev1` を受け取らない。
+ * `hvc1` は「パラメータセットは入れ物の先頭に」の印で、GPU のエンコーダがキーフレームごとに中にも
  * 書いているものはそのまま残るが、ブラウザはそれで断らない前提 (実機では見ていない)。
  * `audio` は入れ物の中の何本目の音声か (主・副で分けてエンコードしてある。`encoder.ts`)。
  *
@@ -499,12 +523,12 @@ const FMP4_OUT = [
  *
  * - `-ss` を `-i` の前に置く。映像は写すので、`from` の手前のキーフレームから始まる
  * - `-copyts` で入口の時刻を出口まで運ぶ
- * - mp4 の muxerは既定で頭を 0 に詰め直す。`frag_discont` で塊の時刻 (tfdt) を
+ * - mp4 の muxer は既定で先頭を 0 に詰め直す。`frag_discont` で塊の時刻 (tfdt) を
  *   そのまま書かせ、`negative_cts_offsets` で B フレームのぶんを編集リストに逃がさせない
- *   (逃がすと頭がずれる。ブラウザの MSE は編集リストを当てにできない)
- * - 頭 (`from` = 0) だけは AAC の前置きと B フレームのぶん時刻が負になり、そのままでは
+ *   (逃がすと先頭がずれる。ブラウザの MSE は編集リストを当てにできない)
+ * - 先頭 (`from` = 0) だけは AAC の前置きと B フレームのぶん時刻が負になり、そのままでは
  *   tfdt が壊れる (負の数が符号なしで書かれる)。`make_non_negative` で全体を揃って
- *   ずらす。ずれは数十ms (手元の試しで 0.067秒) で、映像と音声の間は崩れない
+ *   ずらす。ずれは数十 ms (手元で試して 0.067 秒) で、映像と音声の間は崩れない
  *
  * 手元の ffmpeg (9.x の開発ビルド) で試した tfdt (秒、映像・音声の順):
  *
@@ -543,7 +567,9 @@ export function copyArgs(
 
 /**
  * **エンコード済みを別のコーデックに変換する引数。** 飛び方と時刻の運び方は詰め替え (`copyArgs`) と同じ。
- * 映像のエンコード方法はライブと同じ (`live.videoArgs`)。インタレ解除は済んでいるので挟まない
+ * 映像のエンコード方法はライブと同じ (`live.videoArgs`)。インタレ解除は済んでいるので挟まない。
+ * `rung` は回線に合わせて下げた段 (`#lib/rungs.ts`)。段を下げるなら、エンコード済みと同じコーデックにも変換する。
+ * `fps` は元のコマ数 (`MediaFile.fps`)。段を下げるとき、30 コマ以下ならそのままのコマ数で縮める
  */
 export function fileTranscodeArgs(
   path: string,
@@ -551,8 +577,10 @@ export function fileTranscodeArgs(
   audio: number,
   codec: LiveCodec,
   hw: LiveHw | null,
+  rung: Rung = 0,
+  fps: number | null = null,
 ): string[] {
-  const video = videoArgs(codec, hw, false);
+  const video = videoArgs(codec, hw, false, rung, fps);
   return [
     ...QUIET,
     ...video.input,
@@ -569,7 +597,7 @@ export function fileTranscodeArgs(
     // 時刻を入口のまま運ぶ (`-copyts`)。既定 (mp4 は cfr) にコマを揃え直させない
     "-fps_mode",
     "passthrough",
-    ...audioArgs(codec),
+    ...audioArgs(codec, rung),
     "-avoid_negative_ts",
     "make_non_negative",
     ...FMP4_OUT,
@@ -588,7 +616,7 @@ export function presented(pts: number): number {
 }
 
 /**
- * **TS から変換するときの `-output_ts_offset`。** 流し込む頭の映像の PES の PTS (`pts`) が、物差しで
+ * **TS から変換するときの `-output_ts_offset`。** 流し込む最初の映像の PES の PTS (`pts`) が、物差しで
  * `at` 秒になるように。ffmpeg は `-copyts` で入口の時刻 (`presented`) をそのまま運ぶので、差を足せば
  * 出口が物差しの時刻になる。一周をまたいでも ffmpeg が増え続ける数にしてくれる。
  *
@@ -596,15 +624,15 @@ export function presented(pts: number): number {
  * 流し込むと (`presented` が負) 映像がまるごと消えた。`-t` を出口に置くと `-copyts` の絶対時刻で数えるので
  * 置かない。
  *
- * ffmpeg 9.0.2 で、120 秒の MPEG-2 の TS (頭の PTS が 1000 秒・一周の 30 秒前・40 秒前の 3 本) を
- * 途中から標準入力へ流して測った頭の tfdt (物差しの時刻からの差):
+ * ffmpeg 9.0.2 で、120 秒の MPEG-2 の TS (先頭の PTS が 1000 秒・一周の 30 秒前・40 秒前の 3 本) を
+ * 途中から標準入力へ流して測った最初の tfdt (物差しの時刻からの差):
  *
  *     要求した位置   映像 (次のキーフレームから)   音声 (映像より先に多重化されている)
  *     20 秒        +0.39〜+0.40 秒             -0.43 秒
  *     70 秒        +0.56〜+0.57 秒             -0.09 秒
  *
  * 3 本とも同じ (差は 1 コマ未満)。一周をまたぐところも隙間なく続いた。`-copyts` を付けずに
- * `-output_ts_offset <物差しの時刻>` だけにすると、映像も音声も 65ms ずれた (流し込んだ頭で変わる)
+ * `-output_ts_offset <物差しの時刻>` だけにすると、映像も音声も 65ms ずれた (流し込んだ位置で変わる)
  */
 export function tsOffset(pts: number, at: number): number {
   return at - presented(pts);
@@ -618,6 +646,7 @@ export function tsOffset(pts: number, at: number): number {
  * (`live.encodeArgs` と同じ)。映像のエンコード方法とインタレ解除もライブと同じ (`live.videoArgs`)
  *
  * @param offset `tsOffset`
+ * @param rung 回線に合わせて下げた段 (`#lib/rungs.ts`)
  */
 export function tsTranscodeArgs(
   program: number,
@@ -625,8 +654,9 @@ export function tsTranscodeArgs(
   codec: LiveCodec,
   hw: LiveHw | null,
   offset: number,
+  rung: Rung = 0,
 ): string[] {
-  const video = videoArgs(codec, hw, true);
+  const video = videoArgs(codec, hw, true, rung);
   const from = programSpec(program);
   return [
     ...QUIET,
@@ -644,15 +674,60 @@ export function tsTranscodeArgs(
     video.filter,
     ...video.encoder,
     // 時刻を詰め直させない (`tsOffset` の説明)。既定 (mp4 は cfr) だと負の時刻のコマを捨てる。
-    // ライブのようにコマ数の上限 (`-fpsmax`) は付けられない — passthrough と一緒だと ffmpeg が
+    // ライブのようにコマ数の上限 (`-fpsmax`) は付けられない。 passthrough と一緒だと ffmpeg が
     // 「矛盾している」と断って変換が始まらない。探りは既定の大きさなのでコマ数を読み違えない
     "-fps_mode",
     "passthrough",
     ...panArgs(audio),
-    ...audioArgs(codec),
+    ...audioArgs(codec, rung),
     "-output_ts_offset",
     offset.toFixed(6),
-    // 頭から観るときだけ、AAC の前置きのぶん負になる (`copyArgs` の説明)
+    // 先頭から観るときだけ、AAC の前置きのぶん負になる (`copyArgs` の説明)
+    "-avoid_negative_ts",
+    "make_non_negative",
+    ...FMP4_OUT,
+  ];
+}
+
+/**
+ * **音声だけの引数** (`?codec=audio`。段 3 でも回線が足りないときの最後の手)。映像は出さず、音声を AAC の 96k
+ * (段を下げたときと同じ。`live.audioArgs`) にして fMP4 で流す。飛び方と時刻の運び方は映像のあるときと同じなので、
+ * 映像に戻すときも同じ物差しのまま続けられる。`source` はエンコード済み (`path` と入れ物の中の何本目か) か、
+ * 元の TS (局と音声・`tsOffset`。TS は標準入力から)
+ */
+export function audioOnlyArgs(
+  source:
+    | { path: string; from: number; audio: number }
+    | { program: number; audio: AudioTrack; offset: number },
+): string[] {
+  const input =
+    "path" in source
+      ? [
+          ...(source.from > 0 ? ["-ss", source.from.toFixed(3)] : []),
+          "-copyts",
+          "-i",
+          source.path,
+          "-map",
+          `0:a:${source.audio}?`,
+        ]
+      : [
+          "-copyts",
+          "-f",
+          "mpegts",
+          "-i",
+          "pipe:0",
+          "-map",
+          `${programSpec(source.program)}:a:${source.audio.stream}?`,
+          ...panArgs(source.audio),
+        ];
+  return [
+    ...QUIET,
+    ...input,
+    "-vn",
+    ...audioArgs("h264", LOWEST_RUNG),
+    ...("offset" in source
+      ? ["-output_ts_offset", source.offset.toFixed(6)]
+      : []),
     "-avoid_negative_ts",
     "make_non_negative",
     ...FMP4_OUT,
@@ -665,7 +740,7 @@ const IDLE_LIMIT = 5 * 60_000;
 const IDLE_CHECK = 30_000;
 
 /** ffmpeg を 1 回起こすぶん */
-export interface Attempt {
+interface Attempt {
   argv: string[];
   /** 標準入力へ流し込むもの (TS が元)。起こすたびに読み直す */
   input?: () => ReadableStream<Uint8Array>;
@@ -674,10 +749,15 @@ export interface Attempt {
    * 渡すのは降りた前の手の標準エラーの全文 (理由で覚えるかを決める。`hwenc.nvencBusy`)
    */
   blame?: (failed: string) => void;
+  /**
+   * これが 1 バイトも出せずに降り、次の手も無いときに呼ぶ (標準エラーの全文を渡す)。ソフトウェアに降りられない GPU
+   * (段を下げた AV1・H.265) が、降りた方式を覚えるのに使う (`withFallback`)
+   */
+  gaveUp?: (failed: string) => void;
 }
 
 /**
- * **ffmpeg の出口を応答の本文にする** (`stream.ffmpegBody` に、降りたときの次の手と詰まりの見張りを足したもの)。
+ * **ffmpeg の出口を応答の本文にする** (`stream.ffmpegBody` に、降りたときの次の手と詰まりの検出を足したもの)。
  *
  * - 読まれたぶんしか読み出さない。相手が読まなければ出口が詰まり、ffmpeg も止まる
  * - 1 バイトも出さずに降りたら、次の手 (GPU → ソフトウェア) で起こし直す。次で出せたら、降りた手の標準エラーを添えて `blame` を呼ぶ
@@ -687,12 +767,14 @@ export interface Attempt {
  *   「読まれない」(`idle`) で切っていた (単体テストで `sh` の起動が上限の 50ms に間に合わなかった回に落ちた)。
  *   何も出さずに固まった ffmpeg は、相手が切らなくても畳む (枠を持ったまま残さない)
  * - 畳んだら `done` を呼ぶ (枠を返す)
+ * - `pace` があれば、出したものと ffmpeg を待った時間を渡す (送り出しの具合。`server/pace.ts`)
  */
 export function transcodeBody(
   attempts: Attempt[],
   what: string,
   done: () => void,
   idle = { limit: IDLE_LIMIT, every: IDLE_CHECK },
+  pace: StreamPace | null = null,
 ): ReadableStream<Uint8Array> {
   let index = 0;
   let proc: ReturnType<typeof spawnAttempt> | null = null;
@@ -737,12 +819,14 @@ export function transcodeBody(
       }, idle.every);
     },
     async pull(controller) {
-      waitingSince = Date.now();
+      const since = Date.now();
+      waitingSince = since;
       try {
         await fill(controller);
       } finally {
         waitingSince = null;
         lastRead = Date.now();
+        pace?.wait(lastRead - since);
       }
     },
     cancel() {
@@ -762,6 +846,7 @@ export function transcodeBody(
       if (!ended) {
         if (!sent && index > 0) attempts[index]?.blame?.(failed);
         sent = true;
+        pace?.output(value);
         controller.enqueue(value);
         return;
       }
@@ -781,6 +866,7 @@ export function transcodeBody(
         continue;
       }
       console.warn(`${what}が止まりました (${code}): ${why}`);
+      if (!sent) attempts[index]?.gaveUp?.(await current.log());
       finish();
       controller.error(new Error(`ffmpeg exited with ${code}`));
       return;
@@ -846,41 +932,59 @@ function audioIndex(asked: string | null): number {
   return Number.isInteger(n) && n >= 0 ? n : 0;
 }
 
-const MP4_HEADERS = {
-  "Content-Type": "video/mp4",
-  "Cache-Control": "no-store",
-};
-
 /**
- * **`GET /api/recordings/<id>/stream` に答える。** `codec` は `h264` / `hevc` / `av1` / `mpeg2`、`from` は物差しの秒、
- * `audio` は `playback` の `audios` の `id`。出せない形式は 404、枠が埋まっていれば 503
+ * **`GET /api/recordings/<id>/stream` に答える。** `codec` は `h264` / `hevc` / `av1` / `mpeg2` / `audio`、`from` は物差しの秒、
+ * `audio` は `playback` の `audios` の `id`。出せない形式は 404、枠が埋まっていれば 503。
+ *
+ * - `rung` (1〜3) は回線に合わせて下げた段 (`#lib/rungs.ts`)。エンコード済みと同じコーデックでも写さずに変換し、
+ *   コーデックはサーバが `playable` から選ぶ (`live.rungCodec`)。H.265 のエンコード済みでも、GPU があれば H.265 のまま下げられる。
+ *   `mpeg2` では効かない (放送のまま流す)
+ * - `codec=audio` は音声だけ (AAC 96k の fMP4。`audioOnlyArgs`)。段 3 でも足りないときの最後の手で、枠は使わない
+ *
+ * fMP4 の応答には、中身のコーデック (`CODEC_HEADER`)・段 (`RUNG_HEADER`)・送り出しの具合を読む id (`PACE_HEADER`) を付ける
  */
 export async function streamResponse(
   recording: Recording,
   query: URLSearchParams,
 ): Promise<Response> {
   const asked = query.get("codec");
-  const codec: PlayCodec | null =
-    asked === "h264" || asked === "hevc" || asked === "av1" || asked === "mpeg2"
+  const codec: PlayCodec | "audio" | null =
+    asked === "h264" ||
+    asked === "hevc" ||
+    asked === "av1" ||
+    asked === "mpeg2" ||
+    asked === "audio"
       ? asked
       : null;
   if (codec === null)
-    error(400, "codec は h264 / hevc / av1 / mpeg2 のどれかです");
+    error(400, "codec は h264 / hevc / av1 / mpeg2 / audio のどれかです");
   const fromRaw = Number(query.get("from") ?? 0);
   const from = Number.isFinite(fromRaw) ? Math.max(0, fromRaw) : 0;
 
   const plan = await playbackPlan(recording);
-  const offer = plan?.info.offers.find(
-    (o) => o.codec === codec && o.way !== "file",
-  );
-  if (plan === null || offer === undefined)
-    error(404, "この形式では再生できません");
+  if (plan === null) error(404, "この形式では再生できません");
+  // 変換の元。エンコード済み (中身を読めたもの) があればそれ、無ければ元の TS
+  const source = plan.encoded.find((file) => file.codec !== null);
+  const label = `[stream] 録画 ${recording.id} (${codec})`;
+  if (codec === "audio") return audioResponse(plan, source, from, query, label);
+  if (codec === "mpeg2") {
+    if (!plan.info.offers.some((o) => o.codec === "mpeg2"))
+      error(404, "この形式では再生できません");
+    return rawResponse(plan, from);
+  }
 
-  if (codec === "mpeg2") return rawResponse(plan, from);
+  // 段を下げないなら `offers` にあるものだけ。下げるなら、変換の元があればどの形式でもよい (コーデックはサーバが選ぶ)
+  const rung = parseRung(query.get("rung"));
+  const offered =
+    rung === 0
+      ? plan.info.offers.some((o) => o.codec === codec && o.way !== "file")
+      : source !== undefined || plan.ts !== null;
+  if (!offered) error(404, "この形式では再生できません");
 
   const same = plan.encoded.find((file) => file.codec === codec);
-  const label = `[stream] 録画 ${recording.id} (${codec})`;
-  if (same !== undefined) {
+  if (same !== undefined && rung === 0) {
+    const pace = new StreamPace(false);
+    const opened = openPace(() => pace.read());
     return new Response(
       transcodeBody(
         [
@@ -897,27 +1001,50 @@ export async function streamResponse(
           },
         ],
         `${label} の詰め替え`,
-        () => undefined,
+        opened.close,
+        undefined,
+        pace,
       ),
-      { headers: MP4_HEADERS },
+      { headers: mp4Headers(codec, 0, opened.id) },
     );
   }
-  // H.265 は詰め替えだけ (その場の変換では作らない。`playbackPlan`)。offers にあればファイルがあるので、ここには来ない
-  if (codec === "hevc") error(404, "この形式では再生できません");
+  // 段を下げないなら H.265 は詰め替えだけ (`playbackPlan`)。offers にあればファイルがあるので、ここには来ない
+  if (codec === "hevc" && rung === 0) error(404, "この形式では再生できません");
 
-  const release = holdTranscode();
-  if (release === null) error(503, BUSY);
-  const source = plan.encoded.find((file) => file.codec !== null);
+  // 段を下げるならコーデックはサーバが選ぶ。H.265・AV1 は GPU があるときだけ選ばれる (`live.rungCodec`)
+  const output =
+    rung === 0
+      ? codec
+      : rungCodec(
+          parsePlayable(query.get("playable"), codec),
+          source === undefined,
+        );
+
+  const held = holdTranscode();
+  if (held === null) error(503, BUSY);
+  const pace = new StreamPace(true);
+  const opened = openPace(() => pace.read());
+  const release = () => {
+    held();
+    opened.close();
+  };
   let attempts: Attempt[] | null;
   try {
     attempts =
       source !== undefined
-        ? fileAttempts(source.path, from, audioIndex(query.get("audio")), codec)
+        ? fileAttempts(
+            source,
+            from,
+            audioIndex(query.get("audio")),
+            output,
+            rung,
+          )
         : await tsAttempts(
             plan,
             from,
             pickTrack(plan.tracks, query.get("audio") ?? undefined),
-            codec,
+            output,
+            rung,
           );
   } catch (failure) {
     // TS を読めなかった (消されたなど)。取った枠は返す
@@ -928,41 +1055,135 @@ export async function streamResponse(
     release();
     error(404, "この形式では再生できません");
   }
-  return new Response(transcodeBody(attempts, `${label} の変換`, release), {
-    headers: MP4_HEADERS,
-  });
+  return new Response(
+    transcodeBody(attempts, `${label} の変換`, release, undefined, pace),
+    { headers: mp4Headers(output, rung, opened.id) },
+  );
+}
+
+/** fMP4 の応答ヘッダ。中身のコーデック・段・送り出しの具合を読む id (`#lib/ts/playback.ts`) */
+function mp4Headers(
+  codec: LiveCodec | "audio",
+  rung: Rung,
+  pace: string,
+): Record<string, string> {
+  return {
+    "Content-Type": codec === "audio" ? "audio/mp4" : "video/mp4",
+    "Cache-Control": "no-store",
+    [CODEC_HEADER]: codec,
+    [RUNG_HEADER]: String(rung),
+    [PACE_HEADER]: pace,
+  };
 }
 
 /**
- * GPU でエンコードできるなら GPU、駄目ならソフトウェア。GPU が 1 バイトも出せずに降りたら覚える —
- * NVENC の同時に開ける数を超えただけなら覚えない (`live.blameLiveHw`)
+ * 音声だけ (`?codec=audio`。`audioOnlyArgs`)。**その場で変換する本数の枠は使わない。** 枠は映像のデコードとエンコードで
+ * CPU (GPU) を食い潰さないためのもので、音声だけなら映像はデコードもエンコードもしない (`-vn`)。AAC 96k のエンコードは
+ * 映像のエンコードと比べてずっと軽い (本数ごとの重さは測っていない)。録画ファイルの `?audio=only` とライブの `?audio=only` も
+ * 数えていないので、同じ扱いにする。上限の設定は足さない
+ */
+async function audioResponse(
+  plan: PlaybackPlan,
+  source: EncodedFile | undefined,
+  from: number,
+  query: URLSearchParams,
+  label: string,
+): Promise<Response> {
+  let attempt: Attempt | null = null;
+  if (source !== undefined) {
+    attempt = {
+      argv: [
+        config.ffmpeg,
+        ...audioOnlyArgs({
+          path: source.path,
+          from,
+          audio: audioIndex(query.get("audio")),
+        }),
+      ],
+    };
+  } else if (plan.ts !== null) {
+    const ts = plan.ts;
+    const mark = await seekFrom(ts, plan.skip, from);
+    if (mark !== null) {
+      attempt = {
+        argv: [
+          config.ffmpeg,
+          ...audioOnlyArgs({
+            program: plan.program,
+            audio: pickTrack(plan.tracks, query.get("audio") ?? undefined),
+            offset: tsOffset(
+              mark.pts,
+              sinceHead(mark.pts, ts.head) - plan.skip,
+            ),
+          }),
+        ],
+        input: () => Bun.file(ts.path).slice(mark.at).stream(),
+      };
+    }
+  }
+  if (attempt === null) error(404, "この形式では再生できません");
+  const pace = new StreamPace(false);
+  const opened = openPace(() => pace.read());
+  return new Response(
+    transcodeBody(
+      [attempt],
+      `${label} の音声だけ`,
+      opened.close,
+      undefined,
+      pace,
+    ),
+    { headers: mp4Headers("audio", 0, opened.id) },
+  );
+}
+
+/**
+ * GPU でエンコードできるなら GPU、駄目ならソフトウェア。GPU が 1 バイトも出せずに降りたら覚える。
+ * NVENC の同時に開ける数を超えただけなら覚えない (`live.blameLiveHw`)。
+ *
+ * **段を下げた AV1・H.265 はソフトウェアに降りない** (`live.softwareEncodes`)。GPU が降りたらそこで止め、降りた方式を覚える (`gaveUp`)。
+ * 画面が同じ段をリクエストし直すと、覚えている間は次のコーデックになる (`live.rungCodec`)
  */
 function withFallback(
   codec: LiveCodec,
   interlaced: boolean,
   build: (hw: LiveHw | null) => Attempt,
+  rung: Rung,
 ): Attempt[] {
   const hw = pickLiveHw(codec, interlaced);
-  const software = build(null);
-  if (hw === null) return [software];
-  return [
-    build(hw),
-    {
-      ...software,
-      blame: (failed) => blameLiveHw(codec, hw, nvencBusy(failed)),
-    },
-  ];
+  if (hw === null) return [build(null)];
+  const blame = (failed: string) => {
+    blameLiveHw(codec, hw, nvencBusy(failed));
+  };
+  if (!softwareEncodes(codec, rung)) return [{ ...build(hw), gaveUp: blame }];
+  return [build(hw), { ...build(null), blame }];
 }
 
 function fileAttempts(
-  path: string,
+  source: EncodedFile,
   from: number,
   audio: number,
   codec: LiveCodec,
+  rung: Rung,
 ): Attempt[] {
-  return withFallback(codec, false, (hw) => ({
-    argv: [config.ffmpeg, ...fileTranscodeArgs(path, from, audio, codec, hw)],
-  }));
+  return withFallback(
+    codec,
+    false,
+    (hw) => ({
+      argv: [
+        config.ffmpeg,
+        ...fileTranscodeArgs(
+          source.path,
+          from,
+          audio,
+          codec,
+          hw,
+          rung,
+          source.media.fps,
+        ),
+      ],
+    }),
+    rung,
+  );
 }
 
 async function tsAttempts(
@@ -970,6 +1191,7 @@ async function tsAttempts(
   from: number,
   audio: AudioTrack,
   codec: LiveCodec,
+  rung: Rung,
 ): Promise<Attempt[] | null> {
   const ts = plan.ts;
   if (ts === null) return null;
@@ -977,13 +1199,18 @@ async function tsAttempts(
   if (mark === null) return null;
   const offset = tsOffset(mark.pts, sinceHead(mark.pts, ts.head) - plan.skip);
   const input = () => Bun.file(ts.path).slice(mark.at).stream();
-  return withFallback(codec, true, (hw) => ({
-    argv: [
-      config.ffmpeg,
-      ...tsTranscodeArgs(plan.program, audio, codec, hw, offset),
-    ],
-    input,
-  }));
+  return withFallback(
+    codec,
+    true,
+    (hw) => ({
+      argv: [
+        config.ffmpeg,
+        ...tsTranscodeArgs(plan.program, audio, codec, hw, offset, rung),
+      ],
+      input,
+    }),
+    rung,
+  );
 }
 
 /**
@@ -1004,6 +1231,8 @@ async function rawResponse(
     headers: {
       "Content-Type": "video/mp2t",
       "Cache-Control": "no-store",
+      // `live`・`chase` の放送のままと同じ値 (`codec=mpeg2` でリクエストされても `raw`)
+      [CODEC_HEADER]: "raw",
       [ORIGIN_HEADER]: String(origin),
     },
   });
@@ -1043,7 +1272,7 @@ export function rulerOf(
  *   エンコードしたものがあれば、もうその物差し。無い (古い行) ときは番組表の尺を直して代わりにする
  *
  * 元の TS の位置のまま出来上がりの尺から引くと、CM を切ったものでは切った CM のぶん食い違う。
- * 続きが無い・直すと頭になる (捨てた頭の中で止めた) ものは null
+ * 続きが無い・直すと先頭になる (捨てた先頭の中で止めた) ものは null
  */
 export function watchProgress(
   recording: Pick<
@@ -1071,7 +1300,7 @@ export function watchProgress(
 
 /**
  * **エンコード済みが無い録画の、CM 飛ばしのチャプター。** 検出した CM の区間 (`cm_ranges`) は
- * 元の TS の頭からの秒で持っている (`encoder.ts` の `runCmJob`) ので、物差し (`ts`) にそのまま乗る。
+ * 元の TS の先頭からの秒で持っている (`encoder.ts` の `runCmJob`) ので、物差し (`ts`) にそのまま乗る。
  * CM の扱いが「何もしない」なら、エンコード済みにチャプターを書かないのと揃えて出さない
  */
 export async function tsChapters(
@@ -1095,12 +1324,11 @@ export async function tsChapters(
 /**
  * **字幕のストリームだけを抜く引数** (`api/recordings/<id>/captions.json`)。デコードせずに写す (デコードするのは denpa)。
  *
- * エンコード済みがあればそこから。無ければ元の TS から抜き、時刻を物差し (TS の頭を 0) に揃える
- * (`-copyts` で放送の PTS を運び、頭のぶん引く。`presented`)。どちらも無ければ null
+ * エンコード済みがあればそこから。無ければ元の TS から抜き、時刻を物差し (TS の先頭を 0) に揃える
+ * (`-copyts` で放送の PTS を運び、先頭のぶん引く。`presented`)。どちらも無ければ null
  */
 export async function captionArgs(recording: Recording): Promise<{
   argv: string[];
-  ts: boolean;
   /** 抜くファイル (エンコード済み)。元の TS から抜くときは null */
   path: string | null;
 } | null> {
@@ -1109,7 +1337,6 @@ export async function captionArgs(recording: Recording): Promise<{
   if (encoded !== null) {
     return {
       argv: ["-v", "error", "-i", encoded, "-map", "0:s:0", ...out],
-      ts: false,
       path: encoded,
     };
   }
@@ -1129,7 +1356,6 @@ export async function captionArgs(recording: Recording): Promise<{
       (-presented(ts.head)).toFixed(6),
       ...out,
     ],
-    ts: true,
     path: null,
   };
 }

@@ -160,7 +160,7 @@
 
 <style>
   /*
-   * 下の段いっぱい (折り目と蝶番の隙間の下から、画面の下の端まで)。黒い地 (`PlayerLayout`) の上、右の列の下に描く —
+   * 下の段いっぱい (折り目と蝶番の隙間の下から、画面の下の端まで)。黒い地 (`PlayerLayout`) の上、右の列の下に描く。
    * 文書の順で右の列より前にあり、右の列は位置を持たせてある
    */
   .reflection {
@@ -170,7 +170,7 @@
     bottom: 0;
     left: 0;
     pointer-events: none;
-    /* 2枚の足し合わせ (下の `plus-lighter`) を箱の中で済ませる */
+    /* 2 枚の足し合わせ (下の `plus-lighter`) を箱の中で済ませる */
     isolation: isolate;
   }
   .reflection[data-off] {

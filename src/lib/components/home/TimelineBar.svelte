@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * **一覧の下の細い1行** (サイドバーの無いスマホの形だけ。下のタブのすぐ上に貼り付く)。絞り込みのチップ (件数付き。1回押せば絞れる。
+   * **一覧の下の細い 1 行** (サイドバーの無いスマホの形だけ。下のタブのすぐ上に貼り付く)。絞り込みのチップ (件数付き。1 回押せば絞れる。
    * 横に流せる) と、見てほしいこと (競合・失敗・録り逃し・CM の判定) のうち件数のあるものを注意の色のチップで。
    * 右の「⋯」に状態 (エンコード・空き。押せない頭) と表示の切り替え。
    * 広い形では同じものをサイドバー (`HomeAside`) に置き、この行は出さない
@@ -26,12 +26,12 @@
   );
 </script>
 
-<div class="t-toolbar" data-testid="timeline-toolbar">
+<div class="t-toolbar dock" data-testid="timeline-toolbar">
   <div class="t-chips" role="group" aria-label="絞り込み">
     {#each FILTERS as f (f.id)}
       <button
         type="button"
-        class="t-chip"
+        class="t-chip pick-line"
         aria-pressed={filter === f.id}
         onclick={() => setFilter(f.id)}
         data-testid="filter-chip"
@@ -46,7 +46,7 @@
       <!-- 見てほしいこと。押すとそれで絞り、もう一度押すと「すべて」に戻る -->
       <button
         type="button"
-        class="t-chip warn"
+        class="t-chip pick-line warn"
         aria-pressed={filter === f.id}
         onclick={() => setFilter(filter === f.id ? "all" : f.id)}
         data-testid="filter-chip"

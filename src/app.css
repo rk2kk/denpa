@@ -100,21 +100,29 @@
   --dp-space-6: 2rem;
   /* 何行かある一覧の件と件の間。件は面に乗っていて面の切れ目が境目になるので、詰めておく */
   --dp-list-gap: 0.375rem;
+  /* 何行かある一覧の件の高さ (64px。指で押す端末では 72px。下の `pointer: coarse`) */
+  --dp-item-h: 4rem;
+  /* 選んでいる・オンの線の太さ (下線・左の縦線・短い下線)。線の角はこの値で丸め、両端を半円にする */
+  --dp-mark: 2px;
   /*
-   * **浮いた角丸の面の形** (広い形のヘッダーと、その下に貼り付く操作の1行。docs/design.md の「浮かせ方」)。
-   * 窓の端からの離れ・角・ヘッダーとの隙間・中の余白をそろえる。操作の1行の面は、中身が裏に入ったときだけ出す (下の `dp-bar-float`)
+   * **浮いた角丸の面の形** (広い形のヘッダーと、その下に貼り付く操作の 1 行。docs/design.md の「浮かせ方」)。
+   * 窓の端からの離れ・角・ヘッダーとの隙間・中の余白をそろえる。操作の 1 行の面は、中身が裏に入ったときだけ出す (下の `dp-bar-float`)
    */
   --dp-bar-inset: 0.75rem;
   --dp-bar-radius: 0.875rem;
   --dp-bar-gap: 0.25rem;
   --dp-bar-pad: 0.375rem;
-  /* 字の大きさ。本文は 16px のまま (番組表のマスなど rem で組んだ寸法が変わらない) */
+  /*
+   * 字の大きさ。本文は 16px のまま (番組表のマスなど rem で組んだ寸法が変わらない)。使い分けは docs/design.md の「作り方」。
+   * `-2xs` (11px) は幅か高さの決まった所だけ (下のタブの名前・番組表の時の列の「いま」・カレンダーの曜日・バーの先の「いま」・番組表のマスの「コピー禁止」)
+   */
+  --dp-text-2xs: 0.6875rem;
   --dp-text-xs: 0.75rem;
   --dp-text-sm: 0.875rem;
   --dp-text-base: 1rem;
   --dp-text-lg: 1.125rem;
   --dp-text-xl: 1.5rem;
-  /* 字の太さは 2 段だけ。BIZ UDPゴシックは 400 と 700 しか持たないので、数字で書かずにこの2つを使う */
+  /* 字の太さは 2 段だけ。BIZ UDPゴシックは 400 と 700 しか持たないので、数字で書かずにこの 2 つを使う */
   --dp-weight: 400;
   --dp-weight-bold: 700;
   /*
@@ -150,13 +158,13 @@
   /*
      * 色は**主の色ひとつ**と、状態の色 4 つだけ。主の色は Blades (Pico) の既定の azure を
      * そのまま使う (上書きしない。アイコンの水色とも揃う)。
-     * 状態の色も Pico の色見本の段から選ぶ (録画中 red・成功 jade・注意 amber・通知 cyan)。
-     * 「通知」は azure と並ぶと見分けが付かないので、緑寄りの cyan にしてある
+     * 状態の色も Pico の色見本の段から選ぶ (録画中 red・成功 jade・注意 amber・案内 cyan)。
+     * 「案内」は azure と並ぶと見分けが付かないので、緑寄りの cyan にしてある
      *
      * **状態の色は状態にだけ使い、ふつうの状態には付けない。**
      * 以前は予約済み(青)・視聴可能(緑)・取消(赤枠)が行ごとに並んでいて、
-     * 一覧を開くと色の列が3本立ち、どこを見ればよいのか分からなくなっていた。
-     * ふつうの状態は地の色に混ぜた淡いバッジにして、目は録画中の赤だけに行くようにする
+     * 一覧を開くと色の列が 3 本立ち、どこを見ればよいのか分からなくなっていた。
+     * ふつうの状態は出さず (読み上げだけ)、目は録画中の赤だけに行くようにする
      */
   --dp-rec: #d93526; /* red-500 */
   --dp-ok: #00895a; /* jade-500 */
@@ -176,6 +184,8 @@
   --dp-on-video-danger: #ff8a7a;
   --dp-video-panel: #17191e;
   --dp-video-menu: color-mix(in srgb, var(--dp-video-panel) 75%, transparent);
+  /* 映像の上のメニュー・音量・実況に書く欄の影。近い影と遠い影の 2 段 */
+  --dp-video-shadow: 0 2px 6px rgb(0 0 0 / 0.35), 0 18px 40px rgb(0 0 0 / 0.45);
   /*
      * つまみ (再生位置のバー・音量) の入れたぶん。**ほかの所と同じ主の色 (azure-550 `#0172ad`) を 80% に透かす**
      * (色はそろえ、太いカプセルで広く塗っても映像が透けて重くならないように)。
@@ -186,6 +196,12 @@
   --dp-video-fill: rgb(1 114 173 / 0.8);
   --dp-video-veil: rgb(0 0 0 / 0.6);
   --dp-video-veil-strong: rgb(0 0 0 / 0.8);
+}
+/* 指で押す端末の件は 72px (低い行は押したつもりの隣が開いた。docs/design.md の「何行かある一覧」) */
+@media (pointer: coarse) {
+  :root {
+    --dp-item-h: 4.5rem;
+  }
 }
 /*
  * テーマごとの色。**明るいほうの値は Pico の色見本 (pico.colors.css の 50〜950 の段) から選ぶ。**
@@ -232,7 +248,7 @@
     0 1px 2px rgb(24 28 37 / 0.08), 0 2px 8px rgb(24 28 37 / 0.06);
   --dp-shadow-pop:
     0 4px 12px rgb(24 28 37 / 0.08), 0 16px 32px -8px rgb(24 28 37 / 0.16);
-  /* 隙間を詰めて並ぶ浮いた面どうし (番組表のヘッダー・操作の1行・局名)。遠い影が隣の面に掛からない近い影だけ */
+  /* 隙間を詰めて並ぶ浮いた面どうし (番組表のヘッダー・操作の 1 行・局名)。遠い影が隣の面に掛からない近い影だけ */
   --dp-shadow-tight: 0 1px 3px rgb(24 28 37 / 0.12);
   --dp-backdrop: rgb(24 28 37 / 0.16);
   --pico-form-element-background-color: #fff;
@@ -373,11 +389,11 @@
 .mine-line::before {
   content: "";
   display: inline-block;
-  width: 2px;
+  width: var(--dp-mark);
   height: 1em;
   margin-inline-end: 0.3em;
   vertical-align: -0.125em;
-  border-radius: 1px;
+  border-radius: var(--dp-mark);
   background: var(--mine-line, var(--pico-primary));
 }
 
@@ -557,6 +573,16 @@ html[data-stage-fullscreen] body {
   background: var(--dp-video);
 }
 /*
+ * **ダイアログ (`showModal()` で開いた `<dialog>`) を開いている間は、後ろのページを巻かない。**
+ * Esc・背景のクリック・`closedby` で閉じても `:modal` が外れるので、ひとりでに戻る (JS は要らない)。
+ * スクロールバーが消えて中身が横にずれないよう、その幅は空けたままにする (`scrollbar-gutter`)。
+ * 舞台を広げている間の指定 (上) とは、どちらも止めるだけなので重なっても食い違わない
+ */
+html:has(dialog:modal) {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+/*
  * コード (<pre>)。Pico のコードの部品は読まないので、字は素の等幅。文章の決まり (typography) が
  * 付ける字の色と太さだけ外し、周り (注記・エラー) に合わせる
  */
@@ -593,21 +619,16 @@ section {
   margin-bottom: 0;
 }
 /*
- * 文字の大きさは html の 16px を据え置いたまま、小さい側を一段上げてある。
- * 1280px の画面で本文・表・注記が 0.75〜0.9rem だと詰まって見えた。
+ * 見出しの大きさ。画面の見出し (`h1`) と小見出し (`h2`・`h3`) の 2 段だけ。表は本文と同じ 16px
+ * (1280px の画面で表・注記が 0.75〜0.9rem だと詰まって見えた)。
  * **番組表のマスは各画面の <style> で大きさを決めている** ので、ここを変えても動かない
  */
 h1 {
   font-size: var(--dp-text-xl);
 }
-h2 {
-  font-size: 1.25rem;
-}
+h2,
 h3 {
   font-size: var(--dp-text-lg);
-}
-table {
-  font-size: 0.95rem;
 }
 th,
 td {
@@ -651,20 +672,17 @@ thead th {
   min-width: 0;
 }
 /*
- * **進み具合のバー** (エンコード・スキャン・ロゴの取得・番組表集め)。値が変わったら
- * なめらかに伸ばす (Pico の 0.15 秒より少し長く)。**動いているあいだ** (`.running`。付けるのは
- * 呼ぶ側 — `JobProgress` など) は、伸びたところの上に光の筋を流す (流すのはファイルの最後)。
+ * **進み具合のバー** (エンコード・スキャン・ロゴの取得・番組表の取得)。値が変わったら
+ * なめらかに伸ばす (`--dp-duration`)。**動いているあいだ** (`.running`。付けるのは
+ * 呼ぶ側。`JobProgress` など) は、伸びたところを明るさで脈打たせる (動かすのはファイルの最後)。
  * 長さの分からないもの (値の無いバー) は Pico のまま (左右に流れる)
  */
 progress[value]::-webkit-progress-value {
   transition: inline-size var(--dp-duration) var(--dp-ease);
 }
 @keyframes progress-shine {
-  from {
-    background-position: -100% 0;
-  }
-  to {
-    background-position: 200% 0;
+  50% {
+    opacity: 0.7;
   }
 }
 /* 走っている取り込み・スキャン・ロゴや番組表の取得の状態と記録 */
@@ -698,7 +716,7 @@ progress[value]::-webkit-progress-value {
 }
 
 /*
- * 1つのことだけを言う画面 (断られた・無かった・ログアウトした・テレビのペアリング)。
+ * 1 つのことだけを言う画面 (断られた・無かった・ログアウトした・テレビのペアリング)。
  * **枠で囲まず、見出し・文・ボタンを左に揃えて置く。** 真ん中の小さなカードに入れていた頃は、
  * 文が数文字ずつで折り返して読みにくかった。読みやすい幅 (32rem) で止め、画面の上のほうに置く
  */
@@ -741,12 +759,37 @@ progress[value]::-webkit-progress-value {
   background: radial-gradient(closest-side, var(--dp-glow), transparent);
   pointer-events: none;
 }
+/*
+ * **空の状態** (`.empty-state`。一覧に何も無いとき。docs/design.md の「見せる画面」)。一覧の場所の真ん中に、
+ * 太字の一言 (`.bold`)・次にすることの案内 (`.small.muted`)・ボタン (`.actions`) を縦に並べる。
+ * 隅に一言だけでは、壊れているのか空なのか読めない。
+ * まだ何も無くて次にすることを案内するときは `.glow` を足す。絞り込んで当てはまらなかっただけのときは足さない
+ */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--dp-space-2);
+  padding: 3rem var(--dp-space-4);
+  text-align: center;
+}
+.empty-state p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.empty-state .actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--dp-space-2);
+  margin-top: var(--dp-space-2);
+}
 
 /*
- * ---- 番組表の外枠 (`.guide-frame`) と操作の1行 (`.guide-bar`) ----
- * 番組表 (`guide/+page.svelte`) と、ほかの画面から移る途中の姿 (`GuidePending`) で同じにする — 着いたときに表の位置が飛ばない。
+ * ---- 番組表の外枠 (`.guide-frame`) と操作の 1 行 (`.guide-bar`) ----
+ * 番組表 (`guide/+page.svelte`) と、ほかの画面から移る途中の姿 (`GuidePending`) で同じにする。着いたときに表の位置が飛ばない。
  * 本文の余白 (`--dp-gutter`) を打ち消して端から端まで使い、高さも同じぶん足す。広い形は `+layout.svelte` の `FILLED` から `%` で降ろす。
- * **スマホの形だけ `%` で降ろせない** (途中の入れ物に高さが決まっておらず、`%` が解決しない)。そこは `svh` で採る —
+ * **スマホの形だけ `%` で降ろせない** (途中の入れ物に高さが決まっておらず、`%` が解決しない)。そこは `svh` で採る。
  * `svh` だけが見えている範囲を超えない (`vh` と `dvh` は実機の PWA でアドレスバーの高さぶん超えた)。
  * 画面の高さから上のノッチを引き、ページごとではなく表だけを動かす (下のタブは表の上に浮くので引かない。この先の `--guide-float-h` の所)
  */
@@ -758,7 +801,7 @@ progress[value]::-webkit-progress-value {
     calc(-1 * var(--dp-gutter));
   height: var(--page-h);
 }
-/* 1行に収める。表との間に線は引かない (表の頭の局の行が区切りになる) */
+/* 1 行に収める。表との間に線は引かない (表の頭の局の行が区切りになる) */
 .guide-bar {
   display: flex;
   flex: none;
@@ -771,7 +814,7 @@ progress[value]::-webkit-progress-value {
   flex: none;
 }
 /*
- * **ヘッダーの下に貼り付く操作の1行は、ヘッダーと同じ角丸の面** (広い形の番組表の `.guide-bar`。ほかの画面の絞り込みは
+ * **ヘッダーの下に貼り付く操作の 1 行は、ヘッダーと同じ角丸の面** (広い形の番組表の `.guide-bar`。ほかの画面の絞り込みは
  * 広い形では右のサイドバーに入る。docs/design.md の「浮かせ方」)。上端では平らで、巻いて中身が裏に入ると
  * 面と近い影 (`--dp-shadow-tight`) が出る。時間の軸は表の箱の `--guide` (`guide/+page.svelte` も同じ動きを使う)。
  * 使う側は `@supports (animation-timeline: scroll())` の中で面と影を消してから動かす (ヘッダーと同じ)。
@@ -790,14 +833,14 @@ progress[value]::-webkit-progress-value {
 }
 /*
  * **広い形 (スマホの形でないとき) では表がヘッダーの裏まで伸びる** (docs/design.md の「浮かせ方」。番組表の `.grid-box`)。
- * 操作の1行はヘッダーの下端 (`--dp-header-bottom`) に付け、高さを決めておく (`--guide-bar-h`)。
- * 表の頭 (局名の行が貼り付く所) はその下端 `--guide-head`。マスはヘッダーと操作の1行の裏を流れる。
- * 1行の中身はどれも小さいボタンの高さなので、高さは字の大きさや押す的の大きさ (`--dp-btn-h-sm`) から決まる。
- * 1 行の面は、ほかの画面の操作の1行と同じくヘッダーの下 `--dp-bar-gap` に来る (箱の頭は `--dp-fill-top`)
+ * 操作の 1 行はヘッダーの下端 (`--dp-header-bottom`) に付け、高さを決めておく (`--guide-bar-h`)。
+ * 表の頭 (局名の行が貼り付く所) はその下端 `--guide-head`。マスはヘッダーと操作の 1 行の裏を流れる。
+ * 1 行の中身はどれも小さいボタンの高さなので、高さは字の大きさや押す的の大きさ (`--dp-btn-h-sm`) から決まる。
+ * 1 行の面は、ほかの画面の操作の 1 行と同じくヘッダーの下 `--dp-bar-gap` に来る (箱の頭は `--dp-fill-top`)
  */
 :where(html:not([data-phone])) .guide-frame {
   /*
-   * 操作の1行は、ヘッダーと同じ角丸の面 (`--guide-bar-gap` 離して、中に `--guide-bar-pad` の余白)。
+   * 操作の 1 行は、ヘッダーと同じ角丸の面 (`--guide-bar-gap` 離して、中に `--guide-bar-pad` の余白)。
    * 面の下にも同じだけ空けて、局名の行はその下に付く
    */
   --guide-bar-gap: var(--dp-bar-gap);
@@ -841,7 +884,7 @@ progress[value]::-webkit-progress-value {
     animation-range: 0 1.5rem;
   }
 }
-/* 768px より狭い画面では操作の1行の中を詰める (浮かせ方は下の「スマホの形」) */
+/* 768px より狭い画面では操作の 1 行の中を詰める (浮かせ方は下の「スマホの形」) */
 @media (max-width: 767.98px) {
   .guide-bar {
     padding-inline: var(--dp-space-2);
@@ -851,34 +894,56 @@ progress[value]::-webkit-progress-value {
   }
 }
 /*
- * **スマホの形 (下のタブがある形) では、ほかの画面の操作の1行と同じく、下のタブのすぐ上にカプセルで浮かせる**
- * (docs/design.md の「浮かせ方」。ホームの `.t-toolbar`・ルールの `.rules-bar`・設定の `.jump` と同じ形)。
- * **表は画面の下の端まで伸ばし、この1行と下のタブは表の上に浮かせる。** 表を読んでいる間は下のタブと一緒に引っ込む
+ * **スマホの形 (下のタブがある形) では、ほかの画面の操作の 1 行と同じく、下のタブのすぐ上にカプセルで浮かせる** (下の `.dock`)。
+ * **表は画面の下の端まで伸ばし、この 1 行と下のタブは表の上に浮かせる。** 表を読んでいる間は下のタブと一緒に引っ込む
  * (`+layout.svelte` の `data-retract`。表の箱の縦の巻き取りで出し入れする)。表の箱の大きさは出し入れで変わらないので、
  * 巻いた位置も中身も動かない。浮いているものに隠れるぶん (`--guide-float-h`) は表の最後の下に空ける (`guide/+page.svelte` の `.rows`)
  */
 /* スマホの形 (`#lib/phone-form.ts`。`<html data-phone>`) */
 :where(html[data-phone]) .guide-frame {
   --page-h: calc(100svh - env(safe-area-inset-top));
-  /* 下のタブ + 1行の下の隙間 + 1行の上下の余白 + ボタンの高さ + 1行の上の隙間 (下の `.guide-bar` の寸法と対) */
+  /* 下のタブ + 1 行の下の隙間 + 1 行の上下の余白 + ボタンの高さ + 1 行の上の隙間 (下の `.guide-bar` の寸法と対) */
   --guide-float-h: calc(
-    var(--dp-tabbar, 0px) + 0.375rem + 0.5rem + var(--dp-btn-h-sm) + 0.375rem
+    var(--dp-tabbar, 0px) + var(--dp-dock-gap) + 0.5rem + var(--dp-btn-h-sm) +
+      var(--dp-dock-gap)
   );
   margin-bottom: calc(-1 * (var(--dp-gutter) + var(--dp-tabbar, 0px)));
 }
 :where(html[data-phone]) .guide-bar {
   position: fixed;
-  inset-inline: 0.75rem;
-  bottom: calc(var(--dp-tabbar, 0px) + 0.375rem);
+  inset-inline: var(--dp-dock-inset);
   z-index: 30;
   padding: 0.25rem 0.5rem;
+}
+
+/*
+ * ---- 下のタブのすぐ上に浮かぶ操作の 1 行 (`.dock`。スマホの形だけ) ----
+ * docs/design.md の「浮かせ方」。ホームの `.t-toolbar`・番組表の `.guide-bar`・切り抜きの `.c-bar`・ルールの `.rules-bar`・
+ * 設定の節へ飛ぶ行 `.jump` と節の操作 `.section-bar` で同じ形にする。
+ * **操作の層の面 (`--dp-float`) と影のカプセルで、下のタブから `--dock-gap` 上に置く。** `--dock-gap` は使う側が上書きする値で、無ければ既定の `--dp-dock-gap`。
+ * 別の 1 行の上に積むもの (設定の節の操作) は `--dock-gap` に下の 1 行のぶんを足す。置き方 (`fixed` か `sticky`)・左右の位置・中の並べ方は使う側で。
+ * 浮いた面なので、中の主のボタンは浮かせず太字だけ (下の「浮いたものの中」)。
+ * 読んでいる間は下のタブと一緒に引っ込む (`+layout.svelte` の `data-retract`)。キーボードで中に触っている間は引っ込めない
+ */
+:root {
+  /* 下のタブとの隙間と、窓の端からの離れ (下のタブと同じ) */
+  --dp-dock-gap: 0.375rem;
+  --dp-dock-inset: 0.75rem;
+}
+:where(html[data-phone]) .dock {
+  --dp-btn-solid: transparent;
+  --dp-btn-solid-hover: var(--dp-btn-tonal-hover);
+  --dp-btn-lift: none;
+  bottom: calc(var(--dp-tabbar, 0px) + var(--dock-gap, var(--dp-dock-gap)));
   border-radius: var(--dp-radius-full);
   background: var(--dp-float);
   box-shadow: var(--dp-shadow-pop);
   transition: transform var(--dp-duration-move) var(--dp-ease-spring);
 }
-:where(html[data-phone]) [data-retract] .guide-bar:not(:has(:focus-visible)) {
-  transform: translateY(calc(var(--dp-tabbar, 0px) + 0.375rem + 100%));
+:where(html[data-phone]) [data-retract] .dock:not(:has(:focus-visible)) {
+  transform: translateY(
+    calc(var(--dp-tabbar, 0px) + var(--dock-gap, var(--dp-dock-gap)) + 100%)
+  );
 }
 
 /* ---- 文字 ---- */
@@ -916,7 +981,7 @@ progress[value]::-webkit-progress-value {
 /*
  * 放送から来た字は、全角の英数字・記号 (ＢＳ・ＴＶ・！ など。EPG の字はほとんど全角で来る) を詰めて組む (`palt`)。
  * Denpa Font の palt は U+FF01–FF5E だけを詰め、既定の送り幅 (1em) は変えない。保存してある字は変えず、見え方だけ。
- * **字幕 (canvas) とデータ放送には当てない** — ARIB が字の間と区画を決めている。
+ * **字幕 (canvas) とデータ放送には当てない**。ARIB が字の間と区画を決めている。
  * どちらも `.broadcast` の外で描く (`caption-draw.ts`・`DataBroadcast.svelte`)
  */
 .broadcast {
@@ -1098,7 +1163,7 @@ input[type="checkbox"]:not([role="switch"]) {
 }
 /*
  * **浮いたものの中** (メニュー・番組の詳細などの `popover`・ダイアログ) **と件の面** (`.item`)。中の主のボタンは面も影も持たず、太字だけ。
- * 狭い画面でだけ浮くもの (`RuleDraft` の `.draft`・スマホの形の操作の1行) は、それぞれの <style> で同じ値を置く
+ * 狭い画面でだけ浮くものも同じ値を置く (`RuleDraft` の `.draft` はその <style> で、スマホの形の操作の 1 行は上の `.dock` で)
  */
 :where(dialog, [popover], .modal-box, .item) {
   --dp-btn-solid: transparent;
@@ -1127,7 +1192,80 @@ input[type="checkbox"]:not([role="switch"]) {
   background: var(--dp-item-hover);
 }
 /*
- * **入っている切り替え (`aria-pressed="true"`) は、オンの印の主の色の短い下線と字** (番組表の「サブch」)。
+ * **件を並べる箱** (`.item-list`。`<ul>` か `<div>`)。縦に積み、件の間は `--dp-list-gap`。Pico が `ul`・`li` に付ける余白と印は外す。
+ * 件の高さは `--dp-item-h` (64px。指で押す端末では 72px) を使う側で `min-height` に置く
+ */
+.item-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dp-list-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.item-list > li {
+  margin: 0;
+  list-style: none;
+}
+/*
+ * **日付の見出し** (`.day-head`。録画の一覧と切り抜き)。ふだんは平ら。貼り付いて行がその裏を流れるときだけ、
+ * ヘッダーと同じ半透明の面と影の小さなカプセルで浮かせる (docs/design.md の「浮かせ方」)。地の色で塗ると、半透明のヘッダーの下で塗った所だけが浮いて見えた。
+ * 中は `.day-head-chip` に日の名前 (`.day-head-name`) と日付 (`.day-head-date`)。
+ * 貼り付く位置は、いちばん上の見出しの置かれた位置 (main の頭の空き) と同じにし、巻き始めても動かない (上端ではカプセルにならない)
+ */
+.day-head {
+  --day-head-gap: 0.5rem;
+  position: sticky;
+  top: var(--day-head-gap);
+  z-index: 3;
+  width: fit-content;
+  margin: 0.5rem 0 0.25rem;
+  color: var(--dp-muted);
+  font-size: var(--dp-text-xs);
+  font-weight: var(--dp-weight-bold);
+  container-type: scroll-state;
+}
+.day-head-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--dp-radius-full);
+  background: var(--dp-float);
+  box-shadow: var(--dp-shadow-pop);
+  transition:
+    background-color var(--dp-duration) var(--dp-ease),
+    box-shadow var(--dp-duration) var(--dp-ease);
+}
+/* 貼り付いたかは `scroll-state(stuck: top)` で見る。知らないブラウザは、いつもカプセル */
+@supports (container-type: scroll-state) {
+  .day-head-chip {
+    background: transparent;
+    box-shadow: none;
+  }
+  @container scroll-state(stuck: top) {
+    .day-head-chip {
+      background: var(--dp-float);
+      box-shadow: var(--dp-shadow-pop);
+    }
+  }
+}
+.day-head-name {
+  color: var(--pico-color);
+}
+.day-head-date {
+  font-weight: var(--dp-weight);
+}
+/* 広い形 (`#lib/phone-form.ts`) では浮いたヘッダーの下に、操作の 1 行どうしと同じ隙間 (`--dp-bar-gap`) 離して貼り付ける。スマホの形は上の安全域 (ノッチ) の少し下 */
+:where(html:not([data-phone])) .day-head {
+  --day-head-gap: var(--dp-bar-gap);
+  top: calc(var(--dp-header-bottom) + var(--day-head-gap));
+}
+:where(html[data-phone]) .day-head {
+  top: calc(env(safe-area-inset-top, 0px) + var(--day-head-gap));
+}
+/*
+ * **入っている切り替え (`aria-pressed="true"`) は、オンの印の主の色の短い下線と字** (番組表の「サブ ch」)。
  * 選んでいるもの (字の幅いっぱいの下線) とは線の長さで分ける。塗らない。浮かせもしない (押すと何かが起きるボタンとは見分ける)
  */
 :where(button, a.button)[aria-pressed="true"]:where(
@@ -1139,7 +1277,43 @@ input[type="checkbox"]:not([role="switch"]) {
   background-image: linear-gradient(var(--pico-primary), var(--pico-primary));
   background-repeat: no-repeat;
   background-position: center bottom 0.2rem;
-  background-size: 1rem 2px;
+  background-size: 1rem var(--dp-mark);
+}
+/*
+ * **選んでいるものの字の幅いっぱいの下線** (`.pick-line`。横に並ぶチップ・日付。docs/design.md の「印の意味」)。
+ * 選んでいる項目 (`aria-pressed="true"`・`aria-current`・`.selected`) は主の色の太字と、疑似要素 1 本の下線
+ * (`text-decoration` だと名前と数 (`.num`) に別々の線が付き、2 本に切れて見えた)。
+ * 線の両端と下からの位置は項目の余白に合わせて `--pick-inset`・`--pick-bottom` で変える。
+ * 入っている切り替えの短い下線 (上の `aria-pressed`) は引かない (1 つの部品に線は 1 本)。
+ * 選び直すと前の場所から滑る並び (`.segmented` など。下の「滑る印」) は、並びの疑似要素で引くのでこれは使わない
+ */
+.pick-line {
+  position: relative;
+}
+.pick-line:is(
+  [aria-pressed="true"],
+  [aria-current]:not([aria-current="false"]),
+  .selected
+) {
+  --pico-color: var(--dp-primary-text);
+  background-image: none;
+  color: var(--dp-primary-text);
+  font-weight: var(--dp-weight-bold);
+}
+.pick-line:is(
+    [aria-pressed="true"],
+    [aria-current]:not([aria-current="false"]),
+    .selected
+  )::after,
+.chip:has(input:checked)::after {
+  content: "";
+  position: absolute;
+  inset-inline: var(--pick-inset, 0.75rem);
+  bottom: var(--pick-bottom, 0.2rem);
+  height: var(--dp-mark);
+  border-radius: var(--dp-mark);
+  background: var(--pico-primary);
+  pointer-events: none;
 }
 /* リンクのままボタンの見た目にする (role="button" にするとリンクでなくなる)。<a class="button"> */
 a.button {
@@ -1290,7 +1464,7 @@ a.button {
 /*
  * **控えのボタンも字だけにする。** 一覧では行ごとに同じボタンが並ぶので、地の付いたボタンの列が
  * 縦に立つと番組名より目立つ。押せることは字の色・指を乗せたときの地・カーソルで分かる。
- * 押す的は 40px (観る画面の操作列と同じ物差し。`player/ControlButton.svelte`)。行の右に寄せる。
+ * 押す的は 40px (観る画面の操作バーと同じ物差し。`player/ControlButton.svelte`)。行の右に寄せる。
  * 削除・取消は控えた字の色にして、指を乗せたときだけ赤くする。主のボタン (追っかけ・削除の「確定」) は件の面の上なので太字だけ (上の「浮いたものの中」)
  */
 .row-actions {
@@ -1395,8 +1569,8 @@ a.button {
   position: absolute;
   inset-inline: 0.65rem;
   bottom: 0.2rem;
-  height: 2px;
-  border-radius: 1px;
+  height: var(--dp-mark);
+  border-radius: var(--dp-mark);
   background: var(--pico-primary);
   pointer-events: none;
 }
@@ -1432,8 +1606,8 @@ a.button {
     left: calc(anchor(left) + 0.65rem);
     right: calc(anchor(right) + 0.65rem);
     bottom: calc(anchor(bottom) + 0.2rem);
-    height: 2px;
-    border-radius: 1px;
+    height: var(--dp-mark);
+    border-radius: var(--dp-mark);
     background: var(--pico-primary);
     pointer-events: none;
     transition:
@@ -1528,8 +1702,7 @@ a.button {
 /*
  * **幅を動かさない。** Pico の `aria-busy` は回るものを `::before` で*文字の前に
  * 足す*ので、押した瞬間にボタンが横に伸びる。行に並んだボタンはそれで**隣ごと
- * ずれて**、次に押す場所が変わってしまう (削除の聞き返しが2文字で揃えてあるのと
- * 同じ話。`arming.svelte.ts`)。
+ * ずれて**、次に押す場所が変わってしまう。
  *
  * 中身は**消さずに隠す**。場所を取ったままなので、ボタンの大きさは送信の前後で
  * 1px も変わらない。回るものはその上に重ねる
@@ -1637,7 +1810,7 @@ button.text-button:hover {
    * 開いているときだけ flex にする (閉じているときはブラウザの `display: none`)。
    * **引き金の側から、少し縮んだ透明な姿で開き、閉じるときは引っ込む。**
    * 閉じる間も描いておくため、`display` と最前面 (`overlay`) も一緒に移す (`allow-discrete`。
-   * 知らないブラウザはすぐ消える)。動かすのは transform と透明度だけ — `Menu` が JS で置くときに測る大きさは変わらない。
+   * 知らないブラウザはすぐ消える)。動かすのは transform と透明度だけ。`Menu` が JS で置くときに測る大きさは変わらない。
    * 並べる向きは閉じている間も持たせる。開いているときだけにすると、閉じる動きの間に一瞬横向きのメニューが見えた
    */
   flex-direction: column;
@@ -1748,8 +1921,8 @@ button.text-button:hover {
   position: absolute;
   inset-block: 0.5rem;
   left: 0;
-  width: 2px;
-  border-radius: 1px;
+  width: var(--dp-mark);
+  border-radius: var(--dp-mark);
   background: var(--pico-primary);
 }
 
@@ -1866,8 +2039,8 @@ button.text-button:hover {
       position: absolute;
       inset-block: 0.5rem;
       left: 0;
-      width: 2px;
-      border-radius: 1px;
+      width: var(--dp-mark);
+      border-radius: var(--dp-mark);
       background: var(--pico-primary);
     }
     select option:disabled {
@@ -1895,9 +2068,7 @@ button.text-button:hover {
   width: max-content;
   max-width: min(20rem, 90vw);
   background: var(--dp-video-menu);
-  box-shadow:
-    0 2px 6px rgb(0 0 0 / 0.35),
-    0 18px 40px rgb(0 0 0 / 0.45);
+  box-shadow: var(--dp-video-shadow);
   color: var(--dp-on-video);
 }
 @media (prefers-reduced-transparency: reduce) {
@@ -1914,8 +2085,8 @@ button.text-button:hover {
   position: absolute;
   inset-block: 0.5rem;
   left: 0;
-  width: 2px;
-  border-radius: 1px;
+  width: var(--dp-mark);
+  border-radius: var(--dp-mark);
   background: currentColor;
 }
 /* 映像の上に出す短い通知 (`StageNote`・追っかけの「続きは観る画面で」・ライブの「録画が始まったため、局を切り替えました」) */
@@ -1992,7 +2163,6 @@ dialog {
 }
 .modal-close ~ h2 {
   margin: 0 2.5rem 0 0;
-  font-size: var(--dp-text-lg);
 }
 .modal-actions {
   display: flex;
@@ -2014,8 +2184,10 @@ dialog {
   margin: 0;
 }
 /*
- * **狭い画面では下から出る一枚。** 中央に浮かせた箱だとボタンが2段に折れて、どれを押すのか探すことになった。
- * 下端に付けて角は上だけ丸め、ボタンは全幅で縦に積む。主のボタン (並びの最後) がいちばん上
+ * **狭い画面では下から出る一枚。** 下端に付けて角は上だけ丸める。
+ * ボタンは広い画面と同じ `.modal-actions` のまま (全幅にせず右に寄せて並べ、入りきらなければ折り返す)。
+ * 主のボタン (並びの最後) は下の段の右端に来る。全幅で縦に積んでいた頃は、録画の詳細のようにボタンが
+ * 5 つあると一枚がボタンで埋まり、中身が読めなかった
  */
 @media (max-width: 639.98px) {
   .modal-box {
@@ -2030,18 +2202,6 @@ dialog {
   }
   dialog > article.modal-box {
     margin-top: auto;
-  }
-  .modal-actions {
-    flex-direction: column-reverse;
-    align-items: stretch;
-  }
-  .modal-actions > *,
-  .modal-actions > form > button,
-  .modal-actions > * > :is(button, a.button) {
-    width: 100%;
-  }
-  .modal-actions :is(button, a.button) {
-    justify-content: center;
   }
 }
 
@@ -2120,9 +2280,6 @@ dialog[open] > article {
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--dp-space-2) var(--dp-space-3);
-}
-.section-head h2 {
-  font-size: var(--dp-text-lg);
 }
 .sections .fields {
   display: flex;
@@ -2223,7 +2380,7 @@ dialog[open] > article {
   margin: 0;
   padding: 0.15rem 0.55rem;
   border-radius: var(--dp-radius-full);
-  transition: background-color var(--dp-duration);
+  transition: background-color var(--dp-duration) var(--dp-ease);
   font-size: var(--dp-text-xs);
   line-height: 1.6;
   white-space: nowrap;
@@ -2249,12 +2406,38 @@ dialog[open] > article {
 .chip:hover {
   background-color: var(--dp-hover-soft);
 }
-/* 選んでいるものは塗らず、主の色の太字と字の幅いっぱいの下線 (ほかの選んでいるものと同じ) */
+/* 選んでいるものは塗らず、主の色の太字と字の幅いっぱいの下線。下線は `.pick-line` と同じ疑似要素 1 本 */
 .chip:has(input:checked) {
-  text-decoration: underline 2px var(--pico-primary);
-  text-underline-offset: 0.3em;
+  --pick-inset: 0.55rem;
+  --pick-bottom: 0.05rem;
   color: var(--dp-primary-text);
   font-weight: var(--dp-weight-bold);
+}
+
+/*
+ * **一覧と右の列** (`.with-side` と、右の列に付ける `.side-column`)。録画の一覧 (ホーム) と切り抜きで同じ。
+ * スマホの形は一覧だけ (右の列は出さない)、広い形は一覧と 20rem の右の列 (1600px からは 22rem)
+ */
+.with-side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.with-side > .side-column {
+  display: none;
+}
+:where(html:not([data-phone])) .with-side {
+  grid-template-columns: minmax(0, 1fr) 20rem;
+}
+:where(html:not([data-phone])) .with-side > .side-column {
+  display: flex;
+  padding-top: 0.25rem;
+}
+@media (min-width: 1600px) {
+  :where(html:not([data-phone])) .with-side {
+    grid-template-columns: minmax(0, 1fr) 22rem;
+  }
 }
 
 /*
@@ -2306,7 +2489,7 @@ dialog[open] > article {
   margin: 1.25rem 0 0.125rem;
   padding: 0 0.75rem;
   color: var(--dp-fg);
-  font-size: 0.8125rem;
+  font-size: var(--dp-text-sm);
   font-weight: var(--dp-weight-bold);
   line-height: 1.5;
   text-decoration: none;
@@ -2347,11 +2530,11 @@ dialog[open] > article {
   background: transparent;
   box-shadow: none;
   color: inherit;
-  font-size: 0.875rem;
+  font-size: var(--dp-text-sm);
   font-weight: var(--dp-weight);
   text-align: left;
   text-decoration: none;
-  transition: background-color var(--dp-duration);
+  transition: background-color var(--dp-duration) var(--dp-ease);
   position: relative;
 }
 .side-item:hover {
@@ -2379,8 +2562,8 @@ dialog[open] > article {
   position: absolute;
   inset-block: 0.625rem;
   left: 0;
-  width: 2px;
-  border-radius: 1px;
+  width: var(--dp-mark);
+  border-radius: var(--dp-mark);
   background: var(--pico-primary);
 }
 .side-item:has(> [aria-current]:not([aria-current="false"]))
@@ -2428,8 +2611,8 @@ dialog[open] > article {
     top: calc(anchor(top) + 0.625rem);
     bottom: calc(anchor(bottom) + 0.625rem);
     left: anchor(left);
-    width: 2px;
-    border-radius: 1px;
+    width: var(--dp-mark);
+    border-radius: var(--dp-mark);
     background: var(--pico-primary);
     pointer-events: none;
     transition:
@@ -2448,7 +2631,7 @@ dialog[open] > article {
   align-items: center;
   gap: 0.25rem;
   color: var(--dp-muted);
-  font-size: 0.75rem;
+  font-size: var(--dp-text-xs);
 }
 /* いちばん下に置くもの (状態・主のボタン)。線では分けず、余白で下に押す */
 .side-foot {
@@ -2508,15 +2691,12 @@ dialog[open] > article {
   :root:not([data-lite]) .flash {
     animation: flash var(--flash-for, 2.5s) linear both;
   }
+  /* 伸びたところを明るさで脈打たせる (透明度だけ。背景の位置は動かさない。docs/design.md 7 章) */
+  /* 片方の擬似要素を知らない画面が規則ごと捨てないよう、2 つに分ける */
   :root:not([data-lite]) progress.running[value]::-webkit-progress-value {
-    background-image: linear-gradient(
-      90deg,
-      transparent 0%,
-      rgb(255 255 255 / 0.35) 50%,
-      transparent 100%
-    );
-    background-repeat: no-repeat;
-    background-size: 40% 100%;
+    animation: progress-shine var(--dp-shine) ease-in-out infinite;
+  }
+  :root:not([data-lite]) progress.running[value]::-moz-progress-bar {
     animation: progress-shine var(--dp-shine) ease-in-out infinite;
   }
   :root:not([data-lite]) .skeleton::after {
@@ -2528,7 +2708,7 @@ dialog[open] > article {
  * **動きを減らす設定の端末では、全部止めて終わった姿を見せる。** 移り変わりは時間のトークンを 0 に
  * (動き続けるものは、上でもう足していない)。
  * 見せる画面の、巻いた量で組み上がる飾り (docs/design.md の「見せる画面」) を足すときは、ここで `animation: none`
- * にして組み上がった後の素の姿で見せる — 時間のトークンは巻いた量の動きには効かない。
+ * にして組み上がった後の素の姿で見せる。時間のトークンは巻いた量の動きには効かない。
  * 浮くもの (ヘッダーと操作の 1 行) は外さない。Pico がすぐ終わらせて、いつも浮いた形になる (「浮かせ方」)。
  * 上の決まりに勝つよう、ファイルの最後に置く
  */

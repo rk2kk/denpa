@@ -7,10 +7,10 @@
  *     bml.listens('DataButtonPressed');
  *     bml.destroy();
  *
- * - 映像は動かさない。映像の object の場所を `onVideoRect` で知らせ、置くのは呼び手
+ * - 映像は動かさない。映像の object の場所を `onVideoRect` で知らせ、置くのは呼ぶ側
  * - 文書は自前の XML パーサ → 中身の木 → Shadow DOM の中の絶対配置の div ([render.ts](render.ts))
  * - スクリプトは自前の VM ([vm.ts](vm.ts))。イベントは 1 つずつ順に動かす
- * - **ページを握るのは 1 つの仕事 (タスクとそれに続くマイクロタスク) で 5ms まで** ([budget.ts](budget.ts))。
+ * - **ページを占めるのは 1 つの仕事 (タスクとそれに続くマイクロタスク) で 5ms まで** ([budget.ts](budget.ts))。
  *   スクリプト・描き直し・約束の続きは全部その下で動かし、休みなく回り続ける文書は止める
  *
  * 時計は `clock` (録画は再生位置から放送の時刻を出す)。無ければ TOT + 経過時間。
@@ -61,6 +61,7 @@ import {
   STARTUP_COMPONENT,
   STARTUP_MODULE,
   unknownScheme,
+  withoutQuery,
 } from "./resources";
 import { Sound } from "./sound";
 import {
@@ -99,20 +100,20 @@ export interface BmlOptions {
   receiver?: Partial<ReceiverInfo>;
   /** 映像の object の場所 (画面の座標)。映像が無い・隠れていれば null */
   onVideoRect?: (rect: Rect | null, plane: Plane) => void;
-  /** 文書が「出ている」と言っているか (body の invisible の逆) */
+  /** 文書が見える状態か (body の invisible の逆) */
   onVisible?: (visible: boolean) => void;
   /** 待っているモジュールがあるか (データ取得中) */
   onReceiving?: (receiving: boolean) => void;
   /** 文書が替わった */
   onLoad?: (plane: Plane) => void;
   /**
-   * 文書が別の局へ選局したい (epgTune)。**選局するのは呼び手** — 受けたら true (文書はここで
+   * 文書が別の局へ選局したい (epgTune)。**選局するのは呼ぶ側。** 受けたら true (文書はここで
    * 閉じる)、できなければ false (文書には失敗を返す)。無ければいつも失敗。
    * `transportStreamId` は分からなければ null (録画など)
    */
   onTune?: (service: Service) => boolean;
   /**
-   * Hybridcast (startAITControlledApp)。**開くのは呼び手** — `ready` は開けるか (双方向がオンで、
+   * Hybridcast (startAITControlledApp)。**開くのは呼ぶ側。** `ready` は開けるか (双方向がオンで、
    * AIT にアプリがある)、`start` は開く (開けたら true)。`hint` は文書が渡した数 (どのアプリかの
    * 手がかり)。無ければ AIT の問い合わせに 0 と答え、起動は失敗を返す。
    * `startFrom` は文書が XML の AIT の URL を渡したとき (電波に AIT が無い局。`browser.ts` の `canFetchAit`)
@@ -129,7 +130,7 @@ export interface BmlOptions {
    */
   opened?: () => boolean;
   log?: (message: string) => void;
-  /** ページを握る長さの決まり (既定は [budget.ts](budget.ts) の DEFAULT_BUDGET。テストで縮める) */
+  /** ページを占める長さの決まり (既定は [budget.ts](budget.ts) の DEFAULT_BUDGET。テストで縮める) */
   budget?: Partial<BudgetLimits>;
 }
 
@@ -138,7 +139,7 @@ export interface Bml {
   key(code: number, down: boolean): void;
   /** 今の文書がその種類の beitem を subscribe しているか */
   listens(type: string): boolean;
-  /** 押したままのキーを忘れる (窓のフォーカスが外れて keyup が来ないとき) */
+  /** 押したままのキーを放したことにする (窓のフォーカスが外れて keyup が来ないとき) */
   releaseKeys(): void;
   /** いまの局と番組 (放送の programInfo)。Hybridcast のアプリに渡す */
   program(): ProgramInfoMessage | null;
@@ -156,7 +157,7 @@ export interface Bml {
   destroy(): void;
 }
 
-/** AribKeyCode (STD-B24 第二分冊 付属2 表5-9) */
+/** AribKeyCode (STD-B24 第二分冊 付属 2 表 5-9) */
 const KEY = {
   up: 1,
   down: 2,
@@ -174,7 +175,7 @@ const KEY = {
   data2: 26,
 } as const;
 
-/** キーの組 (TR-B14 第二分冊 5.3.1 表5-5)。used-key-list で受けるかを決める */
+/** キーの組 (TR-B14 第二分冊 5.3.1 表 5-5)。used-key-list で受けるかを決める */
 function keyGroup(code: number): string | null {
   if (code >= KEY.up && code <= KEY.right) return "basic";
   if (code === KEY.enter || code === KEY.back) return "basic";
@@ -183,7 +184,7 @@ function keyGroup(code: number): string | null {
   return null;
 }
 
-/** accesskey の字 (付属2 5.4.2.3) */
+/** accesskey の字 (付属 2 5.4.2.3) */
 const ACCESS_KEYS: Record<number, string> = {
   [KEY.back]: "X",
   [KEY.blue]: "B",
@@ -197,7 +198,7 @@ const ACCESS_KEYS: Record<number, string> = {
 /*
  * 長く流し続けても増え続けない歯止め。ライブはモジュールのバージョンの更新・イベントメッセージ・TOT が
  * 止まらずに来る (NHK は 10 分で DII の更新 48 回・イベントメッセージ 4234 件)。文書が
- * 後始末を忘れても、エンジンが持つものは一定に収める
+ * 後始末をしなくても、エンジンが持つものは一定に収める
  */
 /** 待っているイベントの上限 (溢れた受け手は捨てる) */
 export const MAX_QUEUE = 512;
@@ -241,8 +242,8 @@ interface Timer {
 }
 
 /**
- * 通信で取ったものが BML の文書か。`text/X-arib-bml` か、型を付けずに返すサーバ向けに頭に `<bml` が
- * あるか (BML でないもの — 案内の HTML など — を組んで「読めない」から入口へ出直さないため)
+ * 通信で取ったものが BML の文書か。`text/X-arib-bml` か、型を付けずに返すサーバ向けに先頭に `<bml` が
+ * あるか (案内の HTML など BML でないものを組んで「読めない」から入口へ出直さないため)
  */
 function looksLikeBml(file: CarouselFile): boolean {
   if (file.type.type === "text" && file.type.subtype === "x-arib-bml")
@@ -334,7 +335,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
   /** 文書を読み込んでいる間。外から来るイベントは捨てる (onload より前に受け手を動かさない) */
   private preparing = false;
   private readonly budget: Budget;
-  /** 暴れたので止めた。このエンジンではもう文書を出さない */
+  /** 文書が休みなく動き続けたので止めた (epgTune で選局を任せたときも)。このエンジンではもう文書を出さない */
   private halted = false;
   /** 続きを次のタスクに回してある (pump・描き直し) */
   private deferred = false;
@@ -374,7 +375,8 @@ class Engine implements DomHost, BrowserHost, RenderHost {
   feed(message: ResponseMessage): void {
     if (this.destroyed) return;
     // 届いたものを捌くのもエンジンの仕事に数える (ライブは止まらずに流れ込み続ける。
-    // モジュールをデコードする・受け手を探すのを数えないと、10 秒のうち 4 割の見張りから漏れる)
+    // モジュールをデコードする・受け手を探すのを数えないと、「10 秒のうち 4 割を超えて動いたら止める」
+    // 決まり (budget.ts) の勘定から漏れる)
     this.work(() => {
       for (const event of this.resources.feed(message)) this.react(event);
     });
@@ -500,7 +502,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
         });
       }
     }
-    // 受け手が文書を替えなければ、入口から出直す (TR-B14 第二分冊 表5-11)
+    // 受け手が文書を替えなければ、入口から出直す (TR-B14 第二分冊 表 5-11)
     this.enqueue({
       kind: "native",
       token: this.token,
@@ -537,7 +539,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
 
   /**
    * 入口を始めてよいか。開いていれば始める。開いていなければ、入口の部品に自動起動の指定
-   * (`auto_start_flag`) があるときだけ — テレビは選局したら入口を裏で動かす (`opened` の説明)
+   * (`auto_start_flag`) があるときだけ始める。テレビは選局したら入口を裏で動かす (`opened` の説明)
    */
   private mayStart(): boolean {
     if (this.options.opened?.() !== false) return true;
@@ -563,7 +565,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     void this.startup();
   }
 
-  /** ModuleUpdated の beitem に、DII と PMT の変わり目を知らせる (付属2 表5-11 の status) */
+  /** ModuleUpdated の beitem に、DII と PMT の変わり目を知らせる (付属 2 表 5-11 の status) */
   private moduleUpdated(): void {
     for (const beitem of this.beitems("ModuleUpdated"))
       this.checkModule(beitem, false);
@@ -762,7 +764,10 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     }
     // 入口の文書が読めない文書へ移ろうとしたなら、入口のまま止める (出直すと同じ遷移を
     // 繰り返して回り続ける)。そうでなければ入口から出直す
-    if (this.current?.replace(/[?#][\s\S]*$/, "") === `${ENTRY}/startup.bml`)
+    if (
+      this.current !== null &&
+      withoutQuery(this.current) === `${ENTRY}/startup.bml`
+    )
       return;
     setTimeout(() => {
       if (token === this.token && !this.destroyed) this.restart();
@@ -855,7 +860,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     const previous =
       this.current === null ? null : this.resources.resolve(this.current, null);
     const next = this.resources.resolve(path, null);
-    // 別の部品の文書へ移ったら lockModuleOnMemory で押さえたものを外す (TR-B14 第二分冊 表5-11)
+    // 別の部品の文書へ移ったら lockModuleOnMemory で押さえたものを外す (TR-B14 第二分冊 表 5-11)
     if (
       previous !== null &&
       next !== null &&
@@ -899,7 +904,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     this.screenLocked = false;
     this.renderer.draw(true);
 
-    // フォーカスは onload より前に当たるが、onfocus は onload の後 (付属1 5.1.3)
+    // フォーカスは onload より前に当たるが、onfocus は onload の後 (付属 1 5.1.3)
     const first = this.navIndex(0);
     if (first?.style().visible) {
       this.focusedElement = first;
@@ -1071,7 +1076,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     this.currentEvent = this.dom?.event({}) ?? null;
     this.screenLocked = false;
     this.draw();
-    // 続けて動かす。呼び出しを積み重ねないよう、一度手を放してから
+    // 続けて動かす。呼び出しを積み重ねないよう、マイクロタスクに回してから
     queueMicrotask(() => this.pump());
   }
 
@@ -1195,7 +1200,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
   stream(element: BmlElement, status: string): void {
     const type = (element.attr("type") ?? "").toLowerCase();
     if (type !== "audio/x-arib-aiff") {
-      // MNG は止めるとコマの位置が 0 に戻る (付属2 4.8.5.3 表4-27)
+      // MNG は止めるとコマの位置が 0 に戻る (付属 2 4.8.5.3 表 4-27)
       if (type === "image/x-arib-mng" && status.toLowerCase() === "stop")
         element.setAttr("streamposition", "0");
       element.setAttr("streamstatus", status);
@@ -1343,7 +1348,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
 
   /**
    * 同じことは 1 回だけ知らせる。覚えておく数には上限を置く (名前はスクリプトが組むので、
-   * 長く流すと際限なく増えうる。溢れたら忘れて、また 1 回ずつ知らせる)
+   * 長く流すと際限なく増えうる。溢れたら消して、また 1 回ずつ知らせる)
    */
   private report(key: string, message: string): void {
     if (this.reported.has(key)) return;
@@ -1527,7 +1532,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     const ref = this.moduleRef(module);
     if (ref === null) return Number.NaN;
     // Ex で押さえられるのは 0x40・0x50・0x60 の部品だけ。地上波 (TR-B14 第二分冊 5.12.6.9・2.3.6.1) も
-    // BS (TR-B15 第一分冊 10.3.3 表10-3「lockModuleOnMemoryEx() (tag values 0x40, 0x50, and 0x60)」) も
+    // BS (TR-B15 第一分冊 10.3.3 表 10-3「lockModuleOnMemoryEx() (tag values 0x40, 0x50, and 0x60)」) も
     // 同じ。受信機はこの 3 つと見ている部品の 4 つまでしか並べて取らない。0x61 などにあるモジュールは、
     // その部品の文書から lockModuleOnMemory で押さえる
     if (kind === "lockEx" && ![0x40, 0x50, 0x60].includes(ref.component)) {
@@ -1653,7 +1658,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
   }
 
   finished(element: BmlElement, position: number): void {
-    // 回し終えたら pause にして、出しているコマを streamposition に (付属2 4.8.5.3)
+    // 回し終えたら pause にして、出しているコマを streamposition に (付属 2 4.8.5.3)
     element.setAttr("streamposition", String(position));
     element.setAttr("streamstatus", "pause");
     this.drawSoon();
@@ -1689,7 +1694,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
     const mng = type === "image/x-arib-mng";
     // PNG・MNG の色は文書の CLUT で決まるので、文書ごとに作る
     // 問い合わせ (`?tsid=…`) は文書の名前の一部だが、CLUT は同じなので作り直さない
-    const page = this.current?.replace(/[?#][\s\S]*$/, "");
+    const page = this.current === null ? undefined : withoutQuery(this.current);
     const variant = png ? `png:${page}` : mng ? `mng:${page}` : "raw";
     const made = file.urls.get(variant);
     if (made !== undefined) return made;
@@ -1805,7 +1810,7 @@ class Engine implements DomHost, BrowserHost, RenderHost {
   private afterKeyDown(code: number): void {
     const focused = this.focusedElement;
     if (focused === null) return;
-    // 十字キーで nav-* の先へ。見えない要素は飛ばす (付属2 5.4.13.3)
+    // 十字キーで nav-* の先へ。見えない要素は飛ばす (付属 2 5.4.13.3)
     const nav = (element: BmlElement) => {
       const s = element.style();
       return {

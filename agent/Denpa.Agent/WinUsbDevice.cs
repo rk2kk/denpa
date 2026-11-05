@@ -146,7 +146,7 @@ public sealed unsafe partial class WinUsbDevice : IUsbDevice
         _handle = handle;
     }
 
-    /// <summary>刺さっている機材 (WinUSB でないものも並ぶ。開けるかは開いてみるまで分からない)</summary>
+    /// <summary>挿さっている機材 (WinUSB でないものも並ぶ。開けるかは開いてみるまで分からない)</summary>
     public static IReadOnlyList<UsbLocation> List(int vendor, int product)
     {
         var controllers = Interfaces(UsbHostControllerInterface)
@@ -164,6 +164,13 @@ public sealed unsafe partial class WinUsbDevice : IUsbDevice
         }
         return found;
     }
+
+    /// <summary>
+    /// 挿さっている USB 機材のパスを並べたもの。**抜き差しが起きたかを見比べるためだけ** (DeviceWatch.cs)。
+    /// 機材は開かない
+    /// </summary>
+    public static string Fingerprint() =>
+        string.Join("\n", Interfaces(UsbDeviceInterface).Select(found => found.Path).Order(StringComparer.OrdinalIgnoreCase));
 
     /// <summary>インターフェースのパスと、その機材の最初の場所の文字列</summary>
     private static List<(string Path, string? Location)> Interfaces(Guid guid)
@@ -411,8 +418,12 @@ public sealed unsafe partial class WinUsbDevice : IUsbDevice
                     if (WinUsb_GetOverlappedResult(_owner.Handle, (nint)_overlapped[_head], &done, 0) == 0)
                     {
                         var error = Marshal.GetLastPInvokeError();
-                        // 端点の止まりなどは、その読みだけ捨てて出し直す
-                        if (error != ErrorGenFailure) throw Failure(_owner.Name, "TS の読みが失敗しました", error);
+                        // 端点の止まりなどは、その読みだけ捨てて出し直す。読みを出したスレッドが終わると Windows が取り消す
+                        // (ERROR_OPERATION_ABORTED) ので、それも同じに扱う。受信を止めるとき、読み出しのスレッドが先に終わり、
+                        // 別のスレッドが読み捨てるので必ず当たる。例外にすると停止の手順 (9.9) が途中で止まり、機材が受信中のまま残って
+                        // 次の受信の先頭に古いデータが混じる。出し直しは Read の呼びごとに深さの分までで、そのあとの待ちには時間切れがある
+                        // (Dispose のあとは先頭の ThrowIf で抜ける) ので、出し直し続けることはない
+                        if (error is not (ErrorGenFailure or ErrorOperationAborted)) throw Failure(_owner.Name, "TS の読みが失敗しました", error);
                         done = 0;
                     }
                     _length = (int)done;

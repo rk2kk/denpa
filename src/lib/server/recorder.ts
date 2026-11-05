@@ -2,9 +2,9 @@ import { once } from "node:events";
 import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { EpgReader } from "@danything/arib/eit";
+import { type EitEvent, EpgReader } from "@danything/arib/eit";
 import { ServiceFilter } from "@danything/arib/service-filter";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { TsHead } from "#lib/ts/ts-head.js";
 
@@ -15,12 +15,14 @@ import { now, orm } from "./db";
 import { enqueue } from "./encoder";
 import { savePrograms } from "./epg";
 import { emit } from "./events";
-import { moveFile } from "./fsx";
+import { moveFile, removeIfExists } from "./fsx";
 import { libraryPath, recordedPath } from "./library";
 import { refreshLineup } from "./lineup-follow";
 import { writeThumbnail } from "./metadata";
+import { PfEvent } from "./pf-event";
 import { fillTsHead, recordingSummary } from "./recording";
-import { programs, recordings, reservations, services } from "./schema";
+import { duplicateAtStart } from "./rules";
+import { programs, recordings, reservations, rules, services } from "./schema";
 import { chunks } from "./stream";
 import { parseTitle } from "./title";
 import {
@@ -32,7 +34,7 @@ import {
 import { notify } from "./webhook";
 
 /**
- * 録り始めてから PMT でコピー禁止と分かり、1バイトも保存しなかった録画の理由
+ * 録り始めてから PMT でコピー禁止と分かり、1 バイトも保存しなかった録画の理由
  * (番組表が古い・無かったとき。ふだんは予約の時点で止まる: `format.COPY_NEVER_REASON`)
  */
 const COPY_NEVER_RECORDING = "コピー禁止の番組なので録画しませんでした";
@@ -94,15 +96,15 @@ function createRecording(reservation: Reservation): Recording {
    * 名前と概要は**録り始める瞬間の番組表**から取る。
    *
    * 番組表は放送直前まで書き換わる (「[新]」が付く、サブタイトルが入る、
-   * 誤字が直る)。予約の行が追い付くのは番組表を集め終えたとき (`epg.settle`) だけ
+   * 誤字が直る)。予約の行が追い付くのは番組表を取得し終えたとき (`epg.settle`) だけ
    * なので、そのまま写すと**古い名前で保存先に並ぶ**ことがある。
    *
-   * 逆に、録り終えたあとは動かさない。番組表の行は24時間で消えるうえ、
+   * 逆に、録り終えたあとは動かさない。番組表の行は 24 時間で消えるうえ、
    * ファイル名も画面に出す番組情報 (DB) も既に固まっている (docs/data.md)
    */
   const name = program?.name ?? reservation.name;
   const description = program?.description ?? reservation.description;
-  // 詳細(拡張形式)は番組表にしか無い。予約の行は持っていないので program からのみ
+  // 詳細 (拡張形式) は番組表にしか無い。予約の行は持っていないので program からだけ取る
   const extended = program?.extended ?? null;
   const parsed = parseTitle(name);
   const at = now();
@@ -123,18 +125,18 @@ function createRecording(reservation: Reservation): Recording {
       start_at: reservation.start_at,
       end_at: reservation.end_at,
       /*
-       * **譲った区間を写す。** チューナーの取り合いで頭か尻を譲ったときだけ
+       * **譲った区間を写す。** チューナーの取り合いで先頭か末尾を譲ったときだけ
        * 入っている (`conflict.ts` の「入るところまで録る」)。一覧で
-       * 「頭が欠けている」と言うのに要る
+       * 先頭が欠けていると示すのに要る
        */
       record_from: reservation.record_from,
       record_to: reservation.record_to,
       audio_type: program?.audio_type ?? null,
-      // 番組表の行は24時間で消える。録り直しのときにも要るので写しておく
+      // 番組表の行は 24 時間で消える。録り直しのときにも要るので写しておく
       genre_detail: program?.genre_detail ?? null,
       // エンコードしたものの音声トラックに番組表と同じ名前を入れるのに要る (`audioTitles`)
       audios: program?.audios ?? null,
-      // 番組詳細の「第N話」と、同じ回の見分け (`episode.episodeOf`) に要る。番組表の行は24時間で消える
+      // 番組詳細の「第 N 話」と、同じ回の見分け (`episode.episodeOf`) に要る。番組表の行は 24 時間で消える
       series_episode: program?.series_episode ?? null,
       series_last_episode: program?.series_last_episode ?? null,
       series_repeat: program?.series_repeat ?? null,
@@ -143,7 +145,7 @@ function createRecording(reservation: Reservation): Recording {
     })
     .returning({ id: recordings.id })
     .get()!;
-  // ファイル名は録画IDを含めるため、行を作ってからでないと決まらない
+  // ファイル名は録画 ID を含めるため、行を作ってからでないと決まらない
   const path = recordedPath({
     id,
     series: parsed.series,
@@ -160,8 +162,8 @@ function createRecording(reservation: Reservation): Recording {
 }
 
 /**
- * 予約を録画に移す。ストリームの読み出しは待たずにバックグラウンドで走らせ、
- * 呼び出し側(スケジューラのtick)を塞がないようにする。
+ * 予約を録画に移す。ストリームの読み出しは待たずにバックグラウンドで動かし、
+ * 呼び出し側 (スケジューラの tick) を塞がないようにする。
  *
  * `after` は、同じ定期チェックで止めた録画の利用者。チューナーを使うとき、エージェントはそれらを
  * もう離れたものとして選ぶ (引き継ぎ。docs/agent.md「選ぶ順の約束」)
@@ -172,29 +174,149 @@ export async function startRecording(
 ): Promise<Recording> {
   const recording = createRecording(reservation);
   emit("recordings");
+  /*
+   * **「同じ回は最初の放送だけ」のルールの予約は、録り始めに同じ回かを見直す** (`pump`)。
+   * やめたものに「録画を開始しました」を送らないよう、通知は見直したあと
+   */
+  const checks = ruleDedupes(reservation);
+  if (!checks) announce(recording);
+  launch(recording, after, checks);
+  return recording;
+}
+
+/** 録画を開始したと知らせる (`recording.started`) */
+function announce(recording: Recording): void {
   notify({
     event: "recording.started",
     text: `録画を開始しました: ${recording.name} (${recording.service_name})`,
     recording: recordingSummary(recording),
   });
-  launch(recording, after);
-  return recording;
 }
 
-/** 読み出しを裏で走らせる。止める手段 (`active`) はここで立てる */
-function launch(recording: Recording, after: readonly StreamUse[] = []): void {
+/** 「同じ回は最初の放送だけ」を入れた、有効なルールの予約か (`duplicateAtStart` と同じ条件)。手動の予約は見ない */
+function ruleDedupes(reservation: Reservation): boolean {
+  if (reservation.manual || reservation.rule_id === null) return false;
+  const rule = orm()
+    .select({ dedupe: rules.dedupe, enabled: rules.enabled })
+    .from(rules)
+    .where(eq(rules.id, reservation.rule_id))
+    .get();
+  return rule?.dedupe === true && rule.enabled;
+}
+
+/**
+ * 読み出しをバックグラウンドで動かす。止める手段 (`active`) はここで立てる。
+ * `checks` は録り始めに同じ回かを見直すか (`startRecording`)。見直すものは、開始の通知も `pump` が送る
+ */
+function launch(
+  recording: Recording,
+  after: readonly StreamUse[] = [],
+  checks = false,
+): void {
   const controller = new AbortController();
   active.set(recording.id, controller);
-  void pump(recording, controller, after).catch((error) => {
+  void pump(recording, controller, after, checks).catch((error) => {
     active.delete(recording.id);
     fail(recording.id, String(error));
   });
 }
 
 /**
+ * **録っている番組の EIT[p/f] で、番組の情報を書き直す** (番組表の行と録画の行)。
+ *
+ * 録画の行は録り始める瞬間の番組表から作る (`createRecording`) が、その番組表は数日前に取得したもので、
+ * 局によっては話数を放送の直前の p/f にしか載せない (実機の BS日テレ。数日前の番組表では概要が空、
+ * p/f の概要に「第 5 話　副題」)。書き直さないと、あとで別の局に来る同じ回と突き合わせられない
+ * (`rules.recordedEpisodes` は録画の行の名前・概要・詳細から回を読む)。
+ *
+ * **空では塗り潰さない** (`epg.savePrograms` と同じ)。シリーズ記述子は p/f が言っていれば (`series` が
+ * undefined でなければ) その値にする。時刻は書かない (延長の追従は `extendIfLonger`)
+ */
+function refreshFromPf(recording: Recording, event: EitEvent): void {
+  const extended =
+    Object.keys(event.extended).length === 0 ? null : event.extended;
+  const said = event.series !== undefined;
+  /** 中身のあるものだけ書く */
+  const text = {
+    ...(event.name === "" ? {} : { name: event.name }),
+    ...(event.description === "" ? {} : { description: event.description }),
+    ...(extended === null ? {} : { extended }),
+  };
+  const at = now();
+  if (recording.program_id !== null) {
+    orm()
+      .update(programs)
+      .set({
+        ...text,
+        ...(said
+          ? {
+              series_id: event.series?.seriesId ?? null,
+              series_repeat: event.series?.repeatLabel ?? null,
+              series_episode: event.series?.episode ?? null,
+              series_last_episode: event.series?.lastEpisode ?? null,
+              series_name: event.series?.name ?? null,
+            }
+          : {}),
+        updated_at: at,
+      })
+      .where(eq(programs.id, recording.program_id))
+      .run();
+  }
+  const parsed = parseTitle(text.name ?? recording.name);
+  orm()
+    .update(recordings)
+    .set({
+      ...text,
+      series: parsed.series,
+      subtitle: parsed.subtitle,
+      ...(said
+        ? {
+            series_episode: event.series?.episode ?? null,
+            series_last_episode: event.series?.lastEpisode ?? null,
+            series_repeat: event.series?.repeatLabel ?? null,
+          }
+        : {}),
+      updated_at: at,
+    })
+    .where(eq(recordings.id, recording.id))
+    .run();
+}
+
+/**
+ * **録り始めてから同じ回をもう録ってあると分かった録画を、無かったことにする** (`duplicateAtStart`)。
+ *
+ * 書いたのは開始マージンと数秒ぶんだけなので、ファイルも録画の行も消す (失敗にすると、録らないと
+ * 決めたものが一覧に失敗として残る)。予約は「録画しない」(`skipped`) にして理由を持たせる。
+ * **録り始めた時刻 (`started_at`) は消さない。** スケジューラ・チューナーの割り振り・ルールの当て直しは
+ * どれも録り始めていない予約だけを対象にするので、もう一度録り始めない。手で予約し直せば録れる
+ * (`reservations.reserve` が録り始めた時刻を空に戻す)
+ */
+function skipDuplicate(recording: Recording, reason: string): void {
+  removeIfExists(recording.ts_path);
+  orm().delete(recordings).where(eq(recordings.id, recording.id)).run();
+  if (recording.reservation_id !== null) {
+    orm()
+      .update(reservations)
+      .set({ state: "skipped", conflict_reason: reason, updated_at: now() })
+      .where(
+        and(
+          eq(reservations.id, recording.reservation_id),
+          eq(reservations.state, "scheduled"),
+        ),
+      )
+      .run();
+  }
+  console.log(
+    `[rec] 録画をやめました: ${recording.name} (${recording.service_name})。${reason}`,
+  );
+  emit("recordings");
+  emit("reservations");
+}
+
+/**
  * チューナーが空くのを少し待つ。
  *
- * 使えない理由は「本当に足りない」だけとは限らない。番組の頭を数秒落としてでも
+ * 使えない理由は「本当に足りない」だけとは限らない。番組の先頭を数秒落としてでも
  * 録れたほうがいいので、すぐには諦めない。
  */
 const OPEN_RETRIES = 5;
@@ -222,10 +344,10 @@ async function openWithRetry(
 }
 
 /**
- * 放送の延長に追い付く。**録画中のTSに入っている EIT[p/f] を見る。**
+ * 放送の延長に追い付く。**録画中の TS に入っている EIT[p/f] を見る。**
  *
  * **問い合わせる相手が要らない。**
- * いま録っているチャンネルのTSにそのまま流れてくるので、読むだけで分かる。
+ * いま録っているチャンネルの TS にそのまま流れてくるので、読むだけで分かる。
  *
  * 縮む方向には追わない。番組表が短くなったからといって録画を早く切ると、
  * 実際にはまだ流れていたときに取り返しがつかない。
@@ -271,7 +393,7 @@ function addDuration(recordingId: number, ms: number): void {
  * 録画中に取得した番組表を書き出す間隔。
  *
  * **ただで手に入るぶん。** 録画で開いているチャンネルには EIT[schedule] も
- * 流れてきているので、読んで捨てる理由が無い。番組表集めがそのチャンネルへ
+ * 流れてきているので、読んで捨てる理由が無い。番組表の取得がそのチャンネルへ
  * 行く手間がまるごと省ける
  */
 const EPG_SAVE_INTERVAL = 5 * 60_000;
@@ -280,9 +402,18 @@ async function pump(
   recording: Recording,
   controller: AbortController,
   after: readonly StreamUse[],
+  checks: boolean,
 ): Promise<void> {
   const path = recording.ts_path!;
   mkdirSync(dirname(path), { recursive: true });
+  /** 開始の通知。見直すもの (`checks`) は、録ると決まったとき (か終わるとき) に 1 回だけ送る */
+  let announced = !checks;
+  const announceOnce = () => {
+    if (announced) return;
+    announced = true;
+    const row = recordingById(recording.id);
+    if (row !== undefined) announce(row);
+  };
 
   const service = orm()
     .select()
@@ -290,6 +421,7 @@ async function pump(
     .where(eq(services.id, recording.service_id))
     .get();
   if (service === undefined) {
+    announceOnce();
     fail(
       recording.id,
       "局の情報がありません。チャンネルスキャンをやり直してください",
@@ -301,8 +433,8 @@ async function pump(
   /*
    * **物理チャンネルを丸ごと開いて、こちらで局を選り分ける。**
    *
-   * エージェントは中身を読まないので、1本の TS にその中継に入っている局が
-   * 全部流れてくる。そのまま保存すると1つの録画に複数の番組が入る
+   * エージェントは中身を読まないので、1 本の TS にその中継に入っている局が
+   * 全部流れてくる。そのまま保存すると 1 つの録画に複数の番組が入る
    * (実機の TOKYO MX は MX1 と MX2 が同居している)。
    */
   const filter = new ServiceFilter(service.service_id);
@@ -315,10 +447,10 @@ async function pump(
     recording.program_id === null ? null : recording.program_id % 100000;
 
   let written = 0;
-  /** いまコピー禁止で保存を止めているか (変わり目でだけ言う) */
+  /** いまコピー禁止で保存を止めているか (変わり目でだけログに出す) */
   let copyNever = false;
   /**
-   * 番組が始まってから書いたか。開始マージンのぶん (前の番組) は数えない — そこを書いていても、
+   * 番組が始まってから書いたか。開始マージンのぶん (前の番組) は数えない。そこを書いていても、
    * 番組が始まった時点で禁止なら録画をやめる。再起動をまたいで続きから録るときは、
    * 番組の途中までもう書いてあるものとして扱う (`recoverOrphanedRecordings`)
    */
@@ -327,15 +459,31 @@ async function pump(
   /** 始めから禁止だったので録画をやめたか。前の番組のぶんを書いていても失敗にする */
   let stoppedForCopyNever = false;
   /*
-   * **書いた TS の頭の放送時刻を測る** (`recordings.ts_head`。実況のコメントを録画中の追っかけでも合わせるため)。
-   * 測れるのはファイルの頭から書くときだけ — 再起動をまたいで続きを足すときは、もう頭が過ぎている
-   * (そのときはエンコードのときに測る。`recorded-bml.ts`)。測れたら行に書いて、あとは食わせない
+   * **書いた TS の先頭の放送時刻を測る** (`recordings.ts_head`。実況のコメントを録画中の追っかけでも合わせるため)。
+   * 測れるのはファイルの先頭から書くときだけ。再起動をまたいで続きを足すときは、もう先頭が過ぎている
+   * (そのときはエンコードのときに測る。`recorded-bml.ts`)。測れたら行に書いて、あとは渡さない
    */
   let measure =
     recording.ts_head === null && (fileSize(path) ?? 0) === 0
       ? new TsHead()
       : null;
-  // 何を使っているのかが設定の「チューナー」に出る。番組名は載せず、IDだけ渡して向こうで引く
+  /*
+   * **録り始めに、その番組の EIT[p/f] を 1 回読む** (`refreshFromPf`)。局によっては話数を放送の直前の
+   * p/f にしか載せないので、番組の情報を書き直す。続きから録るとき (再起動をまたいだとき) は読まない
+   * (もう読んである)。届かなければ打ち切って、そのまま録る (`PF_WAIT`)
+   */
+  let pf =
+    eventId !== null && (fileSize(path) ?? 0) === 0
+      ? new PfEvent(service.service_id, eventId)
+      : null;
+  // p/f を読まないものは、同じ回を確かめ直せないので録ると決まっている。開始はすぐ知らせる
+  if (pf === null) announceOnce();
+  /**
+   * 書き直した情報で、同じ回をもう録ってあると分かったときの理由 (`rules.duplicateAtStart`)。
+   * 見るのは「同じ回は最初の放送だけ」のルールの予約 (`checks`) だけ
+   */
+  let duplicate: string | null = null;
+  // 何を使っているのかが設定の「チューナー」に出る。番組名は載せず、ID だけ渡して表示する側で引く
   const use = recordingUse(recording.id);
 
   try {
@@ -344,7 +492,7 @@ async function pump(
     const sink = createWriteStream(path, { flags: "a" });
     // 実際に受け取っていた時間を測る。番組表の尺は予定でしかなく、
     // 途中で止めたときやチューナーを取るのに手間取ったときは実物と合わない。
-    // 再開したときは足していく(ファイルも追記なので合計が実物になる)
+    // 再開したときは足していく (ファイルも追記なので合計が実物になる)
     const from = Date.now();
     let savedEpgAt = from;
     let interrupted = 0;
@@ -353,7 +501,7 @@ async function pump(
       /*
        * **選局は自分から切るまで終わらない。** 向こうから終わったなら (EOF でも
        * 例外でも) チューナーを取り上げられたか切れたかで、終了時刻 (自分の abort) までは取り直す。
-       * EOF を正常終了と読んでいた頃は、チューナーを取り上げられた録画が尻切れのまま「録れた」に
+       * EOF を正常終了と読んでいた頃は、チューナーを取り上げられた録画が末尾の欠けたまま「録れた」に
        * なり (HTTP 越しでは失敗も正常終了に見える。`agent/conformance.test.ts`)、
        * 例外で抜けていた頃はエージェントの Pod を入れ替えただけで番組が丸ごと
        * 失敗した (実機)
@@ -397,7 +545,7 @@ async function pump(
           // **取り直せなくても諦めない。** エージェントの Pod 入れ替えは
           // openWithRetry の数十秒を超えることがあり、そこで失敗にすると
           // 「終了時刻まで掛け直す」という上の約束を破って番組を丸ごと
-          // 落とす。終了時刻(=自分での abort)が来るまでは待って掛け直す
+          // 落とす。終了時刻 (自分での abort) が来るまでは待って掛け直す
           if (controller.signal.aborted) break;
           interrupted++;
           console.warn(
@@ -413,6 +561,29 @@ async function pump(
 
         try {
           for await (const chunk of chunks(stream)) {
+            if (pf !== null) {
+              const seen = pf.feed(chunk);
+              if (seen !== null) {
+                pf = null;
+                if (seen === "timeout") {
+                  console.warn(
+                    `[recorder] 録画 ${recording.id}: 番組の EIT[p/f] が届かないので、番組表の情報のまま録ります`,
+                  );
+                } else {
+                  refreshFromPf(recording, seen);
+                  if (checks) duplicate = duplicateAtStart(recording.id);
+                }
+                /*
+                 * **同じ回をもう録ってあれば、ここでやめてチューナーを返す。** 書いたのは開始マージンと
+                 * p/f を待った数秒だけ。録る側に倒すので、届かなかったとき・回が読めないときは録る
+                 */
+                if (duplicate !== null) {
+                  controller.abort();
+                  break;
+                }
+                announceOnce();
+              }
+            }
             if (epg.feed(chunk) && eventId !== null) {
               const present = epg.present.get(service.service_id);
               if (
@@ -433,7 +604,7 @@ async function pump(
             /*
              * **コピー禁止のあいだは保存しない** (PMT のデジタルコピー制御記述子)。番組表が
              * 古い・無いときの備えで、ふだんは予約の時点で止まっている (`format.COPY_NEVER_REASON`)。
-             * 決めるのは PMT を読んでから — それまでのぶん (PAT・番組表) も書かない
+             * 決めるのは PMT を読んでから。それまでのぶん (PAT・番組表) も書かない
              */
             if (!filter.ready) continue;
             if (filter.copyNever) {
@@ -446,8 +617,8 @@ async function pump(
               /*
                * **番組が始まった時点で禁止なら録画をやめてチューナーを返す。** 番組が始まる前
                * (開始マージン) の PMT は前の番組のものなので、番組が始まるまでは待つ
-               * (そのあいだに前の番組のぶんを書いていても、本編を1バイトも書いていなければやめる)。
-               * 本編を書いたあとで禁止に変わったときは止めない — そこまでのぶんは残し、戻れば続きを書く
+               * (そのあいだに前の番組のぶんを書いていても、本編を 1 バイトも書いていなければやめる)。
+               * 本編を書いたあとで禁止に変わったときは止めない。そこまでのぶんは残し、戻れば続きを書く
                */
               if (!wroteProgram && Date.now() >= recording.start_at) {
                 stoppedForCopyNever = true;
@@ -459,7 +630,7 @@ async function pump(
             if (copyNever) {
               copyNever = false;
               console.warn(
-                `[recorder] 録画 ${recording.id}: コピー禁止が解けたので保存を続けます`,
+                `[recorder] 録画 ${recording.id}: コピー禁止でなくなったので保存を続けます`,
               );
             }
             if (out.length === 0) continue;
@@ -505,6 +676,7 @@ async function pump(
   } catch (error) {
     // 終了時刻に達して自分で abort した場合は正常終了。それ以外だけ失敗にする
     if (!controller.signal.aborted) {
+      announceOnce();
       fail(recording.id, String(error));
       return;
     }
@@ -512,9 +684,16 @@ async function pump(
     active.delete(recording.id);
   }
 
+  if (duplicate !== null) {
+    skipDuplicate(recording, duplicate);
+    return;
+  }
+  // p/f を待っている間に終わった (取り消した・終了時刻が来た) ものも、開始は知らせる
+  announceOnce();
+
   /*
    * 始めから禁止だったものは失敗にする。開始マージンで前の番組のぶんを書いていても、
-   * それだけを「録れた」にしない (元のTSは失敗した録画と同じく残す)
+   * それだけを「録れた」にしない (元の TS は失敗した録画と同じく残す)
    */
   if (stoppedForCopyNever) {
     fail(recording.id, COPY_NEVER_RECORDING);
@@ -564,7 +743,7 @@ function finish(recordingId: number, size: number): void {
     return;
   }
 
-  // エンコードしない設定なら元のTSをそのまま保存先へ移す
+  // エンコードしない設定なら元の TS をそのまま保存先へ移す
   const dest = libraryPath(recording, ".m2ts");
   moveFile(recording.ts_path!, dest);
   void writeThumbnail(dest, (recording.end_at - recording.start_at) / 1000);
@@ -577,7 +756,7 @@ function finish(recordingId: number, size: number): void {
 }
 
 /**
- * その録画が終わっているべき時刻。**尻を譲っていればそこまで** (`record_to`)。
+ * その録画が終わっているべき時刻。**末尾を譲っていればそこまで** (`record_to`)。
  *
  * 止めるとき (`scheduler.tick`)・起動時に回収するとき・持ち主のいない行を畳むとき
  * (`failStrayRecordings`) で同じ物差しを使う。書き写していると、片方だけ直したときに
@@ -594,7 +773,7 @@ export function recordingUntil(rec: {
  * プロセスが落ちた時点で録画中だった行を回収する。
  *
  * AbortController はメモリ上にしか無いので、再起動すると録画は止まったままになる。
- * まだ放送中のものは録り直しに行く。元のTSは追記で開くので、落ちるまでに録れていた分は
+ * まだ放送中のものは録り直す。元の TS は追記で開くので、落ちるまでに録れていた分は
  * そのまま残り、抜けるのは止まっていた間だけになる。
  * 放送が終わってしまったものは、もう取り返せないので失敗に倒す。
  */
@@ -637,19 +816,19 @@ const STRAY_GRACE = 60_000;
 /**
  * **持ち主のいない「録画中」を畳む。**
  *
- * 録っている最中の録画はプロセスの中にしか無い (`active`)。**畳む間もなく殺された**とき —
- * ノードごと落とした、Pod を強制終了した — は、DB の行だけが録画中で残る。
+ * 録っている最中の録画はプロセスの中にしか無い (`active`)。ノードごと落とした・Pod を強制終了したなど、
+ * **畳む前にプロセスが止まった**ときは、DB の行だけが録画中で残る。
  * 起動時にも同じ片付けをするが (`recoverOrphanedRecordings`)、そのとき**まだ放送中なら
- * 録り直しに行く**ので、再開した先でまた殺されると次の起動まで誰も畳まない。
+ * 録り直す**ので、再開した先でまたプロセスが止まると次の起動まで畳まれない。
  *
- * 畳まれない行は**一覧の予約の側に居座り、録画の側には出てこない** — どちらの振り分けも
+ * 畳まれない行は**一覧の予約の側に残り、録画の側には出てこない**。どちらの振り分けも
  * `recordings.state = 'recording'` で決まっている (`routes/+page.server.ts`)。放送は
- * とうに終わっているのに「録画中」と出たままで、取り消す以外に消す手が無い。
+ * とうに終わっているのに「録画中」と出たままで、取り消す以外に消す方法が無い。
  *
  * **録っている最中のものには触らない。** 終了時刻を過ぎたものだけを、起動時と同じ理由で
- * 失敗にする。元のTSは消さないので、録れていた分は詳細から再エンコードできる。
+ * 失敗にする。元の TS は消さないので、録れていた分は詳細から再エンコードできる。
  *
- * `at` と `owned` を渡せるようにしてあるのは試すため (`recorder-stray.test.ts`)
+ * `at` と `owned` を渡せるようにしてあるのはテストのため (`recorder-stray.test.ts`)
  */
 export function failStrayRecordings(
   at = now(),
@@ -670,7 +849,7 @@ export function failStrayRecordings(
 
   for (const rec of stray) {
     console.warn(
-      `[recorder] 録画 ${rec.id}: 録っている者がいないまま終了時刻を過ぎました。失敗にします`,
+      `[recorder] 録画 ${rec.id}: 録っている処理が無いまま終了時刻を過ぎました。失敗にします`,
     );
     fail(rec.id, "録画が中断されたまま終了時刻を過ぎました");
   }

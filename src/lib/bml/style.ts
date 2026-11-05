@@ -3,7 +3,7 @@
  *
  * 重ねる順 (後が勝つ):
  *
- * 1. 既定のスタイル (STD-B24 付属2 の既定のスタイルシートのうち、放送が頼るもの)
+ * 1. 既定のスタイル (STD-B24 付属 2 の既定のスタイルシートのうち、放送が頼るもの)
  * 2. 文書の style 要素・link の規則 (詳細度 → 順番。`!important` は別に重ねて上に)。フォーカス中は
  *    `:focus` の規則も同じ並びに入れる (押されている間は `:active`)。`#a` は `p:focus` に勝つ
  * 3. style 属性と、スクリプトが `normalStyle` に書いたもの
@@ -77,7 +77,7 @@ const INHERITED = new Set([
 ]);
 
 /**
- * 既定のスタイル (web-bml の default_css.ts から、放送が頼るものだけ)。
+ * 既定のスタイル (web-bml の default_css.ts に合わせ、放送が頼るものだけ)。
  * 文字の色は規格では受信機しだい。テレビの画面に合わせて白 (7) にする
  */
 const DEFAULTS: Record<string, [string, string][]> = {

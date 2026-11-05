@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * **サイドバーの月のカレンダー** (広い形だけ。日ごとに並べているときだけ出す — まとめて表示には日付の見出しが無い)。
+   * **サイドバーの月のカレンダー** (広い形だけ。日ごとに並べているときだけ出す。まとめて表示には日付の見出しが無い)。
    *
    * - 行のある日 (一覧に出ている行。絞り込みが効く) は本文の字。押すとその日の見出しへ送る
    * - 行の無い日は控えた字で押せない。今日は赤い点 (行が無くても押せる。今日の見出しは「いま」の線と一緒にいつもある)
@@ -36,7 +36,7 @@
     describe = (day) =>
       dayAriaLabel(day, marks.get(day) as DayMark | undefined, today),
   }: {
-    /** 日ごとの行の数 (鍵はその日の 0 時)。切り抜きの画面は日ごとの枚数 (`describe` で読み上げを替える) */
+    /** 日ごとの行の数 (キーはその日の 0 時)。切り抜きの画面は日ごとの枚数 (`describe` で読み上げを替える) */
     marks: Map<number, DayMark | number>;
     /** 今日の 0 時 */
     today: number;
@@ -191,7 +191,7 @@
     background: transparent;
     box-shadow: none;
     color: var(--dp-fg);
-    transition: background-color var(--dp-duration);
+    transition: background-color var(--dp-duration) var(--dp-ease);
   }
   .cal-step:hover:not(:disabled) {
     background: var(--dp-hover-soft);
@@ -216,7 +216,7 @@
   .cal-grid th {
     height: 1.5rem;
     color: var(--dp-muted);
-    font-size: 0.6875rem;
+    font-size: var(--dp-text-2xs);
     font-weight: var(--dp-weight);
   }
   /*
@@ -239,9 +239,9 @@
     background: transparent;
     box-shadow: none;
     color: var(--dp-fg);
-    font-size: 0.8125rem;
+    font-size: var(--dp-text-sm);
     font-weight: var(--dp-weight);
-    transition: background-color var(--dp-duration);
+    transition: background-color var(--dp-duration) var(--dp-ease);
   }
   .cal-day[aria-disabled="true"] {
     color: var(--dp-muted);
@@ -271,8 +271,8 @@
     bottom: 0.25rem;
     left: 50%;
     width: 1rem;
-    height: 2px;
-    border-radius: 1px;
+    height: var(--dp-mark);
+    border-radius: var(--dp-mark);
     background: var(--pico-primary);
     transform: translateX(-50%);
   }

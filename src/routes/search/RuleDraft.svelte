@@ -56,8 +56,8 @@
    * `?/preview` に送り、結果の一覧の行ごとに「録る / 録らない (理由) / 予約済み」を返してもらう
    * (`rule-preview.ts`。予約を立てるときと同じ判定)。返事は `preview` で画面に渡す。
    *
-   * **サーバに重ねて投げない。** 送るのは打つのが止まってから `PREVIEW_DELAY` 後。返事を待つ間に
-   * 変わったぶんは、返ってから最後の条件で1回だけ送る。条件が前と同じなら送らない。空なら数えない
+   * **サーバに重ねて送らない。** 送るのは打つのが止まってから `PREVIEW_DELAY` 後。返事を待つ間に
+   * 変わったぶんは、返ってから最後の条件で 1 回だけ送る。条件が前と同じなら送らない。空なら数えない
    */
   let {
     draft,
@@ -75,7 +75,7 @@
     ids: number[];
     /** 画面の読み直し (予約・取消・保存のあと)。変わったら数え直す */
     refresh: unknown;
-    /** ルールの削除の2回押し (画面の `arming`) */
+    /** ルールの削除の 2 回押し (画面の `arming`) */
     deleting: Arming;
     preview?: Preview | null;
     /** スマホの形で下から出しているか */
@@ -100,7 +100,7 @@
   let typed = false;
 
   /**
-   * **書く欄を初期値から組み直す鍵。** 直すルール (`?rule=`) や元の番組 (`?from=`) が変わったときだけ。
+   * **書く欄を初期値から組み直すキー。** 直すルール (`?rule=`) や元の番組 (`?from=`) が変わったときだけ。
    * 予約・取消・保存のあとの読み直しでは組み直さない (打ちかけの欄が戻る)
    */
   const seedKey = $derived(
@@ -241,7 +241,7 @@
         (result.data as { preview: Preview | null } | undefined)?.preview ??
         null;
     } catch (error) {
-      // 黙って空にしない。もう1度変えれば送り直す
+      // 黙って空にしない。もう 1 度変えれば送り直す
       preview = {
         total: 0,
         skipped: 0,
@@ -276,7 +276,7 @@
     shownKey = null;
   });
 
-  /** 保存すると録る数。同じ回の2回目など、録らないものは除く */
+  /** 保存すると録る数。同じ回の 2 回目など、録らないものは除く */
   const recordable = $derived(
     preview === null || preview.failed !== null
       ? null
@@ -310,7 +310,7 @@
     };
 
   // ---- 局とジャンル ----
-  /** 局は50以上あるので種別ごとにまとめる */
+  /** 局は 50 以上あるので種別ごとにまとめる */
   const grouped = $derived(
     ["GR", "BS", "CS", "SKY"]
       .map((type) => ({
@@ -437,7 +437,7 @@
 
     <!--
       同じ回・前の回のスイッチ、局・ジャンル・時間帯と曜日 (条件)、優先度は枠の無い行に (サイドバーの行と同じ形)。
-      名前は左、いまの値は右。**スイッチを条件より上に置く** — 同じ回を最初の放送だけにすれば局を絞らずに済むので、
+      名前は左、いまの値は右。**スイッチを条件より上に置く**。同じ回を最初の放送だけにすれば局を絞らずに済むので、
       先に目に入るように。条件は畳んでおき、閉じていても右の要約で中身が分かる
     -->
     <div class="rows side-list">
@@ -764,7 +764,7 @@
     position: fixed;
     inset: auto 0 0;
     z-index: 60;
-    max-height: 80dvh;
+    max-height: 80svh;
     overflow-y: auto;
     border-radius: var(--dp-radius-lg) var(--dp-radius-lg) 0 0;
     box-shadow: var(--dp-shadow-pop);
@@ -798,7 +798,6 @@
   }
   .draft-head h2 {
     margin: 0;
-    font-size: var(--dp-text-lg);
   }
   .eyebrow {
     margin: 0 0 0.125rem;
@@ -814,10 +813,6 @@
     flex-direction: column;
     gap: var(--dp-space-3);
     margin: 0;
-  }
-  .field-label {
-    font-size: var(--dp-text-sm);
-    color: var(--dp-muted);
   }
   .field input {
     margin: 0;
@@ -884,7 +879,7 @@
   .children {
     margin-inline-start: 1.5rem;
   }
-  /* 時刻の欄は「19:00 から 20:00 まで」と1行に。狭い幅では「から」の後ろで折り返す */
+  /* 時刻の欄は「19:00 から 20:00 まで」と 1 行に。狭い幅では「から」の後ろで折り返す */
   .times {
     display: flex;
     flex-wrap: wrap;
@@ -923,10 +918,10 @@
     background: var(--dp-bg);
   }
   /*
-     * **数えている間 (`aria-busy`) も形を変えない。** Pico の `aria-busy` は1行の字に回るものを付ける前提で、
+     * **数えている間 (`aria-busy`) も形を変えない。** Pico の `aria-busy` は 1 行の字に回るものを付ける前提で、
      * `white-space: nowrap` と `::before` の回るものを足す。ここは字の段落とボタンを縦に並べた箱なので、
-     * 案内の字が1行に伸びて列の幅からはみ出し (列が横にスクロールできてしまう)、回るものも1行ぶん場所を取る。
-     * 開いた直後の1回目の下見でも、数え終わるまでの一瞬だけ崩れて見えていた
+     * 案内の字が 1 行に伸びて列の幅からはみ出し (列が横にスクロールできてしまう)、回るものも 1 行ぶん場所を取る。
+     * 開いた直後の 1 回目の下見でも、数え終わるまでの一瞬だけ崩れて見えていた
      */
   .draft-foot[aria-busy="true"] {
     white-space: normal;

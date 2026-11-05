@@ -5,6 +5,7 @@ import type { Page } from "@playwright/test";
 import {
   expect,
   goto,
+  openSettings,
   pickCodec,
   recordOne,
   reserveSoon,
@@ -68,23 +69,50 @@ test.describe("観る画面でその場で流す", () => {
     await row.click();
     await expect(page).toHaveURL(new RegExp(`/watch/${id}$`));
 
-    // 頭から、端末が受け取れる形式で (Playwright の Chromium は H.264 を持たないので AV1 のことがある)
+    /*
+     * **録画しか無いときの自動は、ライブ・追っかけと同じ「その場でエンコード」の順** (`autoOrder`)。E2E は 127.0.0.1 で
+     * 開くので家の中で、元の TS をそのまま流してこの端末でデコードし、互換モードと同じく canvas に描く
+     */
     await expect.poll(() => asked.length).toBeGreaterThan(0);
-    expect(asked[0]?.searchParams.get("codec")).toMatch(/^(h264|av1)$/);
+    expect(asked[0]?.searchParams.get("codec")).toBe("mpeg2");
     expect(asked[0]?.searchParams.get("from")).toBe("0.000");
-    // ファイルそのままは渡さない (元の TS はブラウザで読めない)
+    const canvas = page.locator(
+      '[data-testid="live-raw"][data-input="ts-mpeg2"]',
+    );
+    await expect(canvas).toBeVisible({ timeout: 30_000 });
+    await expect
+      .poll(
+        async () => Number((await canvas.getAttribute("data-shown")) ?? 0),
+        {
+          timeout: 30_000,
+        },
+      )
+      .toBeGreaterThan(10);
+    // ファイルそのままは渡さない (元の TS は `<video>` で読めない)
     await expect(page.getByTestId("watch-video")).not.toHaveAttribute(
       "src",
       /file/,
     );
+    await wakeControls(page, "watch-stage");
+    // 速さは等速だけ (canvas に描くときは互換モードと同じく切り替えを出さない)
+    await expect(page.getByTestId("watch-speed")).toHaveCount(0);
 
     // 字幕は元の TS から (偽 ffmpeg は作り置きの字幕を返す)。データ放送は出さない
     await expect(page.getByTestId("watch-captions")).toHaveCount(1);
     await expect(page.getByTestId("watch-data")).toHaveCount(0);
+
+    // ほかのコーデックを選ぶと、サーバに変換させて `<video>` で観る
+    await pickCodec(page, "watch", "av1");
+    await expect
+      .poll(() => asked.at(-1)?.searchParams.get("codec"))
+      .toBe("av1");
+    await expect(page.getByTestId("live-raw")).toHaveCount(0);
+    await wakeControls(page, "watch-stage");
+    await expect(page.getByTestId("watch-speed")).toBeVisible();
   });
 
   /**
-   * **コーデックを選べる** (この端末で観られる方式が2つ以上あるとき)。エンコード済みと違うものを選ぶと
+   * **コーデックを選べる** (この端末で観られる方式が 2 つ以上あるとき)。エンコード済みと違うものを選ぶと
    * サーバに変換させて流す。選んだものは端末ごとに覚え、続きの位置からリクエストする。
    * サーバが混んでいると言えば、変換させずに観られるものを勧める。
    *
@@ -189,5 +217,86 @@ test.describe("観る画面でその場で流す", () => {
       `/api/recordings/${id}/file?source=encoded`,
     );
     await expect(page.getByTestId("watch-codec")).toContainText("H.264");
+  });
+
+  /**
+   * **回線が細ければ、「自動」は画質の段を下げて流す** (`watch-adapt.ts`)。エンコード済みのファイルが届かない
+   * (回線を絞った) まま詰まって 3 秒たつと、ファイルの直再生から段 1 (720p) の変換へ 1 回だけ作り直して移る。
+   * 段を下げた変換のコーデックはサーバが端末の再生できるもの (`playable`) から選び、応答のヘッダで返す。
+   *
+   * 偽 ffmpeg は映像を作らないので、ファイルは届かないままにし、ストリームは中身の無い応答で返す
+   */
+  test("回線が細いと、自動はファイルの直再生から画質を下げた変換に移る", async ({
+    page,
+    request,
+  }) => {
+    test.setTimeout(180_000);
+    const { id } = await recordOne(page, request);
+    await page.addInitScript(() => {
+      const real = HTMLMediaElement.prototype.canPlayType;
+      HTMLMediaElement.prototype.canPlayType = function (type: string) {
+        return type.includes("avc1") ? "probably" : real.call(this, type);
+      };
+    });
+    await page.route(`**/api/recordings/${id}/playback`, (route) =>
+      route.fulfill({
+        json: {
+          duration: 1800,
+          axis: "encoded",
+          audios: [{ id: "0", label: "" }],
+          offers: [
+            {
+              codec: "h264",
+              way: "file",
+              source: "encoded",
+              codecs: "avc1.640028,opus",
+            },
+            { codec: "h264", way: "stream", codecs: "avc1.640028,mp4a.40.2" },
+            { codec: "av1", way: "stream", codecs: "av01.0.08M.08,opus" },
+          ],
+        },
+      }),
+    );
+    // 回線を絞る。ファイルは 1 バイトも届かない
+    await page.route(`**/api/recordings/${id}/file?**`, () => undefined);
+    await page.route(`**/api/recordings/${id}/stream?**`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "video/mp4",
+        headers: { "X-Denpa-Codec": "av1", "X-Denpa-Rung": "1" },
+        body: "",
+      }),
+    );
+    const asked = streamRequests(page);
+
+    await goto(page, `/watch/${id}`);
+    const video = page.getByTestId("watch-video");
+    await expect(video).toHaveAttribute(
+      "src",
+      `/api/recordings/${id}/file?source=encoded`,
+    );
+    // 再生を始めておく (音を消した自動再生はブラウザが断らない)
+    await video.evaluate((v) => {
+      const media = v as HTMLVideoElement;
+      media.muted = true;
+      void media.play().catch(() => undefined);
+    });
+
+    await expect.poll(() => asked.length, { timeout: 15_000 }).toBe(1);
+    const first = asked[0]!;
+    expect(first.searchParams.get("rung")).toBe("1");
+    expect(first.searchParams.get("playable")?.split(",")).toContain("av1");
+    expect(first.searchParams.get("from")).toBe("0.000");
+    await expect(page.getByTestId("watch-adapt")).toHaveText(
+      "回線が細いため、720p に下げました",
+    );
+    await expect(video).not.toHaveAttribute("src", /file/);
+
+    // メニューの「自動」の行に、サーバが選んだ形式と高さを添える
+    await wakeControls(page, "watch-stage");
+    await openSettings(page, "watch");
+    await expect(page.getByTestId("watch-codec")).toContainText(
+      "自動 (AV1 720p)",
+    );
   });
 });

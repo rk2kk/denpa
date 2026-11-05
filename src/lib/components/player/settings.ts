@@ -1,5 +1,6 @@
 import type { CaptionLanguage } from "@danything/arib/caption-text";
 
+import { type Step, stepLabel } from "#lib/adapt.js";
 import {
   formatLabel,
   type LiveChoice,
@@ -11,10 +12,10 @@ import { SPEEDS } from "#lib/ts/pacing.js";
 import type { IconShape } from "./icons";
 
 /**
- * 再生の設定 (⚙ `SettingsMenu`) に並べるもの。**3画面 (ライブ・追っかけ・観る画面) で同じ形。**
+ * 再生の設定 (⚙ `SettingsMenu`) に並べるもの。**3 画面 (ライブ・追っかけ・観る画面) で同じ形。**
  *
  * - 選ぶもの (`SettingChoice`) … 行にいまの値を出し、押すと選択肢の並びに入る (字幕・音声・コーデック)
- * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CMスキップ・データ放送・データ放送を常に受信・実況・
+ * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CM スキップ・データ放送・データ放送を常に受信・実況・
  *   アンビエントモード・バックグラウンド再生・互換モード。並べるのは `StageTail`)
  *
  * 何を覚えるか (端末ごと) は各画面と `ambient.svelte.ts`・`background.svelte.ts` が持つ。ここは並べ方だけ
@@ -46,8 +47,8 @@ export interface SettingToggle {
   on: boolean;
   toggle: () => void;
   /**
-   * 押したらメニューを閉じる (既定は閉じない)。押したあとに窓を出すもの (互換モードの運転中の注意) — 開いたままだと、
-   * 窓のボタンを押した1回目がメニューの外を押したことになって、閉じるだけで終わる
+   * 押したらメニューを閉じる (既定は閉じない)。押したあとに窓を出すもの (互換モードの運転中の注意)。開いたままだと、
+   * 窓のボタンを押した 1 回目がメニューの外を押したことになって、閉じるだけで終わる
    */
   closes?: boolean;
   /** 名前の後ろに添える注記 (「この局にはありません」など。括弧は付けて出す) */
@@ -67,8 +68,9 @@ const AUTO = "auto";
 /**
  * ライブと追っかけのコーデック。並びは **自動 → AV1 → H.265 → H.264 → MPEG-2** (`#lib/live-choice.ts`)。押すと再エンコードに
  * なるので映像が一瞬止まるが、前の映像を貼ったまま差し替わる。自動の行の値には、いま決まっている形式を添える (「自動 (MPEG-2)」)。
+ * 回線に合わせて段を下げていれば高さも添える (「自動 (H.264 540p)」「自動 (音声だけ)」)。
  *
- * `raw` を渡すと (ライブだけ) 末尾に **MPEG-2** が並ぶ。エンコードせずに放送そのままを
+ * 末尾に **MPEG-2** が並ぶ (ライブも追っかけも)。エンコードせずに放送そのままを
  * この端末でデコードする経路 (docs/stream.md#放送そのままmpeg-2を送る)。
  * H.265 は `hevc` を渡したときだけ並ぶ (ライブで、ライブのエンコーダが GPU のとき。`server/viewing.ts`)。
  * `hidden` (世帯の設定。H.264 と H.265 を出さない) なら H.264 と H.265 は並べない。自動でそれになっているのは値に出す。
@@ -80,8 +82,8 @@ export function liveCodecs(opts: {
   choice: LiveChoice;
   /** いま決まっている形式 (自動の行の値に添える) */
   format: LiveFormat;
-  /** MPEG-2 を並べるか (ライブだけ。追っかけに放送のままは無い) */
-  raw?: boolean;
+  /** 回線に合わせて下げた段 (`live-player.svelte.ts` の `step`)。自動の行の値に高さを添える (「自動 (H.264 540p)」)。省くと 0 */
+  step?: Step;
   /** H.265 を並べるか (ライブで、ライブのエンコーダが GPU のときだけ。追っかけは出さない) */
   hevc?: boolean;
   hidden?: boolean;
@@ -103,7 +105,7 @@ export function liveCodecs(opts: {
     icon: opts.icon,
     value:
       opts.choice === "auto"
-        ? `自動 (${formatLabel(opts.format)})`
+        ? `自動 (${stepLabel(opts.step ?? 0, formatLabel(opts.format))})`
         : formatLabel(opts.choice),
     options: [
       { key: AUTO, label: "自動", active: opts.choice === "auto" },
@@ -116,9 +118,7 @@ export function liveCodecs(opts: {
           disabled: off,
         };
       }),
-      ...(opts.raw === true
-        ? [{ key: MPEG2, label: "MPEG-2", active: opts.choice === "raw" }]
-        : []),
+      { key: MPEG2, label: "MPEG-2", active: opts.choice === "raw" },
       ...(opts.onpreset
         ? (opts.presets ?? []).map((p) => ({
             key: `tuner:${p.id}`,
@@ -139,12 +139,14 @@ export function liveCodecs(opts: {
 
 /**
  * 観る画面のコーデック。録画ごとに観られるものが違い、「自動」も並ぶので、並びは渡されたまま
- * (`ts/playback.ts` の `codecChoices`)。`disabled` は互換モードでこの端末が描けない形式 (`canvasChoices`)
+ * (`ts/playback.ts` の `codecChoices`)。`disabled` は互換モードでこの端末が描けない形式 (`canvasChoices`)。
+ * 「自動」を選んでいる間の行の値は `auto` (段を下げていれば「自動 (H.264 540p)」。選択肢の名前は「自動」のまま)
  */
 export function recordingCodecs(opts: {
   icon: IconShape;
   choices: { key: string; label: string; disabled?: boolean }[];
   selected: string;
+  auto: string;
   onpick: (key: string) => void;
 }): SettingChoice {
   return {
@@ -152,8 +154,11 @@ export function recordingCodecs(opts: {
     label: "コーデック",
     icon: opts.icon,
     value:
-      (opts.choices.find((c) => c.key === opts.selected) ?? opts.choices[0])
-        ?.label ?? "",
+      opts.selected === "auto"
+        ? opts.auto
+        : ((
+            opts.choices.find((c) => c.key === opts.selected) ?? opts.choices[0]
+          )?.label ?? ""),
     options: opts.choices.map((c) => ({
       key: c.key,
       label: unplayable(c.label, c.disabled === true),
@@ -165,8 +170,8 @@ export function recordingCodecs(opts: {
 }
 
 /**
- * 音声 (主音声・副音声・解説など)。二カ国語も多重音声も、見ている人には「音声を選ぶ」1つの操作。
- * 選べるものが2つ以上あるときだけ渡す — 何が「選べるもの」かは画面ごとに違う
+ * 音声 (主音声・副音声・解説など)。二カ国語も多重音声も、見ている人には「音声を選ぶ」1 つの操作。
+ * 選べるものが 2 つ以上あるときだけ渡す。何が「選べるもの」かは画面ごとに違う
  * (ライブは再エンコードで切り替え、録画はコンテナの中から選ぶ)
  */
 export function audioTracks<T extends string | number>(opts: {
@@ -185,8 +190,8 @@ export function audioTracks<T extends string | number>(opts: {
 }
 
 /**
- * 字幕 (`subtitle`)。**オフと、選べる字幕を1つの並びに。** 字幕のストリームが複数ある放送 (`tracks`。たまにある) は
- * ストリームごとに、1本の中に言語が複数ある放送 (`languages`) は言語ごとに並べる。言語が分かるのは
+ * 字幕 (`subtitle`)。**オフと、選べる字幕を 1 つの並びに。** 字幕のストリームが複数ある放送 (`tracks`。たまにある) は
+ * ストリームごとに、1 本の中に言語が複数ある放送 (`languages`) は言語ごとに並べる。言語が分かるのは
  * いまデコードしているストリームだけ (ほかのストリームは切り替えるまで分からない) なので、そこだけ言語に開く。
  *
  * 選んだら字幕を出す (`onoff(true)`)。ストリームを替えるのは再エンコード (`ontrack`)、言語を替えるのは
@@ -195,7 +200,7 @@ export function audioTracks<T extends string | number>(opts: {
 export function subtitles(opts: {
   icon: IconShape;
   on: boolean;
-  /** 字幕のストリーム (ライブ・追っかけ)。観る画面は1本なので省く */
+  /** 字幕のストリーム (ライブ・追っかけ)。観る画面は 1 本なので省く */
   tracks?: { index: number; label: string }[];
   track?: number;
   languages: CaptionLanguage[];
@@ -229,7 +234,7 @@ export function subtitles(opts: {
     for (const l of languages)
       one(`${current}:${l.index}`, l.label, opts.language === l.index);
   } else {
-    // 選ぶものが無い (言語が1つだけ・まだ分からない)。出すか消すかだけ
+    // 選ぶものが無い (言語が 1 つだけ・まだ分からない)。出すか消すかだけ
     const only = opts.languages[0];
     one(
       `${current}:0`,
@@ -297,7 +302,7 @@ function speeds(opts: {
   };
 }
 
-/** 畳んだときの消音の行 (3画面同じ。操作バーの音のボタン) */
+/** 畳んだときの消音の行 (3 画面同じ。操作バーの音のボタン) */
 export function muteRow(
   icon: IconShape,
   on: boolean,

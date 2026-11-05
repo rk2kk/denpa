@@ -34,20 +34,44 @@
 足したのは Background Fetch の受け取りとオフラインの入口だけで、
 `/offline` を install 時に控えて、ナビゲーションが繋がらないときの行き先にします
 (ブラウザのダウンロード表示を押したときも `backgroundfetchclick` で `/offline` を開く)。
+繋がらないときは**どの画面を開いても `/offline` へ移します** (その URL のまま `/offline` の HTML を返すと、
+殻がその URL の画面として始まり、データを取得してエラーになる)。`/offline` は SSR を切った殻で、開くたびに
+共通の枠のデータ (`/offline/__data.json`。ログイン情報など) を取得するので、これも一緒にキャッシュして
+繋がらないときだけ返します。キャッシュしていなかった頃は、電波が無いと真っ白な画面になっていました。
+
+「繋がらない」と見なすのは次の場合だけです (実装は [reach.ts](../src/lib/reach.ts))。
+
+- 端末が繋がっていないと言うとき (`navigator.onLine` が false)。取得せずにすぐ移します。この状態は覚えず、
+  繋がり直せばすぐ取得します
+- 応答のヘッダが 10 秒届かないとき。ヘッダが届いたあとの本体は待たないので、遅い画面でも見切りません。
+  見切ったあとの 5 秒だけは取得しません (開いた画面、`/offline`、`/offline/__data.json` と続けて取得するので、
+  毎回 10 秒待たせないため)。応答が届いたときと、`online` イベントのときは、この記憶をすぐ捨てます
+
+iPhone の Safari は機内モードで、取得したものが失敗せず返事待ちのまま止まることがあり、いつまでも
+読み込み中になっていました。
+
+`service-worker.js` だけは `Cache-Control: no-cache` を付けて返します (`src/lib/server/fresh-worker.ts`)。
+adapter-bun は名前に指紋の無い静的ファイルに `Cache-Control` を付けないので、前段 (Cloudflare など) が
+持ち続けると、組み直しても新しいサービスワーカーが端末に届きません。
 
 ## データモデル (IndexedDB)
 
-DB 名 `denpa-offline`、ストア3つ (実体は [offline-db.ts](../src/lib/offline-db.ts) の型が正):
+DB 名 `denpa-offline`、ストア 4 つ (実体は [offline-db.ts](../src/lib/offline-db.ts) の型が正):
 
-- `videos` (key: 録画ID) … 保存した録画1本。`video: Blob` と付属のデータ
-  (`captionText`: `captions.json` の JSON・`poster: Blob`・`chapters`/`databroadcast`: JSON) を1行にまとめ、
+- `videos` (key: 録画 ID) … 保存した録画 1 本。`video: Blob` と付属のデータ
+  (`captionText`: `captions.json` の JSON・`poster: Blob`・`chapters`/`databroadcast`: JSON) を 1 行にまとめ、
   名前・局名・開始時刻・尺・どれを保存したか (`source: 'encoded' | 'hevc' | 'alt'`)、
   試みの印 (`attempt`)、状態 (`state`) を持つ。
-- `outbox` (key: 録画ID) … オンライン復帰で処理する予約 (`{op: 'delete', name, queuedAt}`)。
-- `resume` (key: 録画ID) … オフライン中に進んだ視聴位置。復帰時にまとめて
+- `outbox` (key: 録画 ID) … オンライン復帰で処理する予約 (`{op: 'delete', name, queuedAt}`)。
+- `resume` (key: 録画 ID) … オフライン中に進んだ視聴位置。復帰時にまとめて
   `POST /api/recordings/<id>/resume` で送る。
+- `parts` (key: `[録画ID, 番号]`) … ページで受け取った動画の塊 (16MiB ずつ。下記の 5)。
+  その録画の `videos` の行は `video` の代わりに塊の数 (`parts`) と形式 (`videoType`) を持つ。
+  **読むときは `videos.get` / `all` が塊を 1 本の `video` につないで出す**ので、観る画面・`/offline`・SW は
+  塊を知らなくてよい (つないでも中身は写さない。置き場の Blob はファイルを指しているだけ)。
+  塊が欠けていたら `video` 無しとして扱い、消すときは塊も消す。DB のバージョンは 2 (1 で保存したものはそのまま読める)。
 
-`state` は `'downloading' | 'ready' | 'failed'` の3つ。**失敗は消さずに残す。**
+`state` は `'downloading' | 'ready' | 'failed'` の 3 つ。**失敗は消さずに残す。**
 通知 (トースト) は一瞬なので、控えごと消すと無かったことに見える。残った行がそのまま
 「保存をやり直す」の入口になる。進み具合 (%) は IndexedDB に置かず、画面側のメモリだけで持つ (下記)。
 
@@ -57,23 +81,35 @@ DB 名 `denpa-offline`、ストア3つ (実体は [offline-db.ts](../src/lib/off
 
 ### ダウンロード — Background Fetch API を使う
 
-1. **HEAD で下見してから預ける** (`probeDownloads`)。Background Fetch は
-   404 が1つでも混ざると全体が失敗になる (`failureReason: bad-status`) ので、付属のデータは
+1. **HEAD で下見してから預ける** (`probeDownloads`。一度に訊く)。Background Fetch は
+   404 が 1 つでも混ざると全体が失敗になる (`failureReason: bad-status`) ので、付属のデータは
    在るものだけに絞る。`downloadTotal` を超えても打ち切られるので、HEAD の実測合計 (+2%) を渡す。
    どちらも実機の Edge で踏んだ。
 2. `backgroundFetch.fetch(id, urls, {title, downloadTotal})` でブラウザに預ける (タブを
-   閉じても続く。`/api/…/file` もほかの API と同じくログインの控えで通る)。登録IDは
-   `rec-<録画ID>-<source>-<試みの印>`。同じIDが生きている間は再登録できないので
+   閉じても続く。`/api/…/file` もほかの API と同じくログインの控えで通る)。登録 ID は
+   `rec-<録画ID>-<source>-<試みの印>`。同じ ID が生きている間は再登録できないので
    やり直しのたびに印を変え、前回の残骸は登録前に中止する。遅れて届く残骸の中止の通知が
    新しい控えを消さないよう、SW 側は印を照合する。
-3. **進み具合は2秒おきに `get()` で読み直す** (`watchProgress`)。`progress` イベントだけだと、
+3. **進み具合は 2 秒おきに `get()` で読み直す** (`watchProgress`)。`progress` イベントだけだと、
    遅い回線でブラウザが止めて再開したあとの通知が届かず、割合が張り付く。
 4. SW の `backgroundfetchsuccess` で IndexedDB へ移して `state='ready'`。
    `backgroundfetchfail` / `backgroundfetchabort` は `state='failed'` として残す。
    開き直したときは、「保存中」なのにブラウザ側にダウンロードが無ければ失敗に倒す (`watchRunning`)。
 5. 対応していないブラウザ (Safari / Firefox) はページ主導の fetch にフォールバック
-   (タブを開いたまま。進捗は一覧の行の3段目に出す)。機能検出は
-   `'backgroundFetch' in swReg`。仕分けは SW の受け取りと共有 (`storeResponse`)。
+   (タブを開いたまま。進捗は一覧の行の 3 段目に出す)。機能検出は
+   `'backgroundFetch' in swReg`。付属のデータの仕分けは SW の受け取りと共有 (`storeResponse`)。
+   - **始めたら返る** (`saveOffline` は受け取り終わりを待たない)。押したらすぐ「保存中」にし、
+     下見は動画だけ (付属のデータは受け取るときに無ければ飛ばす。下見はサーバで録画を読みます。
+     字幕は ffmpeg、チャプターは ffprobe で読むので、1 つずつ訊いていた頃は始まるまで数秒待たせていた)。
+     付属のデータは動画と同時に取得する。途中の失敗は `state='failed'` で残し、塊は捨てる
+   - 取り消し・削除は受け取りも止める。開き直したときに「保存中」なのに受け取っていない行は失敗に倒す
+     (ページを閉じた・読み込み直した時点で止まっている。`watchRunning`)
+   - **動画は 16MiB の塊ごとに `parts` へ書きながら受け取る** (`stream-parts.ts`)。全部をメモリに
+     溜めてから 1 つの Blob にしていた頃は、900MB の録画で iPhone の Safari のタブがだんだん重くなり、
+     最後は落とされて読み込み直しになっていた。書いている間も次の塊を受け取る (書き込みは 1 つずつ)
+   - **割合の分母は、返事に `Content-Length` が無ければ下見 (HEAD) の大きさ。** Cloudflare など
+     間に入るものが外して送ることがあり、そのときは割合が出ず流れるだけの表示になっていた。
+     割合は 1% 変わったときだけ書き換える (届くたびに一覧を描き直さない)
 
 ### どれを保存するか — 端末がデコードできるコーデック
 
@@ -95,10 +131,15 @@ DB 名 `denpa-offline`、ストア3つ (実体は [offline-db.ts](../src/lib/off
 - **オンラインの `/watch`** は、`videos` に `ready` があり、ファイルをそのまま読む方式を自動で選んだときは
   `URL.createObjectURL(blob)` を `src` にする (コーデックを選んだときや、サーバが流すものを選んだときはサーバから)。
   src を差し替えるだけなので操作
-  (チャプター・CM飛ばし・速度・字幕・データ放送) はそのままで、付属のデータも端末のものを読む。
+  (チャプター・CM 飛ばし・速度・字幕・データ放送) はそのままで、付属のデータも端末のものを読む。
   互換モードでは保存した Matroska をそのまま canvas に描く (`mkv-source.ts`。[stream.md](stream.md#録画の観る画面も-canvas-に描く))。
 - **オフラインの `/offline`** は素の `<video controls>` で、動画だけを流す
-  (字幕・チャプター・データ放送は保存してあっても使わない)。位置は5秒ごとに `resume` ストアへ。
+  (字幕・チャプター・データ放送は保存してあっても使わない)。位置は 5 秒ごとに `resume` ストアへ。
+  **`<video>` が `error` を返したら canvas に描く** (観る画面の互換モードと同じエンジン。`canvas-player.ts`・`mkv-source.ts`)。
+  保存したものは Matroska で、iPhone の Safari の `<video>` は Matroska を読めない (再生ボタンに斜線が出るだけだった)。
+  読めるかを `canPlayType` で前もって調べても当てにならない (Chrome は再生できるのに読めないと答える) ので、渡して
+  `error` イベントが起きたら移る。canvas のときは再生・一時停止・位置のつまみ・時刻を自前で出す。音のデコーダ
+  (`/api/live/mpeg2/decoder.{mjs,wasm}`) は SW が install 時にキャッシュし、繋がらないときはキャッシュから返す (`/api/` で唯一キャッシュするもの)
 - 使い終わったら `URL.revokeObjectURL` する。
 
 ### 削除とサーバ同期
@@ -110,8 +151,8 @@ DB 名 `denpa-offline`、ストア3つ (実体は [offline-db.ts](../src/lib/off
   視聴位置 (`resume` ストア) も同じ合図で送る。
 
 > [!WARNING]
-> **「消したら自動でサーバも消す」は取り返しがつかない。** `/offline` の削除は2回押しで、
-> 2回目の文言を「端末とサーバから削除」にしてある。端末だけを消す操作 (一覧の詳細の
+> **「消したら自動でサーバも消す」は取り返しがつかない。** `/offline` の削除は 2 回押しで、
+> 2 回目の文言を「端末とサーバから削除」にしてある。端末だけを消す操作 (一覧の詳細の
 > 「端末から消す」「保存を取り消す」、失敗した行の「失敗した保存データを消す」) はサーバに触らない。
 
 ## 決めたこと
@@ -120,6 +161,6 @@ DB 名 `denpa-offline`、ストア3つ (実体は [offline-db.ts](../src/lib/off
 
 - **削除の API: `DELETE /api/recordings/[id]`。** 何度呼んでも同じ結果になる
   (答えは [api.md](api.md#録画を消す-delete-apirecordingsid))。
-- **容量: 保存する前に確かめる** (30分で約300MB)。`navigator.storage.estimate()` の空きが
+- **容量: 保存する前に確かめる** (30 分で約 300MB)。`navigator.storage.estimate()` の空きが
   HEAD で測った合計の 1.2 倍に満たなければ断り、`navigator.storage.persist()` で
   ブラウザに勝手に消させない。

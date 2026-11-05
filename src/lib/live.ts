@@ -1,11 +1,11 @@
 /**
  * ライブ視聴で、サーバとブラウザが取り決めていること。**両側から読む。**
  *
- * 1本の WebSocket で全部を一緒に送る ([stream.md](../../docs/stream.md#websocket-プロトコル))。
+ * 1 本の WebSocket で全部を一緒に送る ([stream.md](../../docs/stream.md#websocket-プロトコル))。
  *
  *     [1 byte: 種別][8 bytes: 時刻 (90kHz, BE)][中身...]
  *
- * 時刻は**エンコードした mp4 の物差し** — 受け側の `video.currentTime` と直に
+ * 時刻は**エンコードした mp4 の物差し**。受け側の `video.currentTime` と直に
  * 突き合わせられる。映像と字幕を**同じ ffmpeg** でエンコードしているので、入口で
  * 0 に寄せる幅が両方に同じだけ効く (`server/captions.ts` に実測)。変換せずに送る経路 (`rawTs`) と
  * その字幕は放送の PTS のまま
@@ -14,10 +14,11 @@
 import type { CaptionLanguage } from "@danything/arib/caption-text";
 
 import type { AudioTrack } from "./arib";
+import type { Pace, Rung } from "./rungs";
 
 /**
  * エンコード方式 ([stream.md](../../docs/stream.md#エンコード))。`av1` は量を採るが、SVT-AV1 が溜め込むぶん放送の今から
- * 1秒ほど離れる (`server/live.ts` の `videoArgs`)。`h264` は速さを採り、どの端末でも出る。
+ * 1 秒ほど離れる (`server/live.ts` の `videoArgs`)。`h264` は速さを採り、どの端末でも出る。
  * `hevc` (H.265) は**ライブのエンコーダが GPU のときだけ**出す (ソフトウェアのエンコーダを組んでいない。`#lib/hw.ts` の
  * `SOFTWARE_CODECS`)。出せるかはサーバが決めて画面に渡す (`server/viewing.ts` の `ViewingOptions.hevc`)。追っかけでは出さない。
  * **画面の既定は「自動」** (`#lib/live-choice.ts` の `autoCodec`)。指示で省かれたときの既定は `h264` のまま (テレビのアプリ)。
@@ -44,16 +45,19 @@ export const LIVE_CODECS: { id: LiveCodec; label: string }[] = [
  *   (`server/live.ts` の `videoArgs`。ffmpeg の既定の `hev1` は Safari が受け取らない)
  * - `Opus` … MP4 での Opus の名前 (中の箱の名前と同じく大文字の O)。Safari は小文字の `opus` を断る
  *   (Chromium は両方受け取る)。入れ物が WebM なら小文字が正しいので、エンコード済みのファイルは `opus` のまま
+ * - `audio` … 音声だけ (AAC)。回線に合わせて下げる最後の手 (`TuneCommand.codec`)
  *
  * **音声も組で決まる** (`server/live.ts` の `audioArgs`)。AV1 は Opus、H.264・H.265 は AAC
  * (H.265 を受け取りたいのは AV1 をデコードできない端末で、MP4 の Opus を受け取れるとは限らない)
  */
-export function codecsFor(codec: LiveCodec): string {
+export function codecsFor(codec: LiveCodec | "audio"): string {
+  if (codec === "audio") return 'audio/mp4; codecs="mp4a.40.2"';
   if (codec === "av1") return 'video/mp4; codecs="av01.0.08M.08,Opus"';
   if (codec === "hevc") return 'video/mp4; codecs="hvc1.1.6.L123.B0,mp4a.40.2"';
   return 'video/mp4; codecs="avc1.640029,mp4a.40.2"';
 }
 
+/**
 /**
  * チューナー側の画質プリセット (DT295 のオンボード変換)。
  * `passthrough` は変換しない = 放送の MPEG-2 そのまま。値は選局のときにだけ効く。
@@ -69,7 +73,7 @@ export const LIVE_TUNER_PRESETS: { id: LiveTunerPreset; label: string }[] = [
 ];
 
 /**
- * 選べる字幕1つぶん。**取り決めなので、ここに置く** — 組み立てるのは
+ * 選べる字幕 1 つぶん。**取り決めなので、ここに置く**。組み立てるのは
  * サーバ (`server/captions.ts` の `TrackList`) だが、画面も同じ形式で読む
  */
 export interface CaptionTrack {
@@ -95,7 +99,7 @@ export const CHANNEL = {
   // 0x10・0x11 (音声) は使わない (映像と同じコンテナに入れている)
   /**
    * **字幕の文字の配置** (JSON。`caption-text.ts` の `CaptionPage`)。サーバが置き場所まで決め、
-   * 受け側が描く。前の1枚を丸ごと置き換える (`runs` が空なら消す)。
+   * 受け側が描く。前の 1 枚を丸ごと置き換える (`runs` が空なら消す)。
    * 0x20 (字幕の画像) と 0x21 (字幕を消す) は以前の取り決めで、もう使わない (番号は空けておく)
    */
   captionText: 0x22,
@@ -119,24 +123,32 @@ export type Notice =
       channel: string;
       /** MSE に渡す codecs 文字列。エンコード方式から決まる */
       codecs: string;
-      /** いまエンコードしているコーデック。コーデックのメニューがどれを指すか */
-      codec: LiveCodec;
+      /**
+       * いまエンコードしているコーデック。コーデックのメニューがどれを指すか。`audio` は音声だけ
+       * (`TuneCommand.codec`。回線に合わせて下げる最後の手)
+       */
+      codec: LiveCodec | "audio";
       /** **エンコードせずに元の TS を送るか** (`CHANNEL.rawTs`) */
       raw: boolean;
+      /**
+       * いまの段 (`#lib/rungs.ts`。回線に合わせて下げた画質)。0 は下げていない。リクエストした段より高ければ、
+       * サーバが混んでいて下げられなかった (理由は続く `notice`)。段を下げたときの `codec` はサーバが `playable` から選んだもの
+       */
+      rung: Rung;
       /** いまエンコードしている音声 (`AudioTrack.id`) */
       audio: string;
-      /** 選べる音声。1つしか無ければ画面は切り替えを出さない */
+      /** 選べる音声。1 つしか無ければ画面は切り替えを出さない */
       audios: AudioTrack[];
     }
   | {
-      /** 選べる字幕。ffmpeg が入口で読んだストリーム一覧から分かるので、1枚も届いていなくても来る (`captions.ts` の `TrackList`) */
+      /** 選べる字幕。ffmpeg が入口で読んだストリーム一覧から分かるので、1 枚も届いていなくても来る (`captions.ts` の `TrackList`) */
       type: "captions";
       tracks: CaptionTrack[];
       /** いま出しているもの (`CaptionTrack.index`) */
       track: number;
       /**
-       * いまの字幕のストリームに載っている言語 (字幕管理データから)。**届くまでは省く** — 知らない受け側は
-       * 読み飛ばせばよく、そのときは第1言語だけが届く
+       * いまの字幕のストリームに載っている言語 (字幕管理データから)。**届くまでは省く**。知らない受け側は
+       * 読み飛ばせばよく、そのときは第 1 言語だけが届く
        */
       languages?: CaptionLanguage[];
       /** この視聴者に出している言語 (`CaptionLanguage.index`) */
@@ -159,11 +171,16 @@ export type Notice =
       totalSec: number;
       /** 録り終わっているか。true なら右端はもう伸びない */
       finished: boolean;
+      /**
+       * 元の TS で送るとき (`ChaseCommand.raw`)、**録画の先頭の PTS** (90kHz。`ts/seek.ts` の `tsHead`)。画面は届いた
+       * PTS からこれを引いて再生位置を出す (`sinceHead`)。バイト数から割り出した位置 (`at`) より正しい。読めなければ省く
+       */
+      origin?: number;
     }
   | {
       /**
        * 追っかけ再生が**録れているところまで読み切った**。エラーではない。
-       * 画面は MediaSource を閉じる (`MediaSource.endOfStream`) — 閉じないと、
+       * 画面は MediaSource を閉じる (`MediaSource.endOfStream`)。閉じないと、
        * バッファの端で「読み込み中」のまま止まって見える
        */
       type: "ended";
@@ -192,18 +209,25 @@ export type Notice =
   | {
       /**
        * **失敗ではないが、リクエストどおりにできなかった**ことの一行。映像は出ている。
-       * いまは「GPU でエンコードできなかったのでソフトウェアでエンコードしている」だけ (`server/live.ts` の
-       * `GPU_GAVE_UP`)。画面は断り書き (`warning`) に出す
+       * 「GPU でエンコードできなかったのでソフトウェアでエンコードしている」(`server/live.ts` の `GPU_GAVE_UP`) や、
+       * 「サーバが混んでいて画質を下げられなかった」(`RUNG_BUSY`) など。画面は断り書き (`warning`) に出す
        */
       type: "notice";
       message: string;
     }
+  | ({
+      /**
+       * **送り出しの具合** (`#lib/rungs.ts` の `Pace`。`server/pace.ts`)。2 秒ごとか、塊を捨てた・溜まりが動いたときに来る。
+       * 回線が細いのか、サーバのエンコードが遅いのかを読み分けて段を決める (`adapt.ts`)
+       */
+      type: "pace";
+    } & Pace)
   | {
       /**
        * **チューナーから外された** (読んでいたストリームが、こちらが畳む前に途切れた)。セッションはここで畳む。
        *
        * いちばん多いのは録画にチューナーを取り上げられたとき (ライブは録画にだけ譲る。docs/agent.md「選ぶ順の約束」)。
-       * 画面は同じ局をリクエストし直す — 使ってよいチューナーが空いていればそこに入り、見ているものは変わらない。
+       * 画面は同じ局をリクエストし直す。使ってよいチューナーが空いていればそこに入り、見ているものは変わらない。
        * **リクエストし直しても入れなかったときだけ** `recording` の追っかけに切り替える (`live-player.svelte.ts`)。
        * チューナーを取り上げた録画が分からない (録画ではなかった・エージェントに訊けなかった) なら null
        */
@@ -228,7 +252,7 @@ export type Notice =
  * 取り上げられたあとでそのチューナーの利用者にいる録画 (`rec <録画ID>`) を名指しする。エージェントは予約を知らない
  */
 export interface YieldedRecording {
-  /** 録画ID。追っかけ (`chase` / `GET /api/recordings/<id>/chase`) に渡す */
+  /** 録画 ID。追っかけ (`chase` / `GET /api/recordings/<id>/chase`) に渡す */
   id: number;
   /** 番組名 (記号を落としたもの。録画の一覧の `title` と同じ) */
   title: string;
@@ -239,8 +263,8 @@ export interface YieldedRecording {
 
 /**
  * 譲った録画の追っかけを**録れているところの少し手前から**観るときにリクエストする位置 (秒)。
- * サーバは録れている範囲に収める (`server/chase.ts` の `chasePlan`)。ライブの代わりに観るので、頭からではなく今に近いところ。
- * どの録画よりも長い値 (1週間) にしてある
+ * サーバは録れている範囲に収める (`server/chase.ts` の `chasePlan`)。ライブの代わりに観るので、先頭からではなく今に近いところ。
+ * どの録画よりも長い値 (1 週間) にしてある
  */
 export const CHASE_EDGE = 7 * 24 * 60 * 60;
 
@@ -260,7 +284,7 @@ export interface HybridcastLink {
  * ブラウザ→サーバの指示。
  *
  * **局まで渡す。** 物理チャンネルだけでは、いま流れている番組が引けない
- * (1つの物理チャンネルに複数の局が入っている)。番組が引けないと、インタレ解除で
+ * (1 つの物理チャンネルに複数の局が入っている)。番組が引けないと、インタレ解除で
  * コマ数を倍にするかどうかを決められない (国内アニメだけ倍にしない)。
  *
  * **音声もここで指定する。** 選び直しは再エンコードになる (下の説明) ので、
@@ -278,34 +302,48 @@ export type Command =
    */
   | { type: "data"; on: boolean }
   /**
-   * 字幕の言語を選ぶ (第何言語か。1〜8)。**再エンコードしない** — 字幕のストリーム1本に全部の言語が入っていて、
+   * 字幕の言語を選ぶ (第何言語か。1〜8)。**再エンコードしない**。字幕のストリーム 1 本に全部の言語が入っていて、
    * サーバは全部デコードしている (`server/captions.ts` の `CaptionText`)。出す言語を視聴者ごとに替えるだけ
    */
-  | { type: "language"; language: number };
+  | { type: "language"; language: number }
+  /**
+   * **追っかけの元の TS を送るのを止めてほしい・続けてほしいときに、画面が送る** (`ChaseCommand.raw` で受けているときだけ効く)。
+   * 画面は受信バッファが溜まったときと一時停止している間に `on: true` を、受信バッファが減ったら `on: false` を送る。サーバは `on: true` の間、
+   * 録画のファイルを読まずに待つ。サーバは倍速で送り込む (`server/chase.ts`) が、元の TS は捨てると観ていない先が欠けるので、
+   * 捨てる代わりにこれで止める
+   */
+  | { type: "hold"; on: boolean };
 
 /**
- * 追っかけ再生 — **録画中の録画を頭から観る** (issue #16)。
+ * 追っかけ再生。**録画中の録画を先頭から観る** (issue #16)。
  *
- * チューナーは使わない。録画が書き足している元のTSをサーバが追い読みして、
+ * チューナーは使わない。録画が書き足している元の TS をサーバが追い読みして、
  * ライブと同じ形式 (fMP4 → この WebSocket) で再エンコードする (`server/chase.ts`)。
+ * `raw` なら再エンコードせず、元の TS をそのまま送る (ライブの MPEG-2 と同じ `CHANNEL.rawTs`)。
  *
- * **シークもこれを送り直す。** 元のTSに時間の索引は無いので、飛ぶときは
+ * **シークもこれを送り直す。** 元の TS に時間の索引は無いので、飛ぶときは
  * ffmpeg ごと立て直す (ライブの選局し直しと同じ流儀)。バッファに残っている
  * 範囲内なら画面は送らずに `video.currentTime` だけ動かす
  */
 type ChaseCommand = {
   type: "chase";
   recordingId: number;
-  /** 再生開始位置 (秒)。省くと頭から */
+  /** 再生開始位置 (秒)。省くと先頭から */
   at?: number;
   /** どの音声を出すか。`TuneCommand.audio` と同じ理屈 */
   audio?: string;
   /** どのコーデックでエンコードするか。省くと `h264` */
   codec?: LiveCodec;
-  /** 何本目の字幕か。省くと1本目 */
+  /** 何本目の字幕か。省くと 1 本目 */
   caption?: number;
-  /** 字幕の第何言語を出すか (1〜8)。省くと第1言語 */
+  /** 字幕の第何言語を出すか (1〜8)。省くと第 1 言語 */
   language?: number;
+  /** **エンコードせずに元の TS で欲しい** (`TuneCommand.raw` と同じ。`codec` は効かない) */
+  raw?: boolean;
+  /** 回線に合わせて下げた段 (`TuneCommand.rung` と同じ)。追っかけはもともと枠を使うので、枠が埋まって下げられないことは無い */
+  rung?: Rung;
+  /** 端末が再生できるコーデック (`TuneCommand.playable` と同じ) */
+  playable?: LiveCodec[];
 };
 
 type TuneCommand = {
@@ -314,16 +352,19 @@ type TuneCommand = {
   channel: string;
   serviceId: number;
   /**
-   * どの音声を出すか (`AudioTrack.id`)。省くと先頭 = 主音声。選ぶのはサーバ — 複数の音声を入れた fMP4 は
+   * どの音声を出すか (`AudioTrack.id`)。省くと先頭 = 主音声。選ぶのはサーバ。複数の音声を入れた fMP4 は
    * ブラウザによって切り替えられない (`audioTracks` の実装がまちまち)
    */
   audio?: string;
-  /** どのコーデックでエンコードするか。省くと `h264`。音声と同じで、選び直すと再エンコードになる */
-  codec?: LiveCodec;
-  /** どの字幕を出すか (`CaptionTrack.index`)。省くと1本目。字幕は映像と同じ ffmpeg なので、選び直すと再エンコード */
+  /**
+   * どのコーデックでエンコードするか。省くと `h264`。音声と同じで、選び直すと再エンコードになる。
+   * `audio` は映像を止めて音声だけにする (回線に合わせて下げる最後の手。`#lib/adapt.ts`)。`rung` を 1〜3 にすると音声は 96k
+   */
+  codec?: LiveCodec | "audio";
+  /** どの字幕を出すか (`CaptionTrack.index`)。省くと 1 本目。字幕は映像と同じ ffmpeg なので、選び直すと再エンコード */
   caption?: number;
   /**
-   * 字幕の第何言語を出すか (1〜8)。省くと第1言語。**選び直しは `{ type: 'language' }` で** (再エンコードしない)
+   * 字幕の第何言語を出すか (1〜8)。省くと第 1 言語。**選び直しは `{ type: 'language' }` で** (再エンコードしない)
    */
   language?: number;
   /**
@@ -333,6 +374,22 @@ type TuneCommand = {
    * 変換せずに送ると音声は画面が選ぶので、`audio` は選び直しても再エンコードにならない
    */
   raw?: boolean;
+  /**
+   * **デバッグ用に、このチューナーだけで選局する** (エージェントの `tuner`。設定の「この端末」で選ぶ。`live-tuner.svelte.ts`)。
+   * 省くとエージェントが選ぶ。使えなければ、ほかへ振り替えずに理由を返す
+   */
+  tuner?: string;
+  /**
+   * **回線に合わせて下げた段** (`#lib/rungs.ts`。0〜3。省くと 0 で、今までと同じ)。1〜3 なら段の高さ・30 コマ・ビットレートの上限で
+   * 変換する。コーデックは `codec` ではなく、サーバが `playable` から選んで `tuned` で知らせる。`raw` では効かない。
+   * 同じ段を誰も観ていなければその場で変換する本数の枠を使い、埋まっていれば下げない (`tuned` の `rung` と `notice`)
+   */
+  rung?: Rung;
+  /**
+   * 端末が再生できるコーデック。段を下げるとき、サーバはこの中から AV1 → H.265 → H.264 の順に GPU でエンコードできる最初のものを選び、
+   * 無ければソフトウェアの H.264 にする。省くと `codec` と H.264
+   */
+  playable?: LiveCodec[];
 };
 
 /** WebSocket の宛先 */
@@ -342,7 +399,7 @@ export const SOCKET_PATH = "/api/live/socket";
 export interface Tuned {
   channelType: string;
   channel: string;
-  /** 局の内部ID (`services.id`)。いま流れている番組からコマ数を決めるのに要る */
+  /** 局の内部 ID (`services.id`)。いま流れている番組からコマ数を決めるのに要る */
   serviceId: number;
   /** どの音声を出すか (`AudioTrack.id`)。省くと主音声 */
   audio?: string;
@@ -355,7 +412,7 @@ export interface Tuned {
 /**
  * 前回見ていた局を覚えておく cookie (`/live` にだけ付ける。中身は局・音声と、コーデックのメニューで選んだもの (`choice`。
  * `#lib/live-choice.ts`) の JSON。前の形式の `codec`・`raw` は読まない)。サーバが読んで、繋いでくる前に
- * エンコードし始める (`server/live.ts` の `warm`)。どの局を開くかはサーバ側1箇所で決める (`server/viewing.ts` の `liveStart`)。
+ * エンコードし始める (`server/live.ts` の `warm`)。どの局を開くかはサーバ側 1 箇所で決める (`server/viewing.ts` の `liveStart`)。
  * localStorage と二重に持つと、先にエンコードしたものが使われず別の局が開いていた
  */
 export const LAST_COOKIE = "denpa_live_last";

@@ -21,7 +21,7 @@ import { run } from "./stream";
 const KEY_SCENE = 8;
 
 /**
- * エンコードする鎖の頭に足すフィルタ。印 (`lavfi.scd.time`) の付いたコマを `-force_key_frames scd_metadata` が
+ * エンコードするフィルタの並びの先頭に足すフィルタ。印 (`lavfi.scd.time`) の付いたコマを `-force_key_frames scd_metadata` が
  * キーフレームにする。同じ ffmpeg に並ぶ CM 検出の `scdet@cm` と名前で分ける
  */
 export const KEY_SCDET = `scdet@key=threshold=${KEY_SCENE}`;
@@ -29,13 +29,13 @@ export const KEY_SCDET = `scdet@key=threshold=${KEY_SCENE}`;
 interface Keyframe {
   /** 見せる時刻 (秒) */
   pts: number;
-  /** デコードする時刻 (秒)。B フレームがあると pts より前 (x264 で 2コマ) */
+  /** デコードする時刻 (秒)。B フレームがあると pts より前 (x264 で 2 コマ) */
   dts: number;
 }
 
 /**
  * ffprobe のパケット一覧 (`pts,dts,flags`) から、キーフレームと最初のコマの時刻を読み取る。
- * **パケットを読むだけでデコードしない**ので、30分の録画でも数秒で済む
+ * **パケットを読むだけでデコードしない**ので、30 分の録画でも数秒で済む
  */
 export function parseKeyframes(csv: string): {
   keys: Keyframe[];
@@ -81,13 +81,13 @@ export async function listKeyframes(
   return found.keys.length > 0 ? found : null;
 }
 
-/** 残す1切れ (エンコードしたものの時刻) */
+/** 残す 1 切れ (エンコードしたものの時刻) */
 interface Piece {
-  /** 頭のキーフレームの pts */
+  /** 先頭のキーフレームの pts */
   start: number;
-  /** 尻 (次の CM の頭のキーフレームの pts)。null は終わりまで */
+  /** 末尾 (次の CM の先頭のキーフレームの pts)。null は終わりまで */
   end: number | null;
-  /** 尻のキーフレームの dts。**ここで読むのをやめる** (concat の `outpoint` は dts で見る) */
+  /** 末尾のキーフレームの dts。**ここで読むのをやめる** (concat の `outpoint` は dts で見る) */
   outpoint: number | null;
 }
 
@@ -98,9 +98,9 @@ interface CutPlan {
 }
 
 interface CutLimits {
-  /** エンコードしたものの時刻 − 境目の物差しの時刻 (秒)。muxer が頭を数ミリ秒ずらす */
+  /** エンコードしたものの時刻 − 境目の物差しの時刻 (秒)。muxer が先頭を数ミリ秒ずらす */
   offset: number;
-  /** 同じ境目とみなすずれ (秒)。1コマ半 */
+  /** 同じ境目とみなすずれ (秒)。1 コマ半 */
   tolerance: number;
   /** CM 側へ寄せてよい長さ (秒) */
   margin: number;
@@ -109,12 +109,12 @@ interface CutLimits {
 }
 
 /**
- * 残す区間 (`keep`) を、エンコードしたもののキーフレームで切る段取り。**どこか1つでも切れなければ null**
+ * 残す区間 (`keep`) を、エンコードしたもののキーフレームで切る段取り。**どこか 1 つでも切れなければ null**
  * (呼ぶ側が境目を指して再エンコードする)。
  *
  * - 境目から `tolerance` 以内のキーフレームがあれば、そこ (切れ目に置いたもの)
- * - 無ければ CM 側へ `margin` まで — 頭は前へ、尻は後ろへ (本編を削らない)
- * - 録画の頭と尻は切らない (最初のキーフレームから・終わりまで)
+ * - 無ければ CM 側へ `margin` まで寄せる。先頭は前へ、末尾は後ろへ (本編を削らない)
+ * - 録画の先頭と末尾は切らない (最初のキーフレームから・終わりまで)
  */
 export function planCut(
   keep: Range[],
@@ -157,7 +157,7 @@ export function planCut(
       if (tail === null) return null;
     }
     const previous = pieces.at(-1);
-    // 寄せた結果 前の切れと重なれば1つに
+    // 寄せた結果、前の切れと重なれば 1 つにする
     if (
       previous !== undefined &&
       previous.end !== null &&
@@ -184,7 +184,7 @@ const quote = (path: string) => `'${path.replace(/'/g, "'\\''")}'`;
  * concat デマクサに渡す一覧。同じファイルを切れの数だけ並べ、`inpoint` / `outpoint` で切る。
  *
  * **`duration` は pts で書く** (`end - start`)。書かないと concat は `outpoint - inpoint` を
- * 長さにするが、`outpoint` は dts なので x264 (B フレームあり) では 2コマ短くなり、
+ * 長さにするが、`outpoint` は dts なので x264 (B フレームあり) では 2 コマ短くなり、
  * 切れ目ごとに後ろが詰まってずれていく
  */
 export function cutList(file: string, pieces: Piece[]): string {
@@ -248,7 +248,7 @@ export function chapterArgs(
   ];
 }
 
-/** 境目の時刻 (キーフレームを置く所)。残す区間の頭と尻。録画の頭と尻は除く */
+/** 境目の時刻 (キーフレームを置く所)。残す区間の先頭と末尾。録画の先頭と末尾は除く */
 export function cutPoints(keep: Range[], duration: number): number[] {
   const out: number[] = [];
   for (const range of keep) {

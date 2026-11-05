@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RETURN_PATH } from "../niconico";
-import { config } from "./config";
+import { config, userAgent } from "./config";
 import { now, orm } from "./db";
 import { randomToken } from "./oidc";
 import { niconicoLink } from "./schema";
@@ -34,7 +34,7 @@ const REFRESH_BEFORE = 5 * 60_000;
 /** 応答に期限が無かったときのアクセストークンの長さ (秒)。短めに見て早く更新する */
 const DEFAULT_EXPIRES_IN = 30 * 60;
 /** hub を待つ上限 (ms)。hub はニコニコを 15 秒で打ち切る */
-const HUB_TIMEOUT = 20_000;
+export const HUB_TIMEOUT = 20_000;
 /** hub が結果の暗号化に使う HKDF の info (denpa-hub との約束) */
 const INFO = new TextEncoder().encode("denpa-hub niconico token v1");
 
@@ -150,7 +150,7 @@ interface Tokens {
 
 /**
  * トークンの応答 (RFC 6749 5.1) を読む。hub は手を加えずに渡すので、読むものだけ読む。
- * `access_token` が無ければ投げる。期限が無い・数でないときは短めに見て、`warn` に言う
+ * `access_token` が無ければ投げる。期限が無い・数でないときは短めに見て、`warn` を呼ぶ
  */
 export function readTokens(
   body: unknown,
@@ -298,7 +298,7 @@ function unseal(data: Buffer, column: string): string {
 // ---- 状態・更新・外す ----
 
 /** 設定の画面に出す状態 */
-export type LinkState =
+type LinkState =
   | { state: "none" }
   | { state: "linked"; userId: string; linkedAt: number }
   | { state: "lost"; lostAt: number };
@@ -334,9 +334,6 @@ function warn(message: string): void {
   warnedShape = true;
   console.warn(`[niconico] ${message}`);
 }
-
-const USER_AGENT = () =>
-  `denpa/${config.version} (+https://github.com/danything/denpa)`;
 
 /** 走っている更新。同時に何か所から呼ばれても 1 本だけ */
 let refreshing: Promise<string | null> | null = null;
@@ -390,7 +387,7 @@ async function refresh(): Promise<string | null> {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
-      "User-Agent": USER_AGENT(),
+      "User-Agent": userAgent(),
     },
     body: new URLSearchParams({
       grant_type: "refresh_token",

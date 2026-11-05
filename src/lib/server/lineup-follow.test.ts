@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { NitReader, SdtReader } from "@danything/arib/psi";
 import {
@@ -11,6 +11,7 @@ import {
   sdtSection,
 } from "@danything/arib/synth";
 
+import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
 import type { AgentChannel } from "./tuner";
 
 /**
@@ -19,12 +20,15 @@ import type { AgentChannel } from "./tuner";
  */
 const { config } = await import("./config");
 config.dbPath = join(mkdtempSync(join(tmpdir(), "denpa-follow-")), "denpa.db");
+// 置き場 (組んだエージェントの証明書など) も同じ一時ディレクトリに。既定の /data は CI では書けない
+config.dataDir = dirname(config.dbPath);
 
 /** エージェントの控え。PUT で入れ替わる */
 let saved: AgentChannel[] = [];
 const puts: { channels: AgentChannel[]; scanned: string[] }[] = [];
 const server = Bun.serve({
   port: 0,
+  tls: fakeAgentTls(),
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path !== "/denpa/channels")
@@ -43,7 +47,8 @@ const server = Bun.serve({
     return Response.json(saved);
   },
 });
-config.agentUrl = `http://127.0.0.1:${server.port}`;
+config.agentUrl = fakeAgentUrl(server.port!);
+trustFakeAgent();
 
 const { orm } = await import("./db");
 const { channelChanges } = await import("./schema");

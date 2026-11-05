@@ -86,7 +86,7 @@ COPY --from=mpeg2wasm /opt/denpa/mpeg2 /
 # 照らし、合うときだけ immutable にする (src/lib/server/font.ts)。
 # 段を分けてあるのは、本番イメージと画像を撮るイメージ (下の `docs` 段) の両方に同じものを置くため
 # ---------------------------------------------------------------------------
-FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS denpa-font
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS denpa-font
 # renovate: datasource=github-releases depName=danything/denpa-font
 ARG DENPA_FONT_VERSION=v3.7
 ADD --chmod=644 https://github.com/danything/denpa-font/releases/download/${DENPA_FONT_VERSION}/SHA256SUMS \
@@ -153,7 +153,7 @@ CMD ["bun", "scripts/capture-docs.ts"]
 # agent/Dockerfile も同じ)。タグだけだと月に何度か中身が入れ替わり、CI は `pull: true` なので
 # その日の push が — CSS を1行直しただけでも — ffmpeg の組み直し (10分強) に巻き込まれる。
 # 固定しておけば組み直すのは Renovate が digest を上げる PR のときだけになる
-FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS ffmpeg
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS ffmpeg
 SHELL ["/bin/bash", "-c"]
 # **arch ごとに、その arch のランナーで組む** (CI は amd64 と arm64 を別の機械で。QEMU で
 # ffmpeg を組むと何倍も掛かる)。digest は複数 arch の索引を指しているので、上の FROM は
@@ -244,6 +244,8 @@ COPY patches/ /patches/
 # - フィルタ: 引数に書いたもののほか、ffmpeg が自分で差し込むもの (buffer・null・format・aformat・scale・
 #   aresample・trim・atrim・fps、回転の印がある画像の transpose・hflip・vflip・rotate)
 # - overlay は切り抜きに字幕・コメントを重ねる (clips.ts)
+# - scale_vaapi は回線に合わせて画質を下げたライブ・変換で、VA-API でデコードした映像を GPU の上で縮める
+#   (hwenc.ts の liveHwArgs の `cap`。フレームを CPU に降ろさないため)
 # - testsrc2・sine・telecine・tinterlace・noise は denpa は使わず、イメージの確かめで素材を作るためだけ
 #   (.github/image-smoke.sh と scripts/fps-smoke.ts)。合わせても数百 KB
 RUN case "${TARGETARCH}" in \
@@ -299,7 +301,7 @@ RUN case "${TARGETARCH}" in \
       --enable-muxer=matroska,mp4,adts,avif,rawvideo,null,image2,mpegts \
       --enable-parser=mpegvideo,h264,aac,av1,opus,png,mjpeg,webp,hevc,ac3,mpegaudio,aac_latm \
       --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
-      --enable-filter=buffer,buffersink,abuffer,abuffersink,null,anull,format,aformat,scale,aresample,trim,atrim,fps,transpose,hflip,vflip,rotate,bwdif,setsar,scdet,metadata,ametadata,silencedetect,channelsplit,pan,hwupload,deinterlace_vaapi,hwupload_cuda,scale_cuda,bwdif_cuda,crop,split,vstack,field,separatefields,signalstats,thumbnail,nullsrc,testsrc2,sine,telecine,tinterlace,noise,overlay \
+      --enable-filter=buffer,buffersink,abuffer,abuffersink,null,anull,format,aformat,scale,aresample,trim,atrim,fps,transpose,hflip,vflip,rotate,bwdif,setsar,scdet,metadata,ametadata,silencedetect,channelsplit,pan,hwupload,deinterlace_vaapi,scale_vaapi,hwupload_cuda,scale_cuda,bwdif_cuda,crop,split,vstack,field,separatefields,signalstats,thumbnail,nullsrc,testsrc2,sine,telecine,tinterlace,noise,overlay \
       --enable-indev=lavfi \
       --enable-protocol=file,pipe \
     && \
@@ -331,7 +333,7 @@ RUN case "${TARGETARCH}" in \
 # **Mesa は 25 系に留める** (renovate.json)。26 系は libdrm 2.4.133 以上を求め、trixie の libdrm は 2.4.124。
 # arm64 では組まない (AMD の GPU を載せた arm の機械はまず無い)。空の /out を残し、runtime-libs 段の COPY が通るようにする
 # ---------------------------------------------------------------------------
-FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS mesa
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS mesa
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG TARGETARCH
 # renovate: datasource=gitlab-tags depName=mesa/mesa registryUrl=https://gitlab.freedesktop.org extractVersion=^mesa-(?<version>\d+\.\d+\.\d+)$
@@ -392,7 +394,7 @@ FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:d710a5c8bfe4cf7e726d7e1
 # AMD の VA-API ドライバ (radeonsi) は `mesa` 段で組んだもの。それが繋ぐライブラリ (libdrm-amdgpu1 など) と、
 # GPU の名前の一覧 (libdrm-common の amdgpu.ids) は Debian から入れる。これも amd64 だけ
 # ---------------------------------------------------------------------------
-FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime-libs
+FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime-libs
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG TARGETARCH
 RUN case "${TARGETARCH}" in \
@@ -512,7 +514,7 @@ COPY --from=mpeg2wasm /opt/denpa/mpeg2 /opt/denpa/mpeg2
 # bun の組み込み (`bun:sqlite`) だけ。載せていた頃は playwright も vite も
 # typescript もイメージに入っていて、**312MB がまるごと無駄**だった。
 # 置くのは下のものだけ: build/ (アプリ)、server.js (入口) とそれが読む
-# src/lib/server/address.ts・compress.ts・hold-signals.ts、package.json (`"type": "module"` の宣言)、drizzle/
+# src/lib/server/address.ts・compress.ts・fresh-worker.ts・hold-signals.ts、package.json (`"type": "module"` の宣言)、drizzle/
 # (マイグレーション)。これで起動して /api/health が答えるかは CI で毎回見ている
 # (.github/image-smoke.sh。PR の docker-build-check と、push の前の build-and-deploy)
 #
@@ -530,6 +532,8 @@ COPY --from=build /app/server.js ./server.js
 COPY --from=build /app/src/lib/server/address.ts ./src/lib/server/address.ts
 # 入口が画面の HTML とデータを縮めるのに使う (`src/lib/server/compress.ts`。同じく `node:zlib` しか引かない)
 COPY --from=build /app/src/lib/server/compress.ts ./src/lib/server/compress.ts
+# 入口がサービスワーカーに Cache-Control: no-cache を付けるのに使う (`src/lib/server/fresh-worker.ts`。何も引かない)
+COPY --from=build /app/src/lib/server/fresh-worker.ts ./src/lib/server/fresh-worker.ts
 # 入口がいちばん先に読む。起動の途中に来た止まれの合図を取っておく (`src/lib/server/hold-signals.ts`。何も引かない)
 COPY --from=build /app/src/lib/server/hold-signals.ts ./src/lib/server/hold-signals.ts
 

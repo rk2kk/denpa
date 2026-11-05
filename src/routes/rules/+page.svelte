@@ -86,7 +86,7 @@
     return () => clearInterval(timer);
   });
 
-  /** ルールの削除は2回押させる (録画・通知先と同じ。[arming.svelte.ts](../../lib/arming.svelte.ts)) */
+  /** ルールの削除は 2 回押させる (録画・通知先と同じ。[arming.svelte.ts](../../lib/arming.svelte.ts)) */
   const deleting = arming('[data-testid^="rule-delete"]');
   /**
    * 行のスイッチを送るとき。**送っている間は押せなくする** (連打で何度も切り替わらない)。
@@ -131,9 +131,9 @@
 <Toasts {notices} source={form} />
 
 <!--
-    **ホームと同じ作り。** 左に1本の一覧 (2段の件を件の面に乗せて並べる)、広い形では右にサイドバー
+    **ホームと同じ作り。** 左に 1 本の一覧 (2 段の件を件の面に乗せて並べる)、広い形では右にサイドバー
     (絞り込み・並び・集計。ドキュメントの目次と同じ行)。スマホの形 (下のタブがある形。`#lib/phone-form.ts`) では、
-    絞り込みと並びを細い1行にまとめ、画面の下、タブのすぐ上に置く (押すものは指の届く下に)
+    絞り込みと並びを細い 1 行にまとめ、画面の下、タブのすぐ上に置く (押すものは指の届く下に)
 -->
 <div class="rules-board">
   <div class="rules-list" data-testid="rule-list">
@@ -190,7 +190,7 @@
     {/if}
 
     {#if data.rules.length === 0}
-      <div class="empty glow" data-testid="rule-empty">
+      <div class="empty-state glow" data-testid="rule-empty">
         <p class="bold">ルールはまだありません</p>
         <p class="small muted">
           <a href={resolve("search")}>検索</a
@@ -198,10 +198,10 @@
         </p>
       </div>
     {:else}
-      <ul class="rows" data-testid="rule-table">
+      <ul class="item-list" data-testid="rule-table">
         {#each paged.rows as rule (rule.id)}
           <!--
-                        **2段の件。** 1段目に名前、右にスイッチと削除。2段目に条件・次の放送・予約と録画の数・最後に録れた日。
+                        **2 段の件。** 1 段目に名前、右にスイッチと削除。2 段目に条件・次の放送・予約と録画の数・最後に録れた日。
                         件を押すと検索の画面でそのルールを直す。スイッチと削除はリンクの外 (隣) なので、押してもルールは開かない
                     -->
           <li
@@ -273,13 +273,16 @@
                 data-testid="rule-switch"
               />
             </form>
-            <ArmedDelete
-              {deleting}
-              armKey={rule.id}
-              fields={{ id: rule.id }}
-              class="xs"
-              testid="rule-delete"
-            />
+            <!-- 削除は行の操作 (`app.css` の `.row-actions`。押す的は 40px。docs/design.md) -->
+            <div class="row-actions">
+              <ArmedDelete
+                {deleting}
+                armKey={rule.id}
+                fields={{ id: rule.id }}
+                class="small"
+                testid="rule-delete"
+              />
+            </div>
           </li>
         {:else}
           <li class="none small muted" data-testid="rule-none">
@@ -355,15 +358,15 @@
   </aside>
 
   <!--
-        スマホの形の細い1行。絞り込みは横に送れる1列のチップ、並びは選ぶ欄、右に「作る」。
+        スマホの形の細い 1 行。絞り込みは横に送れる 1 列のチップ、並びは選ぶ欄、右に「作る」。
         画面の下 (タブの上) に貼り付ける
     -->
-  <div class="rules-bar" data-testid="rule-bar">
+  <div class="rules-bar dock" data-testid="rule-bar">
     <div class="bar-chips" role="group" aria-label="絞り込み">
       {#each FILTERS as f (f.key)}
         <button
           type="button"
-          class="chip-button"
+          class="chip-button pick-line"
           aria-pressed={filter === f.key}
           onclick={() => (filter = f.key)}
           data-testid="rule-bar-filter-{f.key}"
@@ -476,30 +479,14 @@
   }
 
   /*
-     * **行は2段の件** (ホームの行と同じく件の面 (`app.css` の `.item`) に乗せ、件の間は余白)
+     * **行は 2 段の件** (ホームの行と同じく件の面 (`app.css` の `.item`) に乗せ、並べ方は `.item-list`)
      */
-  .rows {
-    display: flex;
-    flex-direction: column;
-    gap: var(--dp-list-gap);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
   .row {
     display: flex;
     align-items: center;
     gap: 0.25rem 0.75rem;
-    min-height: 4rem;
-    margin: 0;
+    min-height: var(--dp-item-h);
     padding: 0.5rem 0.75rem;
-    list-style: none;
-  }
-  /* 指で押す端末では 72px (docs/design.md の「何行かある一覧」。ホームの行と同じ) */
-  @media (pointer: coarse) {
-    .row {
-      min-height: 4.5rem;
-    }
   }
   .row-body {
     display: flex;
@@ -524,9 +511,9 @@
   .sep {
     margin-inline: 0.25rem;
   }
-  /* 無効のルールは中身を沈める (印の「無効」と合わせて、色だけに頼らない) */
+  /* 無効のルールは中身を控えた字にする (印の「無効」と合わせて、色だけに頼らない)。透かすと 4.5:1 を割る */
   .row.off .row-body {
-    opacity: 0.55;
+    color: var(--dp-muted);
   }
   .switch {
     display: flex;
@@ -541,23 +528,11 @@
     text-align: center;
     list-style: none;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--dp-space-2);
-    padding: 3rem 1rem;
-    text-align: center;
-  }
-  .empty p,
   .narrow-summary {
-    margin: 0;
-  }
-  .narrow-summary {
-    margin-bottom: var(--dp-space-2);
+    margin: 0 0 var(--dp-space-2);
   }
 
-  /* ---- スマホの形の細い1行 (`#lib/phone-form.ts`。`<html data-phone>`) ---- */
+  /* ---- スマホの形の細い 1 行 (`#lib/phone-form.ts`。`<html data-phone>`) ---- */
   .bar-chips {
     display: flex;
     flex: 1 1 0%;
@@ -584,24 +559,6 @@
   .chip-button .num {
     color: var(--dp-muted);
   }
-  /*
-     * 選んでいるものはホームのチップ・`app.css` の `.chip` と同じ (囲まず、主の色の太字と字の幅いっぱいの下線)。
-     * 線は疑似要素で 1 本引く (`text-decoration` だと名前と数に別々の線が付く)
-     */
-  .chip-button[aria-pressed="true"] {
-    position: relative;
-    color: var(--dp-primary-text);
-    font-weight: var(--dp-weight-bold);
-  }
-  .chip-button[aria-pressed="true"]::after {
-    content: "";
-    position: absolute;
-    inset-inline: 0.75rem;
-    bottom: 0.2rem;
-    height: 2px;
-    border-radius: 1px;
-    background: var(--pico-primary);
-  }
   .rules-bar select {
     flex: none;
     width: auto;
@@ -617,37 +574,23 @@
     margin: 0;
   }
   /*
-     * **スマホの形ではこの1行を画面の下、タブのすぐ上に浮かせる** (押すものは指の届く下に)。下のタブと同じ操作の層なので、
-     * 同じ半透明のカプセル (`--dp-float`) にして、読んでいる間はタブと一緒に引っ込む (`+layout.svelte` の `data-retract`)。
-     * 一覧の最後の行が隠れないよう、この1行の高さぶん下を空ける
+     * **スマホの形ではこの 1 行を画面の下、タブのすぐ上に浮かせる** (押すものは指の届く下に。形は `app.css` の `.dock`)。
+     * 一覧の最後の行が隠れないよう、この 1 行の高さぶん下を空ける
      */
   :global(:where(html[data-phone])) .rules-bar {
     display: flex;
     align-items: center;
     gap: var(--dp-space-2);
     position: fixed;
-    --dp-btn-solid: transparent;
-    --dp-btn-solid-hover: var(--dp-btn-tonal-hover);
-    --dp-btn-lift: none;
-    inset-inline: 0.75rem;
-    bottom: calc(var(--dp-tabbar, 0px) + 0.375rem);
+    inset-inline: var(--dp-dock-inset);
     z-index: 30;
     padding: var(--dp-space-1) var(--dp-space-1) var(--dp-space-1)
       var(--dp-space-3);
-    border-radius: var(--dp-radius-full);
-    background: var(--dp-float);
-    box-shadow: var(--dp-shadow-pop);
-    transition: transform var(--dp-duration-move) var(--dp-ease-spring);
-  }
-  :global(:where(html[data-phone]))
-    :global([data-retract])
-    .rules-bar:not(:has(:focus-visible)) {
-    transform: translateY(calc(var(--dp-tabbar, 0px) + 0.375rem + 100%));
   }
   :global(:where(html[data-phone])) .rules-list {
     padding-bottom: 4rem;
   }
-  /* 狭い幅の2段目は次の放送と予約・録画の数だけ (条件と最後に録れた日は押した先で見る。幅で決める) */
+  /* 狭い幅の 2 段目は次の放送と予約・録画の数だけ (条件と最後に録れた日は押した先で見る。幅で決める) */
   @media (max-width: 639.98px) {
     .wide-part {
       display: none;

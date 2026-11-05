@@ -105,7 +105,7 @@
   const channels = $derived(data.channels as LiveChannel[]);
 
   /*
-   * 番組が替わったら読み直す (操作列と一覧の番組名を前のまま残さない)。観ている局はサーバが放送の
+   * 番組が替わったら読み直す (操作バーと一覧の番組名を前のまま残さない)。観ている局はサーバが放送の
    * EIT[p/f] を読んで知らせてくる (`programs`)。観ていない局は番組表の予定で、いちばん早く終わる番組の
    * 少し後に読み直す。読み直しても観ているものは変わらない
    */
@@ -119,7 +119,7 @@
       Math.min(...ends) - Date.now() + PROGRAM_END_GRACE,
       PROGRAM_END_FLOOR,
     );
-    // setTimeout は 2^31-1 ms (約24日) を超えると即座に鳴る
+    // setTimeout は 2^31-1 ms (約 24 日) を超えると即座に鳴る
     const timer = setTimeout(reload, Math.min(wait, 2 ** 31 - 1));
     return () => clearTimeout(timer);
   });
@@ -144,7 +144,7 @@
   let dataButton = $state<(() => boolean) | null>(null);
 
   /**
-   * サーバが決めた局で開く (`+page.server.ts` の `start`)。こちらでも同じ判断をしない — サーバは既に
+   * サーバが決めた局で開く (`+page.server.ts` の `start`)。こちらでも同じ判断をしない。サーバは既に
    * その局をエンコードし始めている (`server/live.ts` の `warm`)
    */
   onMount(() => {
@@ -156,7 +156,7 @@
     return () => player.stop();
   });
 
-  /** いま映している局。局で引く (物理チャンネルで引くと、1本に複数の局が入っていると先頭が塗られた) */
+  /** いま映している局。局で引く (物理チャンネルで引くと、1 本に複数の局が入っていると先頭が塗られた) */
   const current = $derived(
     channels.find((c) => c.id === player.tuned?.serviceId),
   );
@@ -253,7 +253,7 @@
   /**
    * データ放送が「この局へ」と言ってきた (epgTune)。手で選んだのと同じ経路 (`select`) で切り替える。
    * original_network_id と service_id で探す (局の一覧は transport_stream_id を持っていない)。
-   * 一覧に無い局なら false — 文書には失敗が返り、文書が自分で案内する
+   * 一覧に無い局なら false。文書には失敗が返り、文書が自分で案内する
    */
   function tuneFromData(service: Service): boolean {
     const found = channels.find(
@@ -274,7 +274,7 @@
     stageEl.scrollIntoView({ block: "start" });
   }
 
-  /** 一覧の各行。開いたときに、いま映している局まで送る (局が100を超えると画面の外のほうが普通) */
+  /** 一覧の各行。開いたときに、いま映している局まで送る (局が 100 を超えると画面の外のほうが普通) */
   const rows: Record<number, HTMLElement | undefined> = $state({});
 
   /** チューナー側の画質。選局したときにだけ効く (下の注記を読む) */
@@ -317,7 +317,7 @@
     if (scrolled || row === undefined || list === null) return;
     scrolled = true;
     /*
-     * `scrollIntoView` は使わない — 動かせるものは何でも動かすので、縦に積む幅では窓ごと動いて、
+     * `scrollIntoView` は使わない。動かせるものは何でも動かすので、縦に積む幅では窓ごと動いて、
      * 読み込み直したときに映像が画面から出ていた。動かすのは一覧の中身だけ (中で動けない幅では何もしない)
      */
     const room = list.scrollHeight - list.clientHeight;
@@ -394,7 +394,7 @@
   }
 
   const controls = playerControls();
-  /** 全画面にする枠と、その出入り (3画面共通) */
+  /** 全画面にする枠と、その出入り (3 画面共通) */
   let stageEl = $state<HTMLElement | null>(null);
   const fullscreen = stageFullscreen(() => stageEl);
 
@@ -433,7 +433,7 @@
     if (canList) {
       if (jikkyoList.on) jikkyoList.toggle();
     } else writing = false;
-    // 一覧の下で打っている間は操作列が引っ込んでいることがある。出し直してから移す (消えている間は押せない)
+    // 一覧の下で打っている間は操作バーが引っ込んでいることがある。出し直してから移す (消えている間は押せない)
     controls.stir();
     void tick().then(() =>
       document
@@ -468,7 +468,7 @@
     },
   });
 
-  /** アンビエントモード。canvas に描いているときは worker から縮めた1枚をもらう */
+  /** アンビエントモード。canvas に描いているときは worker から縮めた 1 枚をもらう */
   const ambient = ambientMode({
     playing: () => !player.paused,
     canvas: () => (player.canvas ? player : null),
@@ -505,10 +505,10 @@
     player.volume = volume.level;
   });
 
-  /** 真ん中あたりを素早く2回で再生/一時停止 (`center-tap.ts`)。1回目は操作列の出し入れ */
+  /** 真ん中あたりを素早く 2 回で再生/一時停止 (`center-tap.ts`)。1 回目は操作バーの出し入れ */
   const stageTap = centerTap(() => player.toggle(), controls.toggle);
 
-  /** いまの1コマを字幕・コメントごと切り抜いてサーバに保存する (3画面共通。`shot.svelte.ts`) */
+  /** いまの 1 コマを字幕・コメントごと切り抜いてサーバに保存する (3 画面共通。`shot.svelte.ts`) */
   const shooter = snapshotter(controls);
   const notices = $derived<Notice[]>([
     ...shooter.notices,
@@ -676,7 +676,7 @@
                 pressD(player.showData, dataButton, (on) => player.setData(on))}
             />
           {/if}
-          <!-- MPEG-2 でも切り抜ける (worker の canvas から1枚もらう。`snapshot.grabbedFrame`) -->
+          <!-- MPEG-2 でも切り抜ける (worker の canvas から 1 枚もらう。`snapshot.grabbedFrame`) -->
           <ControlButton
             icon={shooter.saved ? CHECK : CAMERA}
             label="この場面を切り抜く"
@@ -749,7 +749,7 @@
               />
 
               <!--
-                        字幕を持っている番組でだけ出す。1枚も届いていなくても出す (`server/captions.ts` の
+                        字幕を持っている番組でだけ出す。1 枚も届いていなくても出す (`server/captions.ts` の
                         `TrackList`。届いてから出すと間隔の空く番組で出なかった)
                     -->
               {#if player.hasCaptions}
@@ -823,8 +823,8 @@
                     class="relearn"
                     onclick={() => player.relearn()}
                     data-testid="live-relearn">測り直す</button
-                  >{" "}{/if}{#if player.stalls > 0}・<span
-                    data-testid="live-stalls">途切れ {player.stalls} 回</span
+                  >{/if}{#if player.stalls > 0}・<span data-testid="live-stalls"
+                    >途切れ {player.stalls} 回</span
                   >{/if}{#if player.stalls > 0 || player.floor > FLOOR}・<span
                     data-testid="live-floor"
                     data-target={player.target}
@@ -917,8 +917,8 @@
               codec={liveCodecs({
                 icon: CODEC,
                 choice: player.choice,
-                format: player.raw ? "raw" : player.codec,
-                raw: true,
+                format: player.format,
+                step: player.step,
                 hevc: data.hevc,
                 hidden: data.hidden.length > 0,
                 unavailable: player.unavailable,
@@ -941,7 +941,7 @@
       {#if player.silenced && player.state === "playing"}
         <!--
                     押されるまで音は出せない (前回の局で勝手に始めるので、ブラウザが音ありの再生を断る)。
-                    並びの外に1つだけ浮かぶので、地は映像の上の通知と同じに自分で敷く
+                    並びの外に 1 つだけ浮かぶので、地は映像の上の通知と同じに自分で敷く
                 -->
         <button
           type="button"
@@ -963,7 +963,7 @@
           testid="live-status"
         >
           {#snippet actions()}
-            <!-- 録画に譲っている間は出さない (通知の「ライブに戻る」と2つ並ぶと迷う) -->
+            <!-- 録画に譲っている間は出さない (通知の「ライブに戻る」と 2 つ並ぶと迷う) -->
             {#if player.yielded === null}
               <button
                 type="button"
@@ -987,10 +987,10 @@
         {@const yielded = player.yielded}
         <span class="stage-note yielded" data-testid="live-yielded">
           <span>
-            録画が始まったため、局を切り替えました: <span class="broadcast"
+            録画が始まったため、局を切り替えました。<span class="broadcast"
               >{yielded.recording.title}</span
             >
-            (録画中を再生しています)
+            (録画中) を再生しています
           </span>
           <button
             type="button"
@@ -1002,7 +1002,7 @@
         </span>
         {#if yielded.refused}
           <StageNote testid="live-refused"
-            >録画が終わるまでライブは見られません ({time(
+            >録画が終わるまでライブは観られません ({time(
               yielded.recording.endAt,
             )})</StageNote
           >
@@ -1042,7 +1042,7 @@
     {/snippet}
     {#if detail.current}
       <!--
-            番組の中身は、この列を入れ替えて出す (モーダルにしない — 映像に被さると観ながら読めない)
+            番組の中身は、この列を入れ替えて出す (モーダルにしない。映像に被さると観ながら読めない)
         -->
       <FactsAside
         testid="live-detail"
@@ -1064,7 +1064,7 @@
       <!-- 幅と高さ・サイドバーの形は FactsAside と同じ (PlayerLayout が持つ。一覧は中身が違うので列だけ揃える) -->
       <aside class="live-side">
         <!--
-                データ放送を開いている間だけ、リモコンを一覧の上に出す (入れ替えない — 押しながら局も変えたい)。
+                データ放送を開いている間だけ、リモコンを一覧の上に出す (入れ替えない。押しながら局も変えたい)。
                 常に受信していても、開くまでは出さない
             -->
         {#if dataPress !== null}
@@ -1161,8 +1161,8 @@
                             -->
                 <span class="channel-text">
                   <!--
-                                    テレビの番号を局名の頭に添える (地上波はリモコン番号、BS/CS は3桁)。
-                                    番号の無い局も幅は取る — 局名の頭がそろう
+                                    テレビの番号を局名の頭に添える (地上波はリモコン番号、BS/CS は 3 桁)。
+                                    番号の無い局も幅は取る。局名の頭がそろう
                                 -->
                   <span class="channel-name broadcast">
                     {#if tuned}<span
@@ -1221,7 +1221,7 @@
   }}
 />
 
-<!-- 運転中の注意 (互換モードで初めて再生する前に1回)。押すまで再生を始めない -->
+<!-- 運転中の注意 (互換モードで初めて再生する前に 1 回)。押すまで再生を始めない -->
 <DriveNotice open={drive.open} onaccept={drive.accept} />
 
 <style>
@@ -1282,7 +1282,7 @@
   .back-live:hover:not(:disabled) {
     background: var(--dp-on-video-hover);
   }
-  /* 押すものなので操作列のボタンと同じ段 (実況のコメントより上。`ControlBar`) */
+  /* 押すものなので操作バーのボタンと同じ段 (実況のコメントより上。`ControlBar`) */
   .unmute {
     --pico-background-color: var(--dp-video-veil);
     position: absolute;
@@ -1321,7 +1321,7 @@
     font-size: inherit;
     /* 地は行の決まりと同じ。並べ直した行は前の場所から滑る (上の `slide`) */
     transition:
-      background-color var(--dp-duration),
+      background-color var(--dp-duration) var(--dp-ease),
       translate var(--dp-duration-move) var(--dp-ease-spring);
   }
   /* 並べ直した直後の 1 回だけ、前の場所にずらして置く (印を外すと滑る。印は `slide` が付けるので、Svelte からは見えない) */
@@ -1407,7 +1407,7 @@
   @media (hover: hover) and (pointer: fine) {
     .channel-detail {
       opacity: 0;
-      transition: opacity var(--dp-duration);
+      transition: opacity var(--dp-duration) var(--dp-ease);
     }
     .channel-item:is(:hover, :focus-within) .channel-detail {
       opacity: 1;

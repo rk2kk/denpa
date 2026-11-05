@@ -47,7 +47,7 @@ describe("parseTitle", () => {
     expect(parseTitle("ニュース").arc).toBe("");
   });
 
-  test("頭の鍵括弧は作品名。後ろに続くのは編", () => {
+  test("先頭の鍵括弧は作品名。後ろに続くのは編", () => {
     expect(parseTitle("「東京リベンジャーズ」三天戦争編")).toEqual({
       series: "東京リベンジャーズ",
       arc: "三天戦争編",
@@ -111,7 +111,7 @@ describe("parseTitle", () => {
     );
   });
 
-  test("[無] と頭の <枠の名前> は落とす", () => {
+  test("[無] と先頭の <枠の名前> は落とす", () => {
     expect(parseTitle("[無][新]東京リベンジャーズ #51 [字]")).toMatchObject({
       series: "東京リベンジャーズ",
       episode: 51,
@@ -281,7 +281,7 @@ describe("parseTitle (全角の番組名)", () => {
   });
 });
 
-/** 入れ物の title に埋め込む番組名。プレイヤーがURLの代わりに出す */
+/** 入れ物の title に埋め込む番組名。プレイヤーが URL の代わりに出す */
 describe("displayTitle", () => {
   test("装飾記号だけ落とし、話数もサブタイトルも残す", () => {
     expect(

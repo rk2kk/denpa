@@ -6,7 +6,7 @@ namespace Denpa.Agent;
 ///
 /// <para>
 /// **配布物が無ければ何もしない** (<see cref="Installed"/>。agent/Dockerfile の <c>ASICEN_USERLAND_VERSION=0.0.0</c> が「まだ無い」の印)。
-/// **IPC は px4-userland と同じ**で、違うのは枠の頭とソケットの置き場だけ (<see cref="Px4Wire.Asicen"/>)。
+/// **IPC は px4-userland と同じ**で、違うのはフレームのヘッダとソケットの置き場だけ (<see cref="Px4Wire.Asicen"/>)。
 /// 受信機・TS・内蔵カードは px4d と同じ経路 (<see cref="Px4Tuner"/> / <see cref="Px4Card"/>) を通す。
 /// 機材は sysfs で見つける (<see cref="Scan"/>。上流に並べる道具がまだ無い)。作りは docs/agent.md「asicen-userland の作り」。
 /// </para>
@@ -21,7 +21,7 @@ namespace Denpa.Agent;
 /// </summary>
 public static class AsicenUserland
 {
-    /// <summary>設定の <c>device</c> の頭</summary>
+    /// <summary>設定の <c>device</c> の接頭辞</summary>
     public const string Scheme = "asicen:";
 
     /// <summary>配布アーカイブを展開した場所 (Dockerfile)。実行ファイルは <c>bin/</c> の下</summary>
@@ -139,7 +139,7 @@ public static class AsicenUserland
                 warn($"ASICEN の機材 (USB {where}) はファームウェア待ちのままなので使いません");
                 continue;
             }
-            found.Add(new Enclosure(group.Key, "PX-W3U3", primary, sibling, Receivers(4)));
+            found.Add(new Enclosure(group.Key, "PX-W3U3", primary, sibling, Receivers()));
         }
         return found;
     }
@@ -149,10 +149,10 @@ public static class AsicenUserland
     /// asicend を起こしたあとは <c>asicenctl list</c> の答えで置き換える (<see cref="AsicenDaemon"/>)。
     /// LNB の給電はできない (上流が断る) ので、15V と書いてあっても 0V で選局する (<see cref="Px4Tuner.Lnb"/>)
     /// </summary>
-    public static List<Px4Receiver> Receivers(int count) =>
-        [.. Enumerable.Range(0, Math.Max(count, 0)).Select(index => new Px4Receiver(index, index % 2 == 1, index % 2 == 0, false))];
+    public static List<Px4Receiver> Receivers() =>
+        [.. Enumerable.Range(0, 4).Select(index => new Px4Receiver(index, index % 2 == 1, index % 2 == 0, false))];
 
-    /// <summary>刺さっている筐体 (ファームウェア待ちのものには先に流し込む)。配布物が無ければ空</summary>
+    /// <summary>挿さっている筐体 (ファームウェア待ちのものには先に流し込む)。配布物が無ければ空</summary>
     public static List<Enclosure> Enclosures(Action<string>? warn = null)
     {
         warn ??= Log.Write;
@@ -227,7 +227,7 @@ public static class AsicenUserland
         }
     }
 
-    /// <summary>刺さっている筐体の受信機を、設定に書いたのと同じ形式で</summary>
+    /// <summary>挿さっている筐体の受信機を、設定に書いたのと同じ形式で</summary>
     public static List<TunerSpec> Detect() => Specs(Enclosures());
 
     public static List<TunerSpec> Specs(IEnumerable<Enclosure> enclosures) =>
@@ -244,7 +244,7 @@ public static class AsicenUserland
             var daemon = AsicenDaemon.For(id);
             daemon.Ensure();
             // 聞けなかったときも上流の決まりの並びで見る。null だと 15V をそのまま指定して断られる
-            return daemon.Receivers ?? Receivers(4);
+            return daemon.Receivers ?? Receivers();
         },
         Px4Wire.Asicen, Device(id, receiver), $"asicen-{id} #{receiver}");
 
