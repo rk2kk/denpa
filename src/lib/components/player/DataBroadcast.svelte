@@ -34,6 +34,7 @@
 
   import type { Bml, BmlIp, Rect, Service } from "#lib/bml/engine.js";
   import { type Plane, planeArea } from "#lib/bml/plane.js";
+  import { fetchRelayed } from "#lib/bml/relay.js";
   import {
     type FrameMessage,
     type HcState,
@@ -83,8 +84,8 @@
      * オフなら `isIPConnected` に 0 を返し、放送のアプリに正しく案内させる (1 と答えて取れないと無言で失敗する)
      */
     network: boolean;
-    /** 放送の時刻 (UNIX ミリ秒)。録画は再生位置から出す。渡さなければ放送の TOT から */
-    clock?: (() => number) | null;
+    /** 放送の時刻 (UNIX ミリ秒)。録画は再生位置から出す。渡さないか null を返せば放送の TOT から */
+    clock?: (() => number | null) | null;
     /** 文書が別の局へ選局したい (epgTune)。選局は画面がやり、切り替えたら true。渡さなければいつも失敗 */
     tune?: ((service: Service) => boolean) | null;
     /**
@@ -166,9 +167,7 @@
     const mine = generation;
     void (async () => {
       try {
-        const response = await fetch(
-          resolve(`api/bml/proxy?url=${encodeURIComponent(uri)}`),
-        );
+        const { response } = await fetchRelayed(uri);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const app = pickApp(hint, parseXmlAit(await response.text()));
         if (app === null) throw new Error("開けるアプリがありません");
@@ -338,16 +337,11 @@
      * ときだけ NaN。相手の 404 は「送れた」ので、放送のアプリに判断させる
      */
     transmit: async (uri, body) => {
-      const response = await fetch(
-        resolve(`api/bml/post?url=${encodeURIComponent(uri)}`),
-        {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: body as Uint8Array<ArrayBuffer>,
-        },
-      );
+      const { relayed, response } = await fetchRelayed(uri, {
+        contentType: "application/x-www-form-urlencoded",
+        body: body as Uint8Array<ArrayBuffer>,
+      });
       const got = new Uint8Array(await response.arrayBuffer());
-      const relayed = response.headers.get("x-bml-relayed") === "1";
       return {
         resultCode: relayed ? 1 : Number.NaN,
         status: String(response.status),
@@ -374,10 +368,8 @@
      * 相手の符号と中身をそのまま返し、中継が断った (403/502) ときだけ null
      */
     get: async (uri) => {
-      const response = await fetch(
-        resolve(`api/bml/proxy?url=${encodeURIComponent(uri)}`),
-      );
-      if (response.headers.get("x-bml-relayed") !== "1") return null;
+      const { relayed, response } = await fetchRelayed(uri);
+      if (!relayed) return null;
       return {
         status: response.status,
         contentType:
@@ -439,9 +431,9 @@
       media.style.opacity = "";
       /*
        * **アプリの上に出す。** テレビは映像を放送の object の場所に描く。アプリは枠の周りを塗る
-       * (NHK は枠を黒、画面を灰色) ので、下に敷いたままだと隠れる。操作バー (10) よりは下
+       * (NHK は枠を黒、画面を灰色) ので、下に敷いたままだと隠れる。操作バーの影よりは下 (`--dp-z-stage-window`)
        */
-      media.style.zIndex = "6";
+      media.style.zIndex = "var(--dp-z-stage-window)";
       media.style.inset = "auto";
       media.style.left = share(appVideo.left / VIEWPORT.width);
       media.style.top = share(appVideo.top / VIEWPORT.height);
@@ -806,7 +798,7 @@
 />
 
 <!--
-    映像と同じ枠に重ねる。操作バーより下に敷く (`z-index: 5` / `ControlBar` は 10)。上に載せると
+    映像と同じ枠に重ねる。操作バーより下に敷く (`--dp-z-stage-data`。`ControlBar` のボタンは `--dp-z-stage-controls`)。上に載せると
     d ボタンごと隠れて、出したら消せなくなる
 -->
 <div
@@ -852,7 +844,7 @@
     pointer-events: none;
     position: absolute;
     inset: 0;
-    z-index: 5;
+    z-index: var(--dp-z-stage-data);
     overflow: hidden;
   }
   /* 「取得中」は右上の隅。テレビと同じ場所 (舞台の通知の列には積まない) */
@@ -860,7 +852,7 @@
     position: absolute;
     top: 0.75rem;
     right: 0.75rem;
-    z-index: 10;
+    z-index: var(--dp-z-stage-controls);
     display: flex;
   }
 </style>

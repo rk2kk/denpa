@@ -281,6 +281,8 @@ export function encodeArgs(
   const from = programSpec(program);
   return [
     "-hide_banner",
+    // 字幕の出口が名前付きパイプ (Windows) でも、あるかを確かめさせない (`stream.sideOutput`)
+    "-y",
     // 数字の進み具合だけ止める。`-loglevel` は下げられない (上の説明)
     "-nostats",
     // `-fflags nobuffer` は付けない。解析の間に読んだ I フレームを捨てて次の GOP を待つ (上の説明)
@@ -898,7 +900,7 @@ export function takeLight(id: string, now = Date.now()): Light | null {
  * **次に何を軽くするか。** 順に 60 コマ → 30 コマ (段 0 だけ。段 1〜3 はもう 30 コマ)、ソフトウェア → GPU (同じコーデックを
  * GPU でエンコードできるときだけ)。どれも済んでいれば null (断り書きだけ)。
  * 30 コマを先にするのは、コーデックとエンコーダを替えずに済み、GPU が降りる心配が無いため。
- * `gpuReady` は `pickLiveHw` が経路を返すか。GPU に移せるときだけ呼ぶ (`pickLiveHw` は GPU の振り分けの順を進める)
+ * `gpuReady` は GPU でエンコードできるか (`liveHwAvailable`。振り分けの順は進めない)。GPU に移せるときだけ呼ぶ
  */
 export function nextLight(o: {
   codec: StreamCodec;
@@ -1609,6 +1611,7 @@ class Session {
          */
         if (wanted !== null && !peeked && this.program > 0) {
           peeked = true;
+          const read = stream;
           const head = await peekCaptions(
             stream,
             this.program,
@@ -1628,7 +1631,12 @@ class Session {
            */
           if (head.count !== null && head.count <= wanted) wanted = null;
           if (this.stopped) {
-            if (feed === null) await stream.return(undefined);
+            /*
+             * 追っかけは読み元を閉じる (`stream.chunks` が cancel する)。返ってきた `head.stream` はまだ読み始めて
+             * いないので、閉じても中の finally が走らない。元の `read` を閉じる。読みかけがあると
+             * それが届くまで閉じられないので、待たない
+             */
+            if (feed === null) void read.return(undefined);
             return;
           }
         }
@@ -1638,6 +1646,15 @@ class Session {
         // 遅れと速さは ffmpeg ごとに数え直す (前の ffmpeg の遅れと、起こし直した直後の速さを合わせない)
         this.lag.reset();
         this.meter = new SpeedMeter();
+        // 選べる字幕も ffmpeg ごとに数え直す。新しい ffmpeg も同じ見出しを出すので、続けて数えると同じ字幕が 2 本並ぶ
+        this.list = new TrackList(this.program);
+        /*
+         * **0 に寄せた量 (`start:`) も ffmpeg ごとに読み直す。** 新しい ffmpeg は mp4 の時刻を 0 から数え直し
+         * (受け側は init で作り直す)、そのとき寄せる量は起こし直した時点の PTS になる。前の値のまま
+         * 時計 (`clockNotice`) を配ると、起こし直すまでに流れた秒数だけ放送時刻がずれる
+         * (放送からの遅れの表示・実況のコメント)。読めるまでは時計を配らない
+         */
+        this.startPts = Number.NaN;
         const side = wanted === null ? null : sideOutput();
         const proc = Bun.spawn(
           [
@@ -2071,7 +2088,7 @@ class Session {
       rung: this.rung,
       light: this.light,
       software: this.software,
-      gpuReady: () => codec !== "audio" && pickLiveHw(codec) !== null,
+      gpuReady: () => codec !== "audio" && liveHwAvailable(codec) !== null,
     });
     if (verdict === null) return;
     if (verdict === "heavy") {
@@ -2352,6 +2369,8 @@ class Session {
       // 入口の見出しに出ている「0 に寄せたぶん」。時計を配るのに要る
       if (!Number.isFinite(this.startPts) && line.includes("start:")) {
         this.startPts = parseStart(line);
+        // 起こし直したあとの新しい対応は、次の塊で配る (`CLOCK_EVERY` を待たない)
+        this.toldClockAt = 0;
       }
       // 字幕が無い放送。**映像ごと落ちる**ので、字幕なしで再エンコードする (`run`)
       if (NO_SUBTITLE.test(line)) this.noSubtitle = true;
@@ -2611,7 +2630,7 @@ export const key = (
   `${type}:${channel}:${serviceId}:${form === "raw" ? "*" : audio.id}:${form}:${track}${pin === null ? "" : `@${pin}`}${rung === 0 ? "" : `~${rung}`}`;
 const sessions = new Map<string, Session>();
 
-/** いまライブを観ている人がいるか (セッションが 1 つでもあるか)。Windows をスリープさせないかを決める (`power.ts`) */
+/** いまライブを観ている人がいるか (セッションが 1 つでもあるか)。Windows と Mac をスリープさせないかを決める (`power.ts`) */
 export function hasLiveViewers(): boolean {
   return sessions.size > 0;
 }
@@ -3658,14 +3677,20 @@ function openChase(
   if (size === 0) return refuseHeld("まだ何も録画されていません");
   const release = raw ? (held ?? (() => undefined)) : (held ?? holdTranscode());
   if (release === null) return refuse(BUSY);
-  const stopReading = raw
-    ? () =>
-        chaseReadHeld({
+  /*
+   * **畳んだら読むのをやめる** (`session.whenStopped` で立てる)。止めている間 (`hold`) に畳まれると、`followFile` は
+   * 止めたまま回り続け、録画のファイルと字幕の ffmpeg (`runRaw` の finally に来ない) が残っていた
+   */
+  const reading = { stopped: false };
+  const stopReading = () =>
+    !reading.stopped &&
+    (raw
+      ? chaseReadHeld({
           asked: viewer.held === true,
           congested: viewer.connection.congested === true,
           outside: hold?.() === true,
         })
-    : hold;
+      : hold?.() === true);
 
   const finished = rec.finished_at !== null;
   // 番組が替わって作り直したところの近くなら、そのバイトから (`chase.ts` の `resumePlan`)
@@ -3719,7 +3744,7 @@ function openChase(
           path,
           plan.offset,
           plan.paceBytesPerSec,
-          () => recordingDone(rec.id),
+          () => reading.stopped || recordingDone(rec.id),
           stopReading,
         ),
       (consumed) => rememberResume(rec.id, resumeFrom(plan, consumed)),
@@ -3732,6 +3757,9 @@ function openChase(
     throw failure;
   }
   session.whenStopped(release);
+  session.whenStopped(() => {
+    reading.stopped = true;
+  });
   session.add(viewer);
   if (!raw) {
     void session.run();
