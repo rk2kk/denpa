@@ -10,9 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { config } from "./config";
 import {
   buildArgs,
   combineProgress,
+  encodeAttempts,
   encodeOrder,
   encodeProgress,
   expectedFrames,
@@ -22,7 +24,7 @@ import {
   inputSkip,
   readInputPos,
 } from "./encoder";
-import { hwBitrate } from "./hwenc";
+import { hwBitrate, type HwWay } from "./hwenc";
 
 function argValue(args: string[], key: string): string | undefined {
   const i = args.indexOf(key);
@@ -381,8 +383,7 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・先�
   });
 
   /**
-   * 地上波の HD は 1440x1080 の横長画素で送られてくる。
-   * 添え書きを見ないプレイヤー (実機の Android) では 4:3 に潰れるので、正方形に直して出す。
+   * 地上波の HD は 1440x1080 の横長画素で送られてくる。正方形に直して出す (理由は encoder.ts の `squarePixels`)。
    * **大きさは測って渡す**。`iw*sar` と式で書くと、SAR が読めない素材で
    * 幅が 0 になって落ちる
    */
@@ -785,5 +786,48 @@ describe("combineProgress", () => {
       2,
     );
     expect(got.etaMs).toBeNull();
+  });
+});
+
+describe("encodeAttempts (1 回の実行の中で ffmpeg を起こす順)", () => {
+  const A: HwWay = { device: "/dev/dri/renderD128", kind: "vaapi" };
+  const B: HwWay = { device: "/dev/dri/renderD129", kind: "vaapi" };
+  const R: HwWay = { device: "/dev/mpp_service", kind: "rkmpp" };
+  /** 方式ごとの、捨てる長さの並び (起こした順) */
+  const perWay = (attempts: ReturnType<typeof encodeAttempts>) => {
+    const ways = new Map<string, (number | null)[]>();
+    for (const { seek, hardware } of attempts) {
+      const key = hardware === undefined ? "software" : hardware.device;
+      ways.set(key, [...(ways.get(key) ?? []), seek]);
+    }
+    return ways;
+  };
+
+  test("どの方式も「素のまま → 先頭を少し捨てて」の 2 回だけ。最後にソフトウェア", () => {
+    for (const pointed of [false, true]) {
+      for (const codec of ["av1", "h264", "hevc"] as const) {
+        const attempts = encodeAttempts(codec, [A, B, R], pointed);
+        for (const seeks of perWay(attempts).values())
+          expect(seeks).toEqual([null, config.encodeRetrySeek]);
+      }
+    }
+    expect([...perWay(encodeAttempts("av1", [A, B, R], false)).keys()]).toEqual(
+      [A.device, B.device, R.device, "software"],
+    );
+  });
+
+  test("H.265 はソフトウェアに倒さない。GPU が無ければ 1 回も起こさない", () => {
+    expect([...perWay(encodeAttempts("hevc", [A], false)).keys()]).toEqual([
+      A.device,
+    ]);
+    expect(encodeAttempts("hevc", [], false)).toEqual([]);
+    expect(encodeAttempts("h264", [], false)).toHaveLength(2);
+  });
+
+  test("境目を指すときは、指定を聞かない Rockchip MPP を外す", () => {
+    expect([...perWay(encodeAttempts("h264", [R, A], true)).keys()]).toEqual([
+      A.device,
+      "software",
+    ]);
   });
 });

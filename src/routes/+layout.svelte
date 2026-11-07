@@ -370,7 +370,7 @@
   let menuOpen = $state(false);
   /** 行き先を選んだら閉じる。開いたままだと次の画面の頭が隠れる */
   $effect(() => {
-    // 画面が変わったことをこの参照で知る
+    // pathname を読んでおくと、画面が変わるたびにこの効果が動き直す
     page.url.pathname;
     menuOpen = false;
   });
@@ -686,7 +686,7 @@
   .nav-progress {
     position: fixed;
     inset: 0 0 auto 0;
-    z-index: 60;
+    z-index: var(--dp-z-modal);
     height: 3px;
     overflow: hidden;
     background: var(--pico-primary-background);
@@ -741,7 +741,7 @@
   .navbar {
     position: sticky;
     top: 0;
-    z-index: 40;
+    z-index: var(--dp-z-header);
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -822,7 +822,7 @@
   }
   /*
      * 下線。画面を移ると前の画面の下線から横に滑る (`app.css` の「滑る印」と同じ作り。並びの疑似要素 1 本をアンカーで付ける)。
-     * アンカーを知らないブラウザは、いまの画面のリンクの中に線を引く (滑らない)
+     * アンカーに対応していないブラウザは、いまの画面のリンクの中に線を引く (滑らない)
      */
   ul.links a.button[aria-current="page"]::after {
     content: "";
@@ -880,7 +880,7 @@
   .search-bar {
     position: sticky;
     top: 0;
-    z-index: 40;
+    z-index: var(--dp-z-header);
     padding: calc(var(--dp-space-2) + env(safe-area-inset-top)) var(--dp-gutter)
       var(--dp-space-2);
     background: var(--dp-bg);
@@ -895,7 +895,7 @@
   .tabbar {
     position: fixed;
     inset: auto 0.75rem calc(0.5rem + env(safe-area-inset-bottom)) 0.75rem;
-    z-index: 40;
+    z-index: var(--dp-z-header);
     display: grid;
     grid-auto-columns: minmax(0, 1fr);
     grid-auto-flow: column;
@@ -959,7 +959,7 @@
   }
   /*
      * いまの画面の印。**ほかの横の並び (タブ・ヘッダーのナビ) と同じく、字の幅いっぱいの下線** (主の色、2px)。字 (タブの名前) のすぐ下に引く。
-     * 画面を移ると前のタブの下線から横に滑る (`app.css` の「滑る印」と同じ作り)。アンカーを知らないブラウザは、いまのタブの字の下に線を引く (滑らない)
+     * 画面を移ると前のタブの下線から横に滑る (`app.css` の「滑る印」と同じ作り)。アンカーに対応していないブラウザは、いまのタブの字の下に線を引く (滑らない)
      */
   .tabbar .tab > span,
   .tab-more :global(.tab > span) {
@@ -1111,7 +1111,7 @@
     position: fixed;
     top: calc(env(safe-area-inset-top) + var(--dp-space-2));
     left: calc(env(safe-area-inset-left) + var(--dp-space-3));
-    z-index: 70;
+    z-index: var(--dp-z-skip);
     padding: var(--dp-space-2) var(--dp-space-4);
     border-radius: var(--dp-radius-full);
     background: var(--dp-float);
@@ -1186,7 +1186,7 @@
        * **上端では平ら、巻くと浮く。** 裏に中身が無いうちは浮かせる理由が無いので、地に馴染ませる
        * (docs/design.md の「浮かせ方」)。巻いた量に合わせて面と影が出る (`animation-timeline: scroll()`。JS は使わない)。
        * 窓が巻けない画面のうち、映像の画面 (ライブ・観る画面・追っかけ) はアニメーションごと外して、いつも平ら (アンビエントの色もそのまま届く)。番組表は表の巻いた量で浮く (下の 1000px から)。
-       * 知らないブラウザと、動きを減らす設定の端末 (Pico がアニメーションをすぐ終わらせる) は、いつも浮いた形
+       * 対応していないブラウザと、動きを減らす設定の端末 (Pico がアニメーションをすぐ終わらせる) は、いつも浮いた形
        */
   @supports (animation-timeline: scroll()) {
     :global(:where(html:not([data-phone]))) .navbar {
@@ -1201,7 +1201,7 @@
        * **巻けない画面に移ったら平らに戻す。** 巻けなくなると時間の軸が止まり、Chrome は止まる前の値を残す。
        * 長いページで巻いてから短いページへ移ると、裏に何も無いのに浮いたままになっていた。
        * 上へ戻せる量が無いとき (上端・巻けない画面) はアニメーションごと外す (`scroll-state(scrollable: top)`)。
-       * 番組表は窓ではなく表の巻いた量で浮くので外さない。この問い合わせを知らないブラウザは今までどおり
+       * 番組表は窓ではなく表の巻いた量で浮くので外さない。この問い合わせに対応していないブラウザは今までどおり
        */
   @supports (animation-timeline: scroll()) and (container-type: scroll-state) {
     :global(:where(html:not([data-phone]))) {

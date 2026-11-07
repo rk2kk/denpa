@@ -8,24 +8,27 @@
   import Layers from "~icons/lucide/layers";
   import Palette from "~icons/lucide/palette";
 
-  import { dragScroll, submitting } from "#lib/actions.js";
+  import { dragScroll } from "#lib/actions.js";
   import { GENRE_TREE } from "#lib/arib.js";
   import ChannelNotice from "#lib/components/ChannelNotice.svelte";
   import { guideNavigation } from "#lib/components/GuidePending.svelte";
   import Menu from "#lib/components/Menu.svelte";
   import NowLine from "#lib/components/NowLine.svelte";
   import Icon from "#lib/components/player/Icon.svelte";
+  import ProgramActions from "#lib/components/ProgramActions.svelte";
   import ProgramDetail from "#lib/components/ProgramDetail.svelte";
   import ServiceLogo from "#lib/components/ServiceLogo.svelte";
   import {
     badgeClass,
     channelNumber,
     date,
+    playableRecordingId,
     SERVICE_TYPE_LABEL,
     stateLabel,
     time,
   } from "#lib/format.js";
   import { skeletonMask } from "#lib/guide-skeleton.js";
+  import { minuteClock } from "#lib/minute-clock.svelte.js";
   import { PHONE_FORM } from "#lib/phone-form.js";
   import { reload } from "#lib/reload.svelte.js";
   import {
@@ -313,15 +316,23 @@
     opening++;
     selected = null;
     facts = null;
+    failedFor = null;
   }
 
+  /**
+   * 予約・取消に失敗した番組。理由はこの番組の詳細の中にだけ出す
+   * (`form` は次に送るまで残るので、閉じて別のマスを開くと前の番組の理由が出ていた)
+   */
+  let failedFor = $state<number | null>(null);
   /** 予約・取消を送ったあと。失敗したときは開いたままにして、中に理由を出す */
-  const closeOnSuccess: SubmitFunction =
-    () =>
-    async ({ result, update }) => {
+  const closeOnSuccess: SubmitFunction = () => {
+    const sentFor = selected?.id ?? null;
+    return async ({ result, update }) => {
       await update();
+      failedFor = result.type === "success" ? null : sentFor;
       if (result.type === "success") close();
     };
+  };
 
   const serviceName = (id: number) =>
     services.find((s) => s.id === id)?.name ?? "";
@@ -352,11 +363,8 @@
   }
 
   /** いま何時か。時の列の「いま」の時刻と、過ぎた所を暗くする位置に使う。1 分ごとに進める */
-  let clock = $state(Date.now());
-  $effect(() => {
-    const timer = setInterval(() => (clock = Date.now()), 60_000);
-    return () => clearInterval(timer);
-  });
+  const minute = minuteClock();
+  const clock = $derived(minute.now);
 
   /**
    * 表示中の日にいまが含まれていれば、表の先頭 (4:00) から何マスぶん下か (端数つき)。
@@ -652,9 +660,6 @@
       cancelIdleCallback(handle);
     };
   });
-
-  /** 予約を取り消せるのはこれから録るものだけ。録り終わったものに出しても何も起きない */
-  const CANCELABLE = ["scheduled", "conflict", "skipped", "recording"];
 </script>
 
 <!--
@@ -725,7 +730,6 @@
               title="番組表がまだありません"
               data-testid="guide-day"
               data-start={day.start}
-              aria-disabled="true"
               >{day.label}<span class="visually-hidden">
                 (番組表なし)</span
               ></span
@@ -1200,31 +1204,6 @@
 <!-- 番組の中身。**表の外に置く** (中に入れると巻き取る箱の中で開くことになる) -->
 {#if selected && facts}
   {@const program = selected}
-  <!-- 録れているなら、録画一覧へ戻らずここからそのまま観られるようにする (一覧の `hasFile` と同じ判定) -->
-  {@const canPlay =
-    program.recording_id !== null &&
-    program.recording_state !== "failed" &&
-    (program.library_path ?? program.ts_path) !== null}
-  {@const canWatch =
-    program.start_at <= clock &&
-    program.end_at > clock &&
-    watchable.has(program.service_id)}
-  {@const canCancel =
-    CANCELABLE.includes(program.reservation_state ?? "") &&
-    !(program.reservation_state === "skipped" && program.end_at <= clock)}
-  {@const canReserve =
-    !canCancel &&
-    program.reservation_state === null &&
-    program.end_at > clock &&
-    !program.copy_never}
-  <!-- **主は 1 つだけ。** 予約できるなら予約、録れていれば再生、いま流れていれば視聴 -->
-  {@const primary = canReserve
-    ? "reserve"
-    : canPlay
-      ? "play"
-      : canWatch
-        ? "watch"
-        : null}
   <ProgramDetail program={facts} onclose={close}>
     {#snippet status()}
       {#if program.reservation_state}
@@ -1245,84 +1224,18 @@
     {/snippet}
     {#snippet actions()}
       <!--
-                失敗の理由は詳細の中に出す。番組表にインラインで足すと、その分だけ
-                グリッドが下にずれてスクロールバーが出る。
-
-                **ここだけ Toasts に寄せていない。** 他の画面の通知は右下に浮かせて
-                いるが、押したのはこのモーダルの中のボタンで、モーダルは浮かせた表示より
-                上に出る。下に隠れるものを出しても読めないので、押したボタンの隣に置く
+                何を出すか・どれを主にするかは検索の詳細と同じ (`ProgramActions`)。
+                失敗の理由も詳細の中に出す。番組表にインラインで足すと、その分だけグリッドが下にずれてスクロールバーが出る
             -->
-      {#if form?.message}
-        <div class="notice error">{form.message}</div>
-      {/if}
-
-      <!--
-                **並びは控えから主へ。** 主 (クラスの無いボタン) はいちばん右 (狭い画面では下の段の右端)。
-                閉じるは左下 (`ProgramDetail`)
-            -->
-
-      <!--
-                **ルールを作る。** 予約・録画の詳細と同じ入口
-                (`search/+page.server.ts`。`rule-form.originOf`)。毎回録りたい番組を番組表で
-                見つけたとき、検索で探し直さずに済む
-            -->
-      <a
-        class="button secondary"
-        href={resolve(`search?from=program:${program.id}`)}
-        data-testid="detail-rule"
-      >
-        ルールを作る
-      </a>
-
-      {#if canCancel}
-        <!-- 予約したあと番組表から止められないと、わざわざ予約一覧まで行くことになる -->
-        <form method="POST" action="?/cancel" use:submitting={closeOnSuccess}>
-          <input type="hidden" name="programId" value={program.id} />
-          <button
-            type="submit"
-            class="danger outline"
-            data-testid="detail-cancel">予約取消</button
-          >
-        </form>
-      {/if}
-
-      {#if canWatch}
-        <!--
-                    **いま流れている番組は、その場で観られるようにする** (ライブ画面で同じ局を探し直させない)。
-                    **ライブ画面が持っている局にだけ出す** (`watchable`)。マスは名前の無い枠でも出るので、そのまま出すと
-                    押した先で別の局が映る (分割放送をしていない間のサブチャンネル)。選局は押した先でやり直すのでリンクにする
-                -->
-        <a
-          class="button"
-          class:secondary={primary !== "watch"}
-          href={resolve(`live?service=${program.service_id}`)}
-          data-testid="detail-watch"
-        >
-          視聴
-        </a>
-      {/if}
-
-      {#if canPlay}
-        <!-- 録っている最中なら観る画面が追っかけ (`/chase`) へ送る -->
-        <a
-          class="button"
-          class:secondary={primary !== "play"}
-          href={resolve(`watch/${program.recording_id}`)}
-        >
-          再生
-        </a>
-      {/if}
-
-      {#if canReserve}
-        <!--
-                    録画のしかたは選ばせない (`+page.server.ts` の `reserve`)。コピー禁止の番組には出さない。
-                    押しても断るだけ (`reservations.reserve`)。理由は詳細の「コピー禁止」に添えてある
-                -->
-        <form method="POST" action="?/reserve" use:submitting={closeOnSuccess}>
-          <input type="hidden" name="programId" value={program.id} />
-          <button type="submit" data-testid="detail-reserve">予約</button>
-        </form>
-      {/if}
+      <ProgramActions
+        {program}
+        cancel={{ programId: program.id }}
+        recordingId={playableRecordingId(program)}
+        watchable={watchable.has(program.service_id)}
+        {clock}
+        message={failedFor === program.id ? (form?.message ?? null) : null}
+        onsubmit={closeOnSuccess}
+      />
     {/snippet}
   </ProgramDetail>
 {/if}
@@ -1411,9 +1324,9 @@
   .day-chip.selected.sun {
     color: var(--dp-rec-text);
   }
-  /* 番組表がまだ届いていない日。並びに置くだけで押せない */
+  /* 番組表がまだ届いていない日。並びに置くだけで押せない。控えた字 (カレンダーの押せない日と同じ。透かすと 4.5:1 を割る) */
   .day-chip.disabled {
-    opacity: 0.45;
+    color: var(--dp-muted);
     cursor: not-allowed;
   }
   /*
@@ -1601,7 +1514,7 @@
      * **面は、裏に何か来たときだけ出す。** 時の列の裏にマスが来るのは横に送ったときだけ (`--guide-x`)。
      * 角は地の色で平らに塗り (縦に巻くと裏に来る時の数字と「いま」の時刻を隠すだけ。面にすると局名の左に色の塊が見えた)、
      * 面は時の列と同じく横に送ったときだけ、上に重ねた一枚 (`::after`) で出す。面は透明度だけで出し入れする。
-     * 知らないブラウザと動きを減らす設定の端末 (Pico がアニメーションをすぐ終わらせる) は、いつも面が出ている
+     * 対応していないブラウザと動きを減らす設定の端末 (Pico がアニメーションをすぐ終わらせる) は、いつも面が出ている
      */
   .corner::after,
   .hour::before {
@@ -1830,7 +1743,7 @@
   }
   /*
    * **放送中の番組は、過ぎた所を浅く沈める** (終わった番組と同じ濃さだと、いま見られる番組まで終わって見えた)。
-   * `--past` が 1 に届いていないマスだけ 45% にする。`round()` を知らないブラウザはどちらも 78%
+   * `--past` が 1 に届いていないマスだけ 45% にする。`round()` に対応していないブラウザはどちらも 78%
    */
   @supports (width: round(down, 1px, 1px)) {
     .program {
