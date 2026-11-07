@@ -6,6 +6,10 @@
  * 元のコードは、導入の前に boot0 の body・常駐イメージの RAM などを写して、終わったら書き戻せる (mb86H_loader_restore)。
  * denpa は書き戻さない。閉じるときは常駐イメージを機材に残したまま手放し (mb86H_loader_close と同じ)、元のファームウェアに戻すときは
  * USB をつなぎ直す。そのため写しは取らず、写しにしか使わない読み出しも移していない。
+ *
+ * v2 で増えた preserve_all_ram・引き継いだ個体の常駐イメージの控え (snapshot_adopted_resident)・書き戻しの照合も、
+ * 同じ理由で移していない (書き戻さないので控えが要らない)。firmware_ping と USB の読み出しキャッシュは CLI (usbboot) のためのもの。
+ * 代わりに、v2 の PING の応答 (最小の ABI) の確認はここで行う。
  */
 
 using static Denpa.Agent.Dt295ResidentProtocol;
@@ -132,7 +136,10 @@ public static class Dt295ResidentLoader
     private static void Ping(Dt295ResidentSession session)
     {
         var reply = session.Exchange(Dt295ResidentProtocol.Ping, 0, 0, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 12) != 1) throw new Dt295ResidentException($"boot0 の PING の応答が想定と違います (結果 {Result(reply)})");
+        if (Result(reply) != Ok || Word(reply, 12) != 1 || Word(reply, 20) != MinSupportedAbi)
+        {
+            throw new Dt295ResidentException($"boot0 の PING の応答が想定と違います (結果 {Result(reply)}、ABI {Word(reply, 20)})");
+        }
     }
 
     /// <summary>機材のメモリーを 64 バイトずつ読んで比べる (loader.c の read_region・verify_region)</summary>

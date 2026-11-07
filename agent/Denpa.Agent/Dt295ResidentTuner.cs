@@ -589,7 +589,6 @@ public sealed class Dt295ResidentTuner : ITuneDevice
 public sealed class Dt295ResidentCard : ICardLink
 {
     // CARD コマンドの中身 (constants.h の MB86H_CARD_*。挿さっているかの確認と、常駐イメージ側の電源オフだけ使う)
-    public const byte Version = 2;
     public const uint OpStatus = 0;
     public const uint OpService = 2;
     public const uint OpPowerOff = 3;
@@ -659,7 +658,6 @@ public sealed class Dt295ResidentCard : ICardLink
     {
         if (_failed is not null) throw new IOException($"{Name} は使えなくなっています ({_failed.Message})", _failed);
         var data = new byte[DataSize];
-        data[0] = Version;
         try
         {
             response = Board.Locked(session => session.Command(CommandCard, op, data));
@@ -671,7 +669,7 @@ public sealed class Dt295ResidentCard : ICardLink
         }
         var rc = Error(response);
         if (Result(response) != Ok && rc < 0) return Fail(op, rc);
-        if (response[24] != Version || rc > 1 || Result(response) != Ok)
+        if (rc > 1 || Result(response) != Ok)
         {
             _failed = new Dt295ResidentException($"{Name} の応答の形式が違います (結果 {Result(response)}、理由 {rc})");
             throw _failed;
@@ -681,11 +679,12 @@ public sealed class Dt295ResidentCard : ICardLink
 
     private int Fail(uint op, int rc) => throw new IOException((rc switch
     {
-        -2600 => $"{Name} のカードは使用中です",
+        -2600 => $"{Name} のカードの操作が受け付けられませんでした",
         -2601 => $"{Name} のカードでは使えない操作です",
         -2602 => $"{Name} のカードとのやり取りに失敗しました",
         -2603 => $"{Name} のカードが時間内に答えませんでした",
         -2604 => $"{Name} のカードの応答が長すぎます",
+        -2605 => $"{Name} のカードは使用中です",
         _ => $"{Name} のカードの操作が失敗しました",
     }) + $" (操作 {op}、理由 {rc})");
 
