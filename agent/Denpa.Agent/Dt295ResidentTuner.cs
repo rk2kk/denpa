@@ -502,6 +502,13 @@ public sealed class Dt295ResidentTuner : ITuneDevice
             var board = _board;
             try
             {
+                // 引き継ぎの直後など、常駐イメージだけが選局を持っていることがある。
+                // v2 はその状態の TUNE を -2600 (INVALID) で断るので、先に止める
+                board.Locked(session =>
+                {
+                    session.ForceStop(request.Source);
+                    session.WaitStopped();
+                });
                 var source = board.Locked(session => session.QuerySource(request.Source));
                 if ((source.Flags & SourceStream) == 0 || source.WindowRecords != 0)
                 {
@@ -557,7 +564,15 @@ public sealed class Dt295ResidentTuner : ITuneDevice
             {
                 board.Locked(session =>
                 {
-                    if (session.RequestValid && session.Source == _source) session.Stop(_source);
+                    try
+                    {
+                        session.Stop(_source);
+                    }
+                    catch (Exception error) when (error is InvalidOperationException or Dt295ResidentException)
+                    {
+                        // こちらが選局を忘れていても、常駐イメージ側に残っていれば止める
+                        session.ForceStop(_source);
+                    }
                     session.WaitStopped();
                 });
             }

@@ -333,6 +333,47 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
         StopPending = true;
     }
 
+    /// <summary>
+    /// こちらが覚えているかに関わらず STOP を送る。**引き継いだ直後など、常駐イメージだけが
+    /// 選局を持っている**ことがあり、v2 のファームウェアはその状態の TUNE を -2600 で断るため、
+    /// TUNE の前に必ず止める。選局していなければ失敗するが、それは無視してよい
+    /// </summary>
+    public void ForceStop(int source)
+    {
+        Source = source;
+        Dt295ResidentState state;
+        try
+        {
+            state = QueryState(source);
+        }
+        catch (Exception error) when (error is Dt295ResidentException or TimeoutException)
+        {
+            // 常駐イメージが失敗を記録している。ここでは触らない (開き直す側で扱う)
+            return;
+        }
+        // 止まっている (誰も選局していない) なら STOP を送らない。
+        // 送るとファームウェアが「不正な操作」として失敗を記録することがある
+        if (!state.Has(StateCapturing) && (state.CaptureMask & (1u << source)) == 0)
+        {
+            RequestValid = false;
+            Streaming = false;
+            StopPending = false;
+            return;
+        }
+        var response = Command(CommandStop, (uint)source);
+        var rc = Failure(response);
+        RequestValid = false;
+        Streaming = false;
+        if (rc != 0)
+        {
+            StopPending = false;
+            return;
+        }
+        var generation = Word(response, 16);
+        Generation = generation;
+        StopPending = generation != 0;
+    }
+
     /// <summary>STOP のあと、TS が止まり切るまで SERVICE を送る (mb86H_session_wait_stopped)</summary>
     public void WaitStopped()
     {
