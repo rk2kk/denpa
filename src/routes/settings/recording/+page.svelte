@@ -53,7 +53,6 @@
   const encodingSave = new SaveState();
   const cmSave = new SaveState();
   const viewingSave = new SaveState();
-  const reserveSave = new SaveState();
 
   /**
    * 「確かめ直す」は今の値を見せている画面のまま送る。enhance の既定 (成功後に `form.reset()`) だと、
@@ -221,7 +220,9 @@
                 {#snippet more()}
                   <p>
                     使える GPU は Intel・AMD (VA-API)・NVIDIA (NVENC)・Rockchip
-                    (MPP) です。見つかれば自動で使います。
+                    (MPP) です。Windows では Intel (QSV)・AMD (AMF)・NVIDIA
+                    (NVENC)、Mac では Apple (VideoToolbox)
+                    です。見つかれば自動で使います。
                   </p>
                   <p>
                     GPU →
@@ -444,33 +445,6 @@
             とみます。ロゴが使えなければ無音と長さで決めます</span
           >
         </label>
-      </form>
-    </section>
-  </div>
-</div>
-
-<div id="reserve" data-part>
-  <div class="sections readable">
-    <section class="section">
-      <div class="section-head">
-        <h2>自動予約</h2>
-        <SaveNote status={reserveSave} />
-      </div>
-      <form
-        method="POST"
-        action="?/saveReserve"
-        use:autosave={reserveSave}
-        class="fields setting-rows"
-      >
-        <div class="field">
-          <span class="field-label">有料放送</span>
-          <CheckRow
-            name="freeOnly"
-            checked={recording.freeOnly}
-            title="自動予約は無料放送だけにする"
-            hint="契約していない有料放送は、録画してもスクランブルのままで観られません"
-          />
-        </div>
       </form>
     </section>
   </div>

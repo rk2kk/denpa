@@ -2,6 +2,12 @@ import { type Actions, fail } from "@sveltejs/kit";
 import { eq } from "drizzle-orm";
 
 import { config } from "#lib/server/config.js";
+import {
+  checkContracts as verifyContracts,
+  getActiveCardId,
+  getContractRows,
+  testDecode as testDecodeStream,
+} from "#lib/server/contracts.js";
 import { orm } from "#lib/server/db.js";
 import { recordings } from "#lib/server/schema.js";
 import { cardStatus, putCardReaders } from "#lib/server/scramble.js";
@@ -13,6 +19,10 @@ import {
   tunerList,
 } from "#lib/server/tuner.js";
 import { CHANNEL_TYPES } from "#lib/types.js";
+
+/** 画面に出す理由 (`Error:` の前置きを付けない) */
+const reason = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 interface TunerUser {
   use: string;
@@ -112,10 +122,16 @@ export async function load() {
         list: withLabels(got.tuners),
         error: null as string | null,
       }))
-      .catch((error: unknown) => ({ list: [], error: String(error) })),
+      .catch((error: unknown) => ({ list: [], error: reason(error) })),
     // チューナーを譲り合う順。チューナーの節の「詳しく」に出す
     yieldOrder: yieldOrder(),
     card: cardStatus(),
+    contracts: cardStatus()
+      .then((card) => {
+        const id = getActiveCardId(card);
+        return id ? getContractRows(id) : [];
+      })
+      .catch(() => []),
   };
 }
 
@@ -208,9 +224,48 @@ export const actions = {
     try {
       await putCardReaders(disabled);
     } catch (error) {
-      return fail(502, { message: String(error) });
+      return fail(502, {
+        message: `カードリーダーの設定をエージェントへ送れませんでした: ${reason(error)}`,
+      });
     }
     return { success: true };
+  },
+
+  /** B-CAS カード内の CA 契約情報を確認し、各有料局の契約・有効期限を更新する */
+  checkContracts: async () => {
+    try {
+      const rows = await verifyContracts();
+      return { success: true, contracts: rows };
+    } catch (error) {
+      return fail(500, {
+        message: `カードの契約を確かめられませんでした: ${reason(error)}`,
+      });
+    }
+  },
+
+  /** 対象の局のストリームを数秒開いて、復号できるかを試す */
+  testDecode: async ({ request }) => {
+    const form = await request.formData();
+    const serviceId = Number(form.get("serviceId"));
+    if (!Number.isInteger(serviceId) || serviceId < 1) {
+      return fail(400, { message: "serviceId が不正です" });
+    }
+    try {
+      const result = await testDecodeStream(serviceId);
+      if (!result.ok) {
+        return fail(500, {
+          message:
+            result.error === undefined
+              ? "この局で復号を試せませんでした"
+              : `この局で復号を試せませんでした: ${result.error}`,
+        });
+      }
+      return { success: true, decodeOk: result.decodeOk };
+    } catch (error) {
+      return fail(500, {
+        message: `この局で復号を試せませんでした: ${reason(error)}`,
+      });
+    }
   },
 } satisfies Actions;
 
@@ -219,7 +274,9 @@ async function save(tuners: TunerConfig[]) {
   try {
     await putTuners(tuners);
   } catch (error) {
-    return fail(502, { message: String(error) });
+    return fail(502, {
+      message: `チューナーの設定をエージェントへ送れませんでした: ${reason(error)}`,
+    });
   }
   return { success: true };
 }

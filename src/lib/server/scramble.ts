@@ -1,5 +1,5 @@
 import { closeSync, openSync, readSync } from "node:fs";
-import { relative } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 
 import { PACKET, SYNC } from "@danything/arib/psi";
 
@@ -27,7 +27,7 @@ import { config } from "./config";
  * 代わりにエンコードの前に見て、掛かったままならその場で復号する。
  *
  * 復号するのはエージェント側 (`/denpa/decode`)。カードリーダーを使うのは
- * あちらなので、カードを持っている側に任せるようにしてある。元の TS の置き場は両方のコンテナに見せてあり、
+ * あちらなので、カードを持っている側に任せるようにしてある。元の TS の置き場は denpa とエージェントの両方から同じパスで見えるようにしてあり、
  * やり取りするのはパスだけ。
  */
 
@@ -246,16 +246,22 @@ export async function descramble(
   input: string,
   output: string,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; error: string }> {
+): Promise<{ ok: boolean; error: string; stillScrambled?: boolean }> {
   /*
    * 向こうのマウント先はこちらと同じとは限らないので、元の TS の置き場からの相対で渡す。
    * 掛かったままの TS は必ずここにある (引き継いだ録画も、移行のときに
    * 未エンコードのものは元の TS としてここへ入る)
    */
   const base = config.rawDir;
-  const from = relative(base, input);
-  const to = relative(base, output);
-  if (from.startsWith("..") || to.startsWith("..")) {
+  // 区切りは / にそろえる (Windows の `\` のまま渡すと、Linux のエージェントには 1 つの名前に見える)
+  const from = relative(base, input).split(sep).join("/");
+  const to = relative(base, output).split(sep).join("/");
+  if (
+    from.startsWith("..") ||
+    to.startsWith("..") ||
+    isAbsolute(from) ||
+    isAbsolute(to)
+  ) {
     return {
       ok: false,
       error: `元の TS の保存先 (${base}) の外にあるファイルは復号できません`,
@@ -293,7 +299,12 @@ export async function descramble(
     const why = card.ok
       ? "カードは読めているので、鍵が合わないか ECM が流れていません"
       : card.message;
-    return { ok: false, error: `復号してもスクランブルが残っています。${why}` };
+    // カードは読めていて掛かったまま = 鍵を貰えなかった (契約が無い・切れたことが多い。`contracts.noteStillScrambled`)
+    return {
+      ok: false,
+      error: `復号してもスクランブルが残っています。${why}`,
+      stillScrambled: card.ok,
+    };
   }
   return { ok: true, error: "" };
 }

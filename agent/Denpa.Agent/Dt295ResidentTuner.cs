@@ -224,7 +224,7 @@ internal sealed class Dt295ResidentStream
 {
     private const byte Endpoint = 0x81;
 
-    /// <summary>1 本の読みの大きさと数。今の方式の実機の測定で決めた値 (8 KiB を 64 本。docs/tuners.md)</summary>
+    /// <summary>1 本の読みの大きさと数 (8 KiB を 64 本)。実機で測って決めた値</summary>
     private const int TransferSize = 8192;
 
     private const int Depth = 64;
@@ -434,7 +434,7 @@ internal sealed class Dt295ResidentStream
 /// </summary>
 public sealed class Dt295ResidentTuner : ITuneDevice
 {
-    /// <summary>選局から最初の TS を待つ上限。地上波は受かるまで 1 秒ほど、TS はそのあと 0.3 秒ほどで来る (docs/tuners.md)</summary>
+    /// <summary>選局から最初の TS を待つ上限。地上波は落ち着くまで 1.1〜1.4 秒、CS は 1.6〜2.0 秒 (docs/tuners.md の実機の値)</summary>
     internal static readonly TimeSpan FirstTs = TimeSpan.FromSeconds(10);
 
     private readonly string _name;
@@ -502,13 +502,6 @@ public sealed class Dt295ResidentTuner : ITuneDevice
             var board = _board;
             try
             {
-                // 引き継ぎの直後など、常駐イメージだけが選局を持っていることがある。
-                // v2 はその状態の TUNE を -2600 (INVALID) で断るので、先に止める
-                board.Locked(session =>
-                {
-                    session.ForceStop(request.Source);
-                    session.WaitStopped();
-                });
                 var source = board.Locked(session => session.QuerySource(request.Source));
                 if ((source.Flags & SourceStream) == 0 || source.WindowRecords != 0)
                 {
@@ -564,15 +557,7 @@ public sealed class Dt295ResidentTuner : ITuneDevice
             {
                 board.Locked(session =>
                 {
-                    try
-                    {
-                        session.Stop(_source);
-                    }
-                    catch (Exception error) when (error is InvalidOperationException or Dt295ResidentException)
-                    {
-                        // こちらが選局を忘れていても、常駐イメージ側に残っていれば止める
-                        session.ForceStop(_source);
-                    }
+                    if (session.RequestValid && session.Source == _source) session.Stop(_source);
                     session.WaitStopped();
                 });
             }
@@ -598,7 +583,7 @@ public sealed class Dt295ResidentTuner : ITuneDevice
 /// <summary>
 /// 常駐方式の PIX-DT295 の差し込み口。カードがあるかは CARD コマンドの STATUS で確かめ、ATR と APDU は MB86M01 の UART
 /// (0xFEA000〜0xFEA03C。MB86H47A と同じレジスタ) を直に読み書きして <see cref="T1Protocol"/> で T=1 を組む
-/// (同梱のファームウェアの TRANSMIT は 32 バイトの受信 FIFO を途中で抜かないため、B-CAS の INT の 61 バイト応答が溢れて失敗する)。
+/// (同梱の mAgicVISION_2 の TRANSMIT は 32 バイトの受信 FIFO を途中で抜かないため、B-CAS の INT の 61 バイト応答が溢れて失敗する)。
 /// 制御転送ごとに <see cref="Dt295ResidentBoard.Locked{T}"/> を取り、待ちと送信の切れ目では手放す (受信中の SERVICE を止めない)
 /// </summary>
 public sealed class Dt295ResidentCard : ICardLink
@@ -694,12 +679,11 @@ public sealed class Dt295ResidentCard : ICardLink
 
     private int Fail(uint op, int rc) => throw new IOException((rc switch
     {
-        -2600 => $"{Name} のカードの操作が受け付けられませんでした",
+        -2600 => $"{Name} のカードは使用中です",
         -2601 => $"{Name} のカードでは使えない操作です",
         -2602 => $"{Name} のカードとのやり取りに失敗しました",
         -2603 => $"{Name} のカードが時間内に答えませんでした",
         -2604 => $"{Name} のカードの応答が長すぎます",
-        -2605 => $"{Name} のカードは使用中です",
         _ => $"{Name} のカードの操作が失敗しました",
     }) + $" (操作 {op}、理由 {rc})");
 

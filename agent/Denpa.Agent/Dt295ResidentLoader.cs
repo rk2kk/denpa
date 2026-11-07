@@ -6,10 +6,6 @@
  * 元のコードは、導入の前に boot0 の body・常駐イメージの RAM などを写して、終わったら書き戻せる (mb86H_loader_restore)。
  * denpa は書き戻さない。閉じるときは常駐イメージを機材に残したまま手放し (mb86H_loader_close と同じ)、元のファームウェアに戻すときは
  * USB をつなぎ直す。そのため写しは取らず、写しにしか使わない読み出しも移していない。
- *
- * v2 で増えた preserve_all_ram・引き継いだ個体の常駐イメージの控え (snapshot_adopted_resident)・書き戻しの照合も、
- * 同じ理由で移していない (書き戻さないので控えが要らない)。firmware_ping と USB の読み出しキャッシュは CLI (usbboot) のためのもの。
- * 代わりに、v2 の PING の応答 (最小の ABI) の確認はここで行う。
  */
 
 using static Denpa.Agent.Dt295ResidentProtocol;
@@ -61,13 +57,13 @@ public static class Dt295ResidentLoader
         }
         Exact(transport, image, Dt295ResidentImage.Body, Dt295ResidentImage.BodyBytes, "body");
         transport.BlockWrites = true;
-        Ping(session);
+        Ping(session, adopting: true);
         Anchor(session, image, Dt295ResidentImage.Commit, 4);
         Anchor(session, image, Dt295ResidentImage.Meta, 24);
         Anchor(session, image, Dt295ResidentImage.BuildId, 8);
         Resident(session, image);
         var reply = session.Command(CommandCapabilities, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 16) != MinSupportedAbi || !Identified(reply) || !reply.AsSpan(40, 8).SequenceEqual(image.Build)
+        if (Result(reply) != Ok || Word(reply, 16) != AbiVersion || !Identified(reply) || !reply.AsSpan(40, 8).SequenceEqual(image.Build)
             || reply[DataOffset + 15] != RfMask)
         {
             throw new Dt295ResidentColdException("残っている常駐イメージが、同梱のものと違います");
@@ -118,7 +114,7 @@ public static class Dt295ResidentLoader
         Ping(session);
         session.Program(image.Resident);
         var reply = session.Command(CommandCapabilities, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 16) != MinSupportedAbi || !Identified(reply) || reply[DataOffset + 15] != RfMask)
+        if (Result(reply) != Ok || Word(reply, 16) != AbiVersion || !Identified(reply) || reply[DataOffset + 15] != RfMask)
         {
             throw new Dt295ResidentException($"入れた常駐イメージの応答が想定と違います (結果 {Result(reply)}、ABI {Word(reply, 16)})");
         }
@@ -133,13 +129,14 @@ public static class Dt295ResidentLoader
 
     private static bool Identified(byte[] reply) => System.Text.Encoding.ASCII.GetString(reply, DataOffset, Identity.Length) == Identity;
 
-    private static void Ping(Dt295ResidentSession session)
+    private static void Ping(Dt295ResidentSession session, bool adopting = false)
     {
         var reply = session.Exchange(Dt295ResidentProtocol.Ping, 0, 0, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 12) != 1 || Word(reply, 20) != MinSupportedAbi)
-        {
-            throw new Dt295ResidentException($"boot0 の PING の応答が想定と違います (結果 {Result(reply)}、ABI {Word(reply, 20)})");
-        }
+        if (Result(reply) != Ok || Word(reply, 12) != 1) throw new Dt295ResidentException($"boot0 の PING の応答が想定と違います (結果 {Result(reply)})");
+        if (Word(reply, 20) == AbiVersion) return;
+        // 残っているのが前のバージョンの常駐イメージなら、USB のつなぎ直しで起動直後の状態に戻して入れ直す
+        var message = $"boot0 の PING の ABI が想定と違います ({Word(reply, 20)}。必要なのは {AbiVersion})";
+        throw adopting ? new Dt295ResidentColdException(message) : new Dt295ResidentException(message);
     }
 
     /// <summary>機材のメモリーを 64 バイトずつ読んで比べる (loader.c の read_region・verify_region)</summary>

@@ -207,6 +207,29 @@ public class Dt295ResidentTests
         await Assert.That(resident.Commands.Count(item => item.Command == CommandRecover)).IsEqualTo(0);
     }
 
+    [Test]
+    public async Task 前のバージョンの常駐イメージが残っていれば引き継がずつなぎ直しを求める()
+    {
+        var bundle = FakeBundle.Create();
+        var image = Dt295ResidentImage.Parse(bundle.Bytes);
+        var resident = new FakeResident(bundle);
+        Dt295ResidentLoader.Start(resident, new Dt295ResidentSession(resident, () => resident.Now, ms => resident.Now += ms), image);
+        resident.PingAbi = 1;
+        var session = new Dt295ResidentSession(resident, () => resident.Now, ms => resident.Now += ms);
+        await Assert.That(() => Dt295ResidentLoader.Start(resident, session, image)).Throws<Dt295ResidentColdException>();
+        await Assert.That(resident.Commands.Count(item => item.Command == CommandRecover)).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task 入れるときの_PING_の_ABI_が違えば投げる()
+    {
+        var bundle = FakeBundle.Create();
+        var image = Dt295ResidentImage.Parse(bundle.Bytes);
+        var resident = new FakeResident(bundle) { PingAbi = 1 };
+        var session = new Dt295ResidentSession(resident, () => resident.Now, ms => resident.Now += ms);
+        await Assert.That(() => Dt295ResidentLoader.Start(resident, session, image)).Throws<Dt295ResidentException>();
+    }
+
     // ---------------------------------------------------------------------
     // TS
     // ---------------------------------------------------------------------
@@ -374,7 +397,7 @@ internal sealed class FakeBundle
         var image = new byte[Dt295ResidentImage.Bytes];
         for (var i = 0; i < 0x1000; i++) image[i] = (byte)(i * 7);
         var meta = (int)(Dt295ResidentImage.Meta - Dt295ResidentImage.Base);
-        uint[] words = [Dt295ResidentImage.HeaderMagic, MinSupportedAbi, (uint)Dt295ResidentImage.Bytes, Dt295ResidentImage.Base,
+        uint[] words = [Dt295ResidentImage.HeaderMagic, AbiVersion, (uint)Dt295ResidentImage.Bytes, Dt295ResidentImage.Base,
             Dt295ResidentImage.ImmutableEnd, Dt295ResidentImage.ImmutableChecksum];
         for (var i = 0; i < words.Length; i++) BinaryPrimitives.WriteUInt32BigEndian(image.AsSpan(meta + i * 4), words[i]);
         BinaryPrimitives.WriteUInt32BigEndian(image.AsSpan((int)(Dt295ResidentImage.Commit - Dt295ResidentImage.Base)), Dt295ResidentImage.CommitMagic);
@@ -453,6 +476,9 @@ internal sealed class FakeBundle
 internal sealed class FakeResident : IDt295ResidentTransport
 {
     private readonly Dictionary<uint, byte> _memory = [];
+
+    /// <summary>PING の応答に載せる ABI (前のバージョンの常駐イメージは 1 を返す)</summary>
+    public uint PingAbi { get; set; } = AbiVersion;
 
     public FakeResident(FakeBundle? bundle = null)
     {
@@ -599,7 +625,7 @@ internal sealed class FakeResident : IDt295ResidentTransport
         {
             case Dt295ResidentProtocol.Ping:
                 Put(response, 12, 1);
-                Put(response, 20, MinSupportedAbi);
+                Put(response, 20, PingAbi);
                 return;
             case ResidentBlock:
                 if (argument == 1) data.AsSpan(0, (int)budget).CopyTo(Resident.AsSpan((int)address));
@@ -612,7 +638,7 @@ internal sealed class FakeResident : IDt295ResidentTransport
         switch (address)
         {
             case CommandCapabilities:
-                Put(response, 16, MinSupportedAbi);
+                Put(response, 16, AbiVersion);
                 Encoding.ASCII.GetBytes(Identity).CopyTo(response[DataOffset..]);
                 response[DataOffset + 15] = RfMask;
                 Resident.AsSpan((int)(Dt295ResidentImage.BuildId - Dt295ResidentImage.Base), 8).CopyTo(response[(DataOffset + 16)..]);

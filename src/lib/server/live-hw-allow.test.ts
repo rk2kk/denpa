@@ -40,6 +40,9 @@ const A: HwDevice = {
   vaapi: ["h264", "av1"],
   rkmpp: [],
   nvenc: [],
+  qsv: [],
+  amf: [],
+  videotoolbox: [],
   cqp: [],
   full: [],
 };
@@ -48,6 +51,9 @@ const only = (codecs: ("av1" | "hevc" | "h264")[]) => ({
   vaapi: codecs,
   rkmpp: [],
   nvenc: [],
+  qsv: [],
+  amf: [],
+  videotoolbox: [],
 });
 
 test("ライブは録画と別の GPU を使える。録画の印は見ない", () => {

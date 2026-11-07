@@ -1,7 +1,13 @@
 import { eq, sql } from "drizzle-orm";
 
 import { readIndoorHosts } from "../host";
-import { HW_CODECS, type HwAllow, type HwCodec, type HwKind } from "../hw";
+import {
+  HW_CODECS,
+  HW_KINDS,
+  type HwAllow,
+  type HwCodec,
+  type HwKind,
+} from "../hw";
 import { readNg } from "../jikkyo/ng";
 import { normalizePrefecture } from "../prefecture";
 import type { CmMode, VideoCodec } from "../types";
@@ -51,8 +57,6 @@ interface Settings {
   encode: boolean;
   /** エンコードしたあとも元の TS を残すか */
   keepOriginal: boolean;
-  /** 自動予約で無料放送だけを対象にするか */
-  freeOnly: boolean;
   /**
    * コマ数 (30/60) を本編映像から実測して決めるか。
    *
@@ -166,9 +170,9 @@ export function parseCodecs(value: string | undefined): HwCodec[] {
 }
 
 /**
- * `hwAllow`・`liveHwAllow` を読む。壊れていれば空 (= 全部よい)。デバイスごとに `{ vaapi: [...], rkmpp: [...], nvenc: [...] }`。
+ * `hwAllow`・`liveHwAllow` を読む。壊れていれば空 (= 全部よい)。デバイスごとに `{ vaapi: [...], rkmpp: [...], nvenc: [...], qsv: [...], amf: [...], videotoolbox: [...] }`。
  * 書かれていない方式は空。方式はデバイスごとに決まっていて (`/dev/dri/*` は VA-API、
- * `/dev/mpp_service` は Rockchip MPP、`/dev/nvidia0` などは NVENC)、そのデバイスで使えない方式の印は何にも効かない
+ * `/dev/mpp_service` は Rockchip MPP、`/dev/nvidia0` などは NVENC、Windows の `qsv0` は QSV、`amf0` は AMF、Mac の `videotoolbox` は VideoToolbox)、そのデバイスで使えない方式の印は何にも効かない
  */
 function parseHwAllow(value: string | undefined): HwAllow {
   if (value === undefined || value === "") return {};
@@ -182,11 +186,9 @@ function parseHwAllow(value: string | undefined): HwAllow {
       if (entry === null || typeof entry !== "object") continue;
       const pick = (raw: unknown): HwCodec[] =>
         HW_CODECS.filter((codec) => Array.isArray(raw) && raw.includes(codec));
-      out[device] = {
-        vaapi: pick(entry.vaapi),
-        rkmpp: pick(entry.rkmpp),
-        nvenc: pick(entry.nvenc),
-      };
+      out[device] = Object.fromEntries(
+        HW_KINDS.map((kind) => [kind, pick(entry[kind])]),
+      ) as Record<HwKind, HwCodec[]>;
     }
     return out;
   } catch {
@@ -211,7 +213,6 @@ export function settings(): Settings {
     cmCut: isCmMode(cmCut) ? cmCut : config.cmCutDefault,
     encode: codecs.length > 0,
     keepOriginal: flag("keepOriginal", false),
-    freeOnly: flag("freeOnly", true),
     fpsDetect: flag("fpsDetect", true),
     postalCode: normalizePostalCode(stored("postalCode") ?? ""),
     prefecture: normalizePrefecture(stored("prefecture")),

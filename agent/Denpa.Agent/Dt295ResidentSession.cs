@@ -57,12 +57,7 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
     /// <summary>STOP を受理されて、止まり切るのを待っている</summary>
     public bool StopPending { get; private set; }
 
-    public Dt295ResidentRequest? Request { get; private set; }
-
-    /// <summary>選局が落ち着くのを待つ上限 (0 なら <see cref="SettleTimeoutMs"/>)</summary>
-    public int TuneTimeoutMs { get; set; }
-
-    /// <summary>選局を待つ間の SERVICE の間隔 (0 なら 1 ms。初期化は 10 ms のまま)</summary>
+    /// <summary>選局を待つ間の SERVICE の間隔 (0 なら 1 ms)</summary>
     public int TunePollMs { get; set; }
 
     public long NowMs => _now();
@@ -196,7 +191,6 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
     public void Settle(int source, uint generation, bool ready, bool streaming)
     {
         if (source is < 0 or >= SourceCount) throw new ArgumentOutOfRangeException(nameof(source));
-        var timeout = TuneTimeoutMs != 0 && generation != 0 ? TuneTimeoutMs : SettleTimeoutMs;
         var start = _now();
         while (true)
         {
@@ -219,7 +213,8 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
                 throw failure ?? new Dt295ResidentException($"受信部 {source} が失敗しました (理由 {rc})", rc);
             }
             if (Complete(state!, source, generation, ready, streaming)) return;
-            if (_now() - start > timeout) throw new TimeoutException($"受信部 {source} が {timeout} ms のうちに落ち着きませんでした ({state})");
+            if (_now() - start > SettleTimeoutMs) throw new TimeoutException($"受信部 {source} が {SettleTimeoutMs} ms のうちに落ち着きませんでした ({state})");
+            // 選局の間は 1 ms ごと (TunePollMs で変えられる)、初期化は 10 ms ごと (session.c の session_settle)
             _delay(generation != 0 ? (TunePollMs != 0 ? TunePollMs : 1) : 10);
         }
     }
@@ -302,7 +297,6 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
 
     private void Begin(Dt295ResidentRequest request, uint generation)
     {
-        Request = request;
         Source = request.Source;
         Generation = generation;
         RequestValid = generation != 0;
@@ -331,47 +325,6 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
         }
         Generation = generation;
         StopPending = true;
-    }
-
-    /// <summary>
-    /// こちらが覚えているかに関わらず STOP を送る。**引き継いだ直後など、常駐イメージだけが
-    /// 選局を持っている**ことがあり、v2 のファームウェアはその状態の TUNE を -2600 で断るため、
-    /// TUNE の前に必ず止める。選局していなければ失敗するが、それは無視してよい
-    /// </summary>
-    public void ForceStop(int source)
-    {
-        Source = source;
-        Dt295ResidentState state;
-        try
-        {
-            state = QueryState(source);
-        }
-        catch (Exception error) when (error is Dt295ResidentException or TimeoutException)
-        {
-            // 常駐イメージが失敗を記録している。ここでは触らない (開き直す側で扱う)
-            return;
-        }
-        // 止まっている (誰も選局していない) なら STOP を送らない。
-        // 送るとファームウェアが「不正な操作」として失敗を記録することがある
-        if (!state.Has(StateCapturing) && (state.CaptureMask & (1u << source)) == 0)
-        {
-            RequestValid = false;
-            Streaming = false;
-            StopPending = false;
-            return;
-        }
-        var response = Command(CommandStop, (uint)source);
-        var rc = Failure(response);
-        RequestValid = false;
-        Streaming = false;
-        if (rc != 0)
-        {
-            StopPending = false;
-            return;
-        }
-        var generation = Word(response, 16);
-        Generation = generation;
-        StopPending = generation != 0;
     }
 
     /// <summary>STOP のあと、TS が止まり切るまで SERVICE を送る (mb86H_session_wait_stopped)</summary>
