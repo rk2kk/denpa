@@ -374,7 +374,7 @@ internal sealed class FakeBundle
         var image = new byte[Dt295ResidentImage.Bytes];
         for (var i = 0; i < 0x1000; i++) image[i] = (byte)(i * 7);
         var meta = (int)(Dt295ResidentImage.Meta - Dt295ResidentImage.Base);
-        uint[] words = [Dt295ResidentImage.HeaderMagic, AbiVersion, (uint)Dt295ResidentImage.Bytes, Dt295ResidentImage.Base,
+        uint[] words = [Dt295ResidentImage.HeaderMagic, MinSupportedAbi, (uint)Dt295ResidentImage.Bytes, Dt295ResidentImage.Base,
             Dt295ResidentImage.ImmutableEnd, Dt295ResidentImage.ImmutableChecksum];
         for (var i = 0; i < words.Length; i++) BinaryPrimitives.WriteUInt32BigEndian(image.AsSpan(meta + i * 4), words[i]);
         BinaryPrimitives.WriteUInt32BigEndian(image.AsSpan((int)(Dt295ResidentImage.Commit - Dt295ResidentImage.Base)), Dt295ResidentImage.CommitMagic);
@@ -612,7 +612,7 @@ internal sealed class FakeResident : IDt295ResidentTransport
         switch (address)
         {
             case CommandCapabilities:
-                Put(response, 16, AbiVersion);
+                Put(response, 16, MinSupportedAbi);
                 Encoding.ASCII.GetBytes(Identity).CopyTo(response[DataOffset..]);
                 response[DataOffset + 15] = RfMask;
                 Resident.AsSpan((int)(Dt295ResidentImage.BuildId - Dt295ResidentImage.Base), 8).CopyTo(response[(DataOffset + 16)..]);
@@ -658,12 +658,11 @@ internal sealed class FakeResident : IDt295ResidentTransport
             case CommandDeviceQuery:
                 Put(response, 12, CommandDeviceQuery);
                 Put(response, 16, argument);
-                response[24] = QueryVersion;
-                response[25] = (byte)argument;
-                response[26] = data[1];
+                response[24] = (byte)argument;
+                response[25] = data[1];
                 var words = argument switch
                 {
-                    PageOverview => new uint[] { 3, 3, AbiVersion, 0 },
+                    PageOverview => new uint[] { 3, 3 },
                     PageSource => data[1] == 0 ? new uint[] { 473142857, 707143000, 1, 188, StreamFormat, 0, 7 } : new uint[] { 950000, 2150000, 1, 188, StreamFormat, 0, 0 },
                     _ => new uint[]
                     {

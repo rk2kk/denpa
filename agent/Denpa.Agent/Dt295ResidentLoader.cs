@@ -1,5 +1,5 @@
 /*
- * mAgicVISION (https://github.com/makeding/mAgicVISION、commit c937107) の core/loader.c (mb86H_loader_install・
+ * mAgicVISION (https://github.com/makeding/mAgicVISION、commit 889a435) の core/loader.c (mb86H_loader_install・
  * native_install_hook・mb86H_loader_start・mb86H_loader_close) と core/recovery.c (mb86H_loader_adopt) のうち、
  * PIX-DT295 の部分を移したもの。Copyright (c) 2026 huggy、MIT License (全文は licenses/mAgicVISION.txt)。
  *
@@ -63,7 +63,7 @@ public static class Dt295ResidentLoader
         Anchor(session, image, Dt295ResidentImage.BuildId, 8);
         Resident(session, image);
         var reply = session.Command(CommandCapabilities, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 16) != AbiVersion || !Identified(reply) || !reply.AsSpan(40, 8).SequenceEqual(image.Build)
+        if (Result(reply) != Ok || Word(reply, 16) != MinSupportedAbi || !Identified(reply) || !reply.AsSpan(40, 8).SequenceEqual(image.Build)
             || reply[DataOffset + 15] != RfMask)
         {
             throw new Dt295ResidentColdException("残っている常駐イメージが、同梱のものと違います");
@@ -114,7 +114,7 @@ public static class Dt295ResidentLoader
         Ping(session);
         session.Program(image.Resident);
         var reply = session.Command(CommandCapabilities, 0, new byte[DataSize]);
-        if (Result(reply) != Ok || Word(reply, 16) != AbiVersion || !Identified(reply) || reply[DataOffset + 15] != RfMask)
+        if (Result(reply) != Ok || Word(reply, 16) != MinSupportedAbi || !Identified(reply) || reply[DataOffset + 15] != RfMask)
         {
             throw new Dt295ResidentException($"入れた常駐イメージの応答が想定と違います (結果 {Result(reply)}、ABI {Word(reply, 16)})");
         }
