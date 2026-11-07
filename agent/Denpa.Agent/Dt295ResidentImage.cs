@@ -1,5 +1,5 @@
 /*
- * mAgicVISION (https://github.com/makeding/mAgicVISION、commit c937107) の core/bootstrap.c (SBC2 の読み取り)・
+ * mAgicVISION (https://github.com/makeding/mAgicVISION、commit 889a435) の core/bootstrap.c (SBC2 の読み取り)・
  * core/resident_image.c の検証・core/loader.c の mb86H_loader_parse_target のうち、PIX-DT295 の部分を移したもの。
  * Copyright (c) 2026 huggy、MIT License (全文は licenses/mAgicVISION.txt)。
  */
@@ -92,7 +92,7 @@ public sealed class Dt295ResidentImage
     public const string FileName = "magicvision-firmware.bin";
 
     /// <summary>同梱のファームウェアの SHA-256。違うものは使わない</summary>
-    public const string Sha256 = "d9f549b29d286c2ff1e7daf4237e2205bb8a5a2affbb98362bce137b8b42a33f";
+    public const string Sha256 = "828b7847d49b2ae6d5847088318876178aadb3dfd0ac23eaccf855776fb5d50b";
 
     private static readonly Lazy<Dt295ResidentImage> BundledImage = new(() =>
     {
@@ -248,7 +248,7 @@ public sealed class Dt295ResidentImage
     {
         if (image.Length != Bytes) throw Bad("常駐イメージの大きさ");
         var meta = image[(int)(Meta - Base)..];
-        if (Word(meta, 0) != HeaderMagic || Word(meta, 4) != Dt295ResidentProtocol.AbiVersion || Word(meta, 8) != Bytes || Word(meta, 12) != Base
+        if (Word(meta, 0) != HeaderMagic || Word(meta, 4) != Dt295ResidentProtocol.MinSupportedAbi || Word(meta, 8) != Bytes || Word(meta, 12) != Base
             || Word(meta, 16) != ImmutableEnd || Word(meta, 20) != ImmutableChecksum || Word(image, (int)(Commit - Base)) != CommitMagic)
         {
             throw Bad("常駐イメージの説明");

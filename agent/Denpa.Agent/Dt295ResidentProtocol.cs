@@ -1,5 +1,5 @@
 /*
- * mAgicVISION (https://github.com/makeding/mAgicVISION、commit c937107) の include/mb86H/protocol/constants.h・
+ * mAgicVISION (https://github.com/makeding/mAgicVISION、commit 889a435) の include/mb86H/protocol/constants.h・
  * include/mb86H/protocol/device_query.h・core/protocol.c のうち、PIX-DT295 の常駐方式で使うものを移したもの。
  * Copyright (c) 2026 huggy、MIT License (全文は licenses/mAgicVISION.txt)。
  */
@@ -49,11 +49,11 @@ public static class Dt295ResidentProtocol
     public const uint CommandCard = 0x2C;
     public const uint CommandDeviceQuery = 0x2F;
 
-    /// <summary>常駐イメージの ABI のバージョン (MB86H_RESIDENT_ABI_VERSION)</summary>
-    public const uint AbiVersion = 2;
+    /// <summary>対応する ABI の最小の値 (MB86H_MIN_SUPPORTED_ABI)。ファームウェア v2 は 2</summary>
+    public const uint MinSupportedAbi = 2;
 
     /// <summary>CAPABILITIES が返す名前 (MB86H_FIRMWARE_IDENTITY)</summary>
-    public const string Identity = "mAgicVISION_1";
+    public const string Identity = "mAgicVISION_2";
 
     /// <summary>DT295 の受信部のビット (native_profiles の rf_mask。地上波と衛星の 2 つ)</summary>
     public const byte RfMask = 3;
@@ -70,8 +70,7 @@ public static class Dt295ResidentProtocol
     /// <summary>衛星の周波数に足す値。LNB の IF (kHz) から受信の周波数 (kHz) にする (session.c の mb86H_session_tune)</summary>
     public const uint SatelliteLocalKhz = 10678000;
 
-    // 状態の問い合わせ (DEVICE_QUERY)
-    public const byte QueryVersion = 1;
+    // 状態の問い合わせ (DEVICE_QUERY)。バージョンの欄は無くなり、ページを data[0] に置く
     public const uint PageOverview = 0;
     public const uint PageSource = 1;
     public const uint PageState = 2;
@@ -102,9 +101,6 @@ public static class Dt295ResidentProtocol
     public const uint PhaseQuiet = 0;
     public const uint PhaseComplete = 6;
     public const uint PhaseFailed = 8;
-
-    /// <summary>ウィンドウのバージョン (MB86H_STREAM_WINDOW_VERSION)。USB では使わない (window_records が 0)</summary>
-    public const uint StreamWindowVersion = 1;
 
     /// <summary>要求を組む (protocol.c の mb86H_debug_packet_pack)。<paramref name="data"/> は 40 バイトか空</summary>
     public static byte[] Pack(uint sequence, uint operation, uint address, uint argument, uint budget, ReadOnlySpan<byte> data)
@@ -140,7 +136,7 @@ public static class Dt295ResidentProtocol
 }
 
 /// <summary>常駐イメージ全体の様子 (DEVICE_QUERY の 0 ページ)</summary>
-public sealed record Dt295ResidentOverview(uint RfMask, uint StreamMask, uint ResidentAbi, uint WindowVersion);
+public sealed record Dt295ResidentOverview(uint RfMask, uint StreamMask);
 
 /// <summary>受信部 1 つの説明 (DEVICE_QUERY の 1 ページ)。周波数は地上波が Hz、衛星が IF の kHz</summary>
 public sealed record Dt295ResidentSource(
