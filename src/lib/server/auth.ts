@@ -233,7 +233,7 @@ export function foreignHost(headers: Headers, address: string): string | null {
  * 自分のインターフェースのネットワークと `TRUSTED_NETWORKS` が重なっていて、`TRUSTED_PROXIES` が
  * 空のときに当たる。ループバックとリンクローカル (`169.254.0.0/16`・`fe80::/10`) は見ない。
  * ループバックは外から来ない。リンクローカルは IPv6 ならどのインターフェースにもあり、
- * wslc はこの PC からの接続を `169.254.x.x` に見せる (install.ps1 が信頼している)
+ * IPv4 のもの (`169.254.0.0/16`) は、アドレスを配られなかったときに OS が自分で付けるもの
  */
 export function sharedNetworks(
   trustedList: string,
@@ -254,8 +254,13 @@ export function sharedNetworks(
   return shared;
 }
 
-/** 前段と同じネットワークを信頼していそうなら (`sharedNetworks`)、起動ログに出す */
+/**
+ * 前段と同じネットワークを信頼していそうなら (`sharedNetworks`)、起動ログに出す。
+ * **Mac と Windows では見ない。** OS の上でそのまま動くので自分のインターフェースは LAN そのもので、
+ * インストーラの既定の `TRUSTED_NETWORKS` と必ず重なる (前段を同じネットワークに置く構成ではない)
+ */
 export function warnIfProxyHidden(): void {
+  if (process.platform === "win32" || process.platform === "darwin") return;
   const shared = sharedNetworks(
     config.trustedNetworks,
     config.trustedProxies,

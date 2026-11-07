@@ -14,7 +14,7 @@ PT3 (Linux DVB)、PX-Q3U4・PX-W3U4・PX-MLT 系など (px4-userland)、Sony CEC
 
 ### Mac や Windows でも動きますか
 
-Apple Silicon の Mac と x64 の Windows で動きます。エージェントはその OS の上で直接、denpa 本体はコンテナで動きます。
+Apple Silicon の Mac と x64 の Windows で動きます。どちらも denpa 本体とエージェントが OS の上で直接動きます (コンテナは使わない)。
 使えるチューナーは px4-userland と siano-userland の機材と Sony CECH-ZD1 J です (DVB は Linux だけ)。
 [install-mac.md](install-mac.md)・[install-windows.md](install-windows.md)。
 

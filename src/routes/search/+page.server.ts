@@ -30,7 +30,6 @@ import {
   searchReservations,
   searchRules,
 } from "#lib/server/search.js";
-import { settings } from "#lib/server/settings.js";
 
 /** 画面が受け取る下見の形 (`rule-preview.ts`) */
 export type { Preview, PreviewRow, Verdict } from "#lib/server/rule-preview.js";
@@ -150,7 +149,7 @@ export function load({ url }) {
     recordings: searchRecordings(q, options),
     reservations: searchReservations(q, options),
     rules: searchRules(q, options),
-    /** 切り抜き。並べるのは頭の数枚だけで、続きは切り抜きの画面で */
+    /** 切り抜き。並べるのは先頭の数枚だけで、続きは切り抜きの画面で */
     clips:
       q === ""
         ? { total: 0, rows: [] }
@@ -185,8 +184,6 @@ export function load({ url }) {
                       enabled: origin.rule.enabled,
                     },
             },
-      /** 無料放送だけ録るか (全体設定)。書く欄の下に小さく出す */
-      freeOnly: settings().freeOnly,
     },
   };
 }

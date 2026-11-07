@@ -60,6 +60,7 @@
         <Compile Include="../Denpa.Agent/Dt295ResidentLink.cs" />
         <Compile Include="../Denpa.Agent/Dt295ResidentLoader.cs" />
         <Compile Include="../Denpa.Agent/Dt295ResidentProbe.cs" />
+        <Compile Include="../Denpa.Agent/ContinuityCount.cs" />
         <Compile Include="../Denpa.Agent/Dt295ResidentProtocol.cs" />
         <Compile Include="../Denpa.Agent/Dt295ResidentSession.cs" />
         <Compile Include="../Denpa.Agent/Dt295ResidentTs.cs" />
@@ -72,7 +73,7 @@
     <ItemGroup>
         <!-- MTP (global.json の test.runner) で回す (旧 VSTest 系を持たないわけは上)。
              TUnit はソースジェネレータで動くので、本体と同じく Native AOT でも通る -->
-        <PackageReference Include="TUnit" Version="1.80.0" />
+        <PackageReference Include="TUnit" Version="1.81.10" />
     </ItemGroup>
 
 </Project>

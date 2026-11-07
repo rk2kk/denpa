@@ -49,10 +49,10 @@ public static class Dt295ResidentProtocol
     public const uint CommandCard = 0x2C;
     public const uint CommandDeviceQuery = 0x2F;
 
-    /// <summary>対応する ABI の最小の値 (MB86H_MIN_SUPPORTED_ABI)。ファームウェア v2 は 2</summary>
-    public const uint MinSupportedAbi = 2;
+    /// <summary>常駐イメージの ABI のバージョン (MB86H_MIN_SUPPORTED_ABI。PING の応答と CAPABILITIES が返す)</summary>
+    public const uint AbiVersion = 2;
 
-    /// <summary>CAPABILITIES が返す名前 (MB86H_FIRMWARE_IDENTITY)</summary>
+    /// <summary>CAPABILITIES が返す名前 (MB86H_FIRMWARE_IDENTITY。v1 のファームウェアは mAgicVISION_1 で、受け付けない)</summary>
     public const string Identity = "mAgicVISION_2";
 
     /// <summary>DT295 の受信部のビット (native_profiles の rf_mask。地上波と衛星の 2 つ)</summary>
@@ -70,7 +70,7 @@ public static class Dt295ResidentProtocol
     /// <summary>衛星の周波数に足す値。LNB の IF (kHz) から受信の周波数 (kHz) にする (session.c の mb86H_session_tune)</summary>
     public const uint SatelliteLocalKhz = 10678000;
 
-    // 状態の問い合わせ (DEVICE_QUERY)。バージョンの欄は無くなり、ページを data[0] に置く
+    // 状態の問い合わせ (DEVICE_QUERY)
     public const uint PageOverview = 0;
     public const uint PageSource = 1;
     public const uint PageState = 2;

@@ -36,7 +36,7 @@ RUN bun install
 # - **ローダーは ES の module にして、ワーカーの中からだけ読む** (`ENVIRONMENT=worker`)。
 #   ファイルの読み書き (`FILESYSTEM`) は使わないので外す — それだけで 40KB ほど縮む
 # ---------------------------------------------------------------------------
-FROM docker.io/emscripten/emsdk:6.0.13@sha256:fb7864e398acfda863dfcea78b8bc8adad359fa60c6a0bbeb845931de64aa68a AS mpeg2wasm
+FROM docker.io/emscripten/emsdk:7.0.0@sha256:6bd7aef93408b10bf7b36642cb7c91119b302f720b9ec2d20439f73cf07fe894 AS mpeg2wasm
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>.*)$
 ARG FFMPEG_VERSION=9.0.2
 COPY wasm/decoder.c /src/decoder.c
@@ -367,6 +367,51 @@ COPY . .
 RUN bun run build && find build -name "*.map" -delete
 
 # ---------------------------------------------------------------------------
+# 本番で動かすアプリのファイル。本番イメージ (`runtime` 段) と、Windows・Mac の配布物 (`native-files` 段。
+# .github/workflows/windows-server.yml・macos-server.yml) の両方がここから写す (置くものを 1 か所で決める)
+#
+# **node_modules は載せない。**
+#
+# adapter-bun の出力は要るものを畳み込んでいて、外から引くのは `node:*` と
+# bun の組み込み (`bun:sqlite`・`bun:ffi`) だけ。載せていた頃は playwright も vite も
+# typescript もイメージに入っていて、**312MB がまるごと無駄**だった。
+# 置くのは下のものだけ: build/ (アプリ)、server.js (入口) とそれが読む
+# src/lib/server/address.ts・compress.ts・fresh-worker.ts・hold-signals.ts、package.json (`"type": "module"` の宣言)、drizzle/
+# (マイグレーション)。これで起動して /api/health が答えるかは CI で毎回見ている
+# (.github/image-smoke.sh。PR の docker-build-check と、push の前の build-and-deploy。Windows・Mac は test.yml の server-windows・server-macos)
+#
+# 引き換えに、**外から引くものを増やすなら畳み込ませること** — package.json の
+# `dependencies` に足すと adapter-bun がそれを外に出すので、ここで転ぶ。
+# 依存を全部 devDependencies に置いて `dependencies` を空にしてあるのはそのため
+# ---------------------------------------------------------------------------
+FROM scratch AS app-files
+COPY --from=build /app/build /app/build
+COPY --from=build /app/package.json /app/package.json
+# DB のマイグレーション (drizzle-kit が出した SQL)。起動時に `drizzle/` を cwd から
+# 読んで当てる (src/lib/server/db.ts)。束ねられないので SQL ファイルのまま置く
+COPY --from=build /app/drizzle /app/drizzle
+# ライブ視聴の WebSocket を受ける入口。中身の理由はファイルの頭に書いてある
+COPY --from=build /app/server.js /app/server.js
+# 入口が接続元を決めるのに使う (アプリと同じものを共有する。bun は .ts をそのまま読む)
+COPY --from=build /app/src/lib/server/address.ts /app/src/lib/server/address.ts
+# 入口が画面の HTML とデータを縮めるのに使う (`src/lib/server/compress.ts`。同じく `node:zlib` しか引かない)
+COPY --from=build /app/src/lib/server/compress.ts /app/src/lib/server/compress.ts
+# 入口がサービスワーカーに Cache-Control: no-cache を付けるのに使う (`src/lib/server/fresh-worker.ts`。何も引かない)
+COPY --from=build /app/src/lib/server/fresh-worker.ts /app/src/lib/server/fresh-worker.ts
+# 入口がいちばん先に読む。起動の途中に来た止まれの合図を取っておく (`src/lib/server/hold-signals.ts`。何も引かない)
+COPY --from=build /app/src/lib/server/hold-signals.ts /app/src/lib/server/hold-signals.ts
+
+# ---------------------------------------------------------------------------
+# Windows・Mac の配布物 (`denpa-<バージョン>-windows-x64.zip`・`denpa-<バージョン>-darwin-arm64.tar.gz`) に入れる、OS に依らないもの。
+# アプリ (`app-files`)・字 (`denpa-font`)・ブラウザへ配るデコーダ (`mpeg2wasm`) を、本番イメージと同じ段から写す。
+# bun と ffmpeg は OS ごとに、.github/workflows/windows-server.yml と macos-server.yml が別に用意して足す
+# ---------------------------------------------------------------------------
+FROM scratch AS native-files
+COPY --from=app-files /app/ /app/
+COPY --from=denpa-font /usr/share/denpa-font /font
+COPY --from=mpeg2wasm /opt/denpa/mpeg2 /mpeg2
+
+# ---------------------------------------------------------------------------
 # 本番イメージの土台 (distroless。Debian 13 = trixie から glibc・ca-certificates・tzdata など
 # 要るものだけを置いたもの)。**libssl の無い base-nossl を使う** — bun は TLS を自分で持ち (BoringSSL を静的に繋ぐ)、
 # ffmpeg も OpenSSL を繋がないので、cc の土台にある libssl・libcrypto・libgomp (8MB ほど) は誰も読まない。
@@ -508,34 +553,8 @@ COPY --from=denpa-font /usr/share/denpa-font /usr/share/denpa-font
 # ブラウザへ配るデコーダ (MPEG-2・AAC・Opus。`mpeg2wasm` 段)
 COPY --from=mpeg2wasm /opt/denpa/mpeg2 /opt/denpa/mpeg2
 
-# **node_modules は載せない。**
-#
-# adapter-bun の出力は要るものを畳み込んでいて、外から引くのは `node:*` と
-# bun の組み込み (`bun:sqlite`) だけ。載せていた頃は playwright も vite も
-# typescript もイメージに入っていて、**312MB がまるごと無駄**だった。
-# 置くのは下のものだけ: build/ (アプリ)、server.js (入口) とそれが読む
-# src/lib/server/address.ts・compress.ts・fresh-worker.ts・hold-signals.ts、package.json (`"type": "module"` の宣言)、drizzle/
-# (マイグレーション)。これで起動して /api/health が答えるかは CI で毎回見ている
-# (.github/image-smoke.sh。PR の docker-build-check と、push の前の build-and-deploy)
-#
-# 引き換えに、**外から引くものを増やすなら畳み込ませること** — package.json の
-# `dependencies` に足すと adapter-bun がそれを外に出すので、ここで転ぶ。
-# 依存を全部 devDependencies に置いて `dependencies` を空にしてあるのはそのため
-COPY --from=build /app/build ./build
-COPY --from=build /app/package.json ./package.json
-# DB のマイグレーション (drizzle-kit が出した SQL)。起動時に `drizzle/` を cwd から
-# 読んで当てる (src/lib/server/db.ts)。束ねられないので SQL ファイルのまま置く
-COPY --from=build /app/drizzle ./drizzle
-# ライブ視聴の WebSocket を受ける入口。中身の理由はファイルの頭に書いてある
-COPY --from=build /app/server.js ./server.js
-# 入口が接続元を決めるのに使う (アプリと同じものを共有する。bun は .ts をそのまま読む)
-COPY --from=build /app/src/lib/server/address.ts ./src/lib/server/address.ts
-# 入口が画面の HTML とデータを縮めるのに使う (`src/lib/server/compress.ts`。同じく `node:zlib` しか引かない)
-COPY --from=build /app/src/lib/server/compress.ts ./src/lib/server/compress.ts
-# 入口がサービスワーカーに Cache-Control: no-cache を付けるのに使う (`src/lib/server/fresh-worker.ts`。何も引かない)
-COPY --from=build /app/src/lib/server/fresh-worker.ts ./src/lib/server/fresh-worker.ts
-# 入口がいちばん先に読む。起動の途中に来た止まれの合図を取っておく (`src/lib/server/hold-signals.ts`。何も引かない)
-COPY --from=build /app/src/lib/server/hold-signals.ts ./src/lib/server/hold-signals.ts
+# アプリ (`app-files` 段。何を置くかと、node_modules を載せない理由もそこに)
+COPY --from=app-files /app/ ./
 
 EXPOSE 3000
 # 動いているバージョン。ここでは `dev` のまま — リリースのときに、このイメージを土台に
