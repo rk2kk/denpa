@@ -62,7 +62,7 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
     /// <summary>選局が落ち着くのを待つ上限 (0 なら <see cref="SettleTimeoutMs"/>)</summary>
     public int TuneTimeoutMs { get; set; }
 
-    /// <summary>選局を待つ間の SERVICE の間隔 (0 なら 10 ms)</summary>
+    /// <summary>選局を待つ間の SERVICE の間隔 (0 なら 1 ms。初期化は 10 ms のまま)</summary>
     public int TunePollMs { get; set; }
 
     public long NowMs => _now();
@@ -220,7 +220,7 @@ public sealed class Dt295ResidentSession(IDt295ResidentTransport transport, Func
             }
             if (Complete(state!, source, generation, ready, streaming)) return;
             if (_now() - start > timeout) throw new TimeoutException($"受信部 {source} が {timeout} ms のうちに落ち着きませんでした ({state})");
-            _delay(generation != 0 && TunePollMs != 0 ? TunePollMs : 10);
+            _delay(generation != 0 ? (TunePollMs != 0 ? TunePollMs : 1) : 10);
         }
     }
 

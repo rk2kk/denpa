@@ -571,7 +571,6 @@ internal sealed class FakeResident : IDt295ResidentTransport
     /// <summary>CARD コマンド (STATUS と POWER_OFF)</summary>
     private void Card(uint op, Span<byte> response)
     {
-        response[24] = Dt295ResidentCard.Version;
         switch (op)
         {
             case Dt295ResidentCard.OpStatus:
@@ -600,6 +599,7 @@ internal sealed class FakeResident : IDt295ResidentTransport
         {
             case Dt295ResidentProtocol.Ping:
                 Put(response, 12, 1);
+                Put(response, 20, MinSupportedAbi);
                 return;
             case ResidentBlock:
                 if (argument == 1) data.AsSpan(0, (int)budget).CopyTo(Resident.AsSpan((int)address));
