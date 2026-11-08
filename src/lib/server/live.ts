@@ -728,6 +728,13 @@ export function softwareEncodes(codec: LiveCodec, rung: Rung): boolean {
  *
  * **回線に合わせて下げた段 (`rung` が 1〜3) は 96k** (`#lib/rungs.ts` の `RUNG_AUDIO_KBPS`)。256k は 2.4 Mbit/s の回線の 1 割を使う
  */
+/** 写した fMP4 の init が H.264 (avc1/avc3) か。違えば再エンコードへ切り替える */
+function hasH264Init(init: Uint8Array): boolean {
+  const head = init.subarray(0, Math.min(init.length, 4096));
+  const text = new TextDecoder("latin1").decode(head);
+  return text.includes("avc1") || text.includes("avc3");
+}
+
 export function audioArgs(codec: StreamCodec, rung: Rung = 0): string[] {
   const rate = rung === 0 ? "256k" : `${RUNG_AUDIO_KBPS}k`;
   return codec === "av1"
@@ -1198,6 +1205,7 @@ class Session {
    * **GPU から降りてよいのは出す前だけ** (`run`)。出したあとで落ちたのは GPU のせいとは限らない
    */
   private produced = false;
+  private copyExpected = false;
   /**
    * GPU からソフトウェアに降りたときの断り書き。**途中から入ってきた人にも渡す** (`add`)
    */
@@ -1641,6 +1649,7 @@ class Session {
           }
         }
         this.produced = false;
+        this.copyExpected = copy;
         this.busy = false;
         this.software = hw === null;
         // 遅れと速さは ffmpeg ごとに数え直す (前の ffmpeg の遅れと、起こし直した直後の速さを合わせない)
@@ -2116,6 +2125,13 @@ class Session {
     )) {
       for (const segment of splitter.feed(chunk)) {
         if (segment.kind === "init") {
+          if (this.proc === proc && this.copyExpected && !hasH264Init(segment.data)) {
+            console.warn(
+              `[live] ${this.channelType}:${this.channel}: 写した映像が H.264 ではないので、エンコードし直します`,
+            );
+            proc.kill();
+            return;
+          }
           this.init = segment.data;
           if (this.proc === proc) {
             this.length.init(segment.data);
