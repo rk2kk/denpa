@@ -99,6 +99,9 @@ export function captionOutput(
     "1",
     "-flush_packets",
     "1",
+    // 字幕だけの出口。音声を拾わせない (CS の AC-3 を matroska に入れようとして
+    // エンコーダ不在でコピーが落ちる。2026-11-08 実機)
+    "-an",
     "-f",
     "matroska",
     out,
