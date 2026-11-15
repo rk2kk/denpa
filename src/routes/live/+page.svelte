@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { resolve } from "$app/paths";
   import { onMount, tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
 
@@ -83,6 +84,7 @@
   import { jikkyoListSwitch, jikkyoSwitch } from "#lib/jikkyo/switch.svelte.js";
   import { livePlayer } from "#lib/live-player.svelte.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
+  import { LIVE_TUNER_PRESETS } from "#lib/live.js";
   import type { HybridcastLink } from "#lib/live.js";
   import { separateLiveAudio } from "#lib/native-audio-choice.js";
   import { recordNotice } from "#lib/record-notice.js";
@@ -286,7 +288,39 @@
   }
 
   /** 一覧の各行。開いたときに、いま映している局まで送る (局が 100 を超えると画面の外のほうが普通) */
-  const rows: Record<number, HTMLElement | null | undefined> = $state({});
+  const rows: Record<number, HTMLElement | undefined> = $state({});
+
+  /** チューナー側の画質。選局したときにだけ効く */
+  let tunerPresetId = $state("passthrough");
+
+  onMount(() => {
+    void loadTunerPreset();
+  });
+
+  async function loadTunerPreset() {
+    try {
+      const res = await fetch(resolve("api/tuner-preset"));
+      if (!res.ok) return;
+      const body = (await res.json()) as { active?: string };
+      if (body.active) tunerPresetId = body.active;
+    } catch {
+      /* チューナーが居ないだけ。既定のまま */
+    }
+  }
+
+  async function selectTunerPreset(name: string) {
+    tunerPresetId = name;
+    try {
+      const res = await fetch(resolve("api/tuner-preset"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ preset: name }),
+      });
+      if (!res.ok) await loadTunerPreset();
+    } catch {
+      await loadTunerPreset();
+    }
+  }
   /** 一覧そのもの。送るのはこの中だけ (下の説明) */
   let list = $state<HTMLElement | null>(null);
   /** 一度送った一覧は、あとは触らない。見ている途中で勝手に動くと邪魔になる (詳細を閉じるなどで作り直した一覧は先頭からなので、また送る) */
@@ -853,6 +887,13 @@
                 broadcast: player.broadcast,
                 unavailable: player.unavailable,
                 onselect: (next) => player.setChoice(next),
+                preset: tunerPresetId,
+                presets: LIVE_TUNER_PRESETS,
+                onpreset: (id) => {
+                  void selectTunerPreset(id);
+                  if (id === "passthrough") player.setChoice("raw");
+                  else if (player.choice === "raw") player.setChoice("h264");
+                },
               })}
               audio={liveAudio(AUDIO, player)}
               subtitle={liveSubtitle(CAPTION, player)}

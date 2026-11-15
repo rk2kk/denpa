@@ -227,7 +227,7 @@ describe("fetchAgent", () => {
   });
 
   test("書き方の誤りは、呼んだときに返す", async () => {
-    config.agentUrl = "http://tuner-agent:25252";
+    config.agentUrl = "ftp://tuner-agent:25252";
     await expect(toPrimary("/denpa/tuners")).rejects.toThrow("https://");
   });
 });

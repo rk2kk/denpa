@@ -100,7 +100,7 @@ describe("addAgent", () => {
   });
 
   test("形が違う・合言葉が無い・合言葉が違う・繋がらないなら、何をすればよいかを言って断る", async () => {
-    await expect(addAgent("http://a:25252#pair=x")).rejects.toThrow(
+    await expect(addAgent("ftp://a:25252#pair=x")).rejects.toThrow(
       "https://ホスト:ポート#pair=… の形で貼ってください",
     );
     await expect(addAgent("https://127.0.0.1:9")).rejects.toThrow(

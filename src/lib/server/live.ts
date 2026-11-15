@@ -307,9 +307,11 @@ export function encodeArgs(
   side = "pipe:3",
   transport: Transport = "ts",
   video: BroadcastCodec = transport === "tlv" ? "hevc" : "mpeg2",
+  tunerCopy = false,
 ): string[] {
   const uhd = transport === "tlv";
-  const copy = copiesVideo(transport, video, codec);
+  const copy =
+    (tunerCopy && codec === "h264") || copiesVideo(transport, video, codec);
   const picture =
     codec === "audio"
       ? null
@@ -404,6 +406,35 @@ export function copiesVideo(
   codec: StreamCodec,
 ): boolean {
   return transport === "ts" && video === "hevc" && codec === "hevc";
+}
+
+/**
+ * **チューナーが既に H.264 を作っているか** (`config.liveCopy` のときだけ写す)。
+ * エージェントの /presets の「適用中」を見て、passthrough 以外なら true。
+ * 短く待って、少しの間は覚えておく (選局のたびに待つと映像が出るのが遅れる)。
+ */
+const PRESET_TTL = 30_000;
+let presetSeen: { at: number; transcoding: boolean } | null = null;
+
+export async function tunerTranscoding(): Promise<boolean> {
+  const now = Date.now();
+  if (presetSeen !== null && now - presetSeen.at < PRESET_TTL) {
+    return presetSeen.transcoding;
+  }
+  let transcoding = false;
+  try {
+    const res = await fetch(`${config.agentUrl}/presets`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(1500),
+    });
+    const html = await res.text();
+    const active = /適用中: <b>([^<]*)<\/b>/.exec(html)?.[1] ?? null;
+    transcoding = active !== null && active !== "passthrough";
+  } catch {
+    transcoding = false;
+  }
+  presetSeen = { at: now, transcoding };
+  return transcoding;
 }
 
 /**
@@ -1653,6 +1684,7 @@ class Session {
    * 映像のコーデックは PMT を読んでから決まるので、ffmpeg を起こすたびに決め直す (`runEncode`)
    */
   private copied = false;
+  private copyExpected = false;
 
   /** 4K の局の放送の HEVC を、エンコードせずに詰め替えて配るか (`runMmt`)。4K の局の `hevc` はこれだけを指す */
   get passthrough(): boolean {
@@ -2118,7 +2150,18 @@ class Session {
         this.produced = false;
         this.busy = false;
         this.noMedia = null;
-        this.copied = copiesVideo(this.transport, video, this.codec);
+        let tunerCopy = false;
+        if (
+          config.liveCopy &&
+          this.codec === "h264" &&
+          this.source === undefined
+        ) {
+          tunerCopy = await tunerTranscoding();
+        }
+        if (tunerCopy) hw = null;
+        this.copied =
+          tunerCopy || copiesVideo(this.transport, video, this.codec);
+        this.copyExpected = tunerCopy;
         this.software = hw === null && !this.copied;
         // 遅れと速さは ffmpeg ごとに数え直す (前の ffmpeg の遅れと、起こし直した直後の速さを合わせない)
         this.lag.reset();
@@ -2147,6 +2190,7 @@ class Session {
               side?.url,
               this.transport,
               video,
+              tunerCopy,
             ),
           ],
           // 字幕は 4 本目の出力 (stream.sideOutput) へ出させる。**stdio の配列でしか増やせない**

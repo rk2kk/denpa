@@ -64,13 +64,13 @@ describe("parseAgentUrls", () => {
   });
 
   test("1 つでも読めなければ誤り", () => {
-    expect(() => parseAgentUrls("https://a:1,http://b:2")).toThrow("https://");
+    expect(() => parseAgentUrls("https://a:1,ftp://b:2")).toThrow("https://");
   });
 });
 
 describe("agentSecrets・agentHostnames", () => {
   test("全部の項目の合言葉とホスト名を返す。読めない項目があっても、ほかの合言葉は伏せる", () => {
-    config.agentUrl = "https://a:1#pair=one,http://b:2#pair=two";
+    config.agentUrl = "https://a:1#pair=one,ftp://b:2#pair=two";
     expect(agentSecrets()).toEqual(["one", "two"]);
     expect(agentHostnames()).toEqual(["a"]);
   });
@@ -191,7 +191,7 @@ describe("syncEnvAgents", () => {
   test("読めない書き方なら行を変えない (保存した証明書を消さない)", () => {
     config.agentUrl = "https://a:1#pair=x";
     syncEnvAgents();
-    config.agentUrl = "https://a:1#pair=x,http://b:2";
+    config.agentUrl = "https://a:1#pair=x,ftp://b:2";
     expect(() => syncEnvAgents()).toThrow("https://");
     expect(rows().map((r) => r.origin)).toEqual(["https://a:1"]);
   });
@@ -274,7 +274,7 @@ describe("syncEnvAgentsOnBoot", () => {
     const real = console.error;
     console.error = (...args: unknown[]) => logged.push(...args);
     try {
-      config.agentUrl = "https://a:1#pair=x,http://b:2";
+      config.agentUrl = "https://a:1#pair=x,ftp://b:2";
       expect(() => syncEnvAgentsOnBoot()).not.toThrow();
     } finally {
       console.error = real;

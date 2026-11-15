@@ -349,7 +349,20 @@ describe("チューナーの H.264 をそのまま写す", () => {
   const passthrough = (
     codec: "h264" | "av1" = "h264",
     caption: number | null = 0,
-  ) => encodeArgs(1024, stereo, codec, caption, null, 0, false, true);
+  ) =>
+    encodeArgs(
+      1024,
+      stereo,
+      codec,
+      caption,
+      null,
+      0,
+      false,
+      "pipe:3",
+      "ts",
+      "mpeg2",
+      true,
+    );
 
   test("映像は写し、音声はエンコードする", () => {
     const args = passthrough();
@@ -386,7 +399,19 @@ describe("チューナーの H.264 をそのまま写す", () => {
 
   /** 既定 (写さない) は今までと同じ */
   test("指定しなければ今までどおりエンコードする", () => {
-    const args = encodeArgs(1024, stereo, "h264", 0, null, 0, false, false);
+    const args = encodeArgs(
+      1024,
+      stereo,
+      "h264",
+      0,
+      null,
+      0,
+      false,
+      "pipe:3",
+      "ts",
+      "mpeg2",
+      false,
+    );
     expect(args[args.indexOf("-c:v") + 1]).toBe("libx264");
   });
 });

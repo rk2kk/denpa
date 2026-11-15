@@ -37,9 +37,9 @@ export function parseAgentUrl(raw: string): AgentTarget {
   const hash = raw.indexOf("#");
   const base = (hash < 0 ? raw : raw.slice(0, hash)).replace(/\/+$/, "");
   const fragment = hash < 0 ? "" : raw.slice(hash + 1);
-  if (!/^https:\/\//i.test(base)) {
+  if (!/^https?:\/\//i.test(base)) {
     throw new Error(
-      "TUNER_AGENT_URL は https:// で書きます (エージェントとは TLS で繋ぎます。docs/agent.md)",
+      "TUNER_AGENT_URL は https:// (または平文の http://) で書きます (docs/agent.md)",
     );
   }
   if (!URL.canParse(base) || new URL(base).hostname === "") {

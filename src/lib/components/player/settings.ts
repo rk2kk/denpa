@@ -95,6 +95,10 @@ export function liveCodecs(opts: {
   broadcast?: BroadcastCodec;
   unavailable: LiveCodec[];
   onselect: (choice: LiveChoice) => void;
+  /** チューナー側の画質 (DT295 のオンボード変換)。選局のときにだけ効く */
+  preset?: string;
+  presets?: { id: string; label: string }[];
+  onpreset?: (preset: string) => void;
 }): SettingChoice {
   const broadcast = opts.broadcast ?? "mpeg2";
   const codecs = LIVE_CODECS.filter((c) => c.id === opts.shown);
@@ -122,9 +126,18 @@ export function liveCodecs(opts: {
         label: formatLabel("raw", broadcast),
         active: opts.choice === "raw",
       },
+      ...(opts.onpreset
+        ? (opts.presets ?? []).map((p) => ({
+            key: `tuner:${p.id}`,
+            label: `チューナー: ${p.label}`,
+            active: p.id === opts.preset,
+          }))
+        : []),
     ],
     pick: (key) => {
-      if (key === MPEG2) opts.onselect("raw");
+      if (typeof key === "string" && key.startsWith("tuner:")) {
+        opts.onpreset?.(key.slice("tuner:".length));
+      } else if (key === MPEG2) opts.onselect("raw");
       else if (key === AUTO) opts.onselect("auto");
       else opts.onselect(key as LiveChoice);
     },

@@ -1,187 +1,34 @@
-/**
- * エージェントへの呼び出し。**HTTPS で、お互いを証明書で確かめる** (docs/agent.md)。
- *
- * - こちらの証明書は自分で作る (`<dataDir>/tls/denpa.key` / `denpa.crt`。自己署名)
- * - エージェントの証明書は、組んだときに覚える (`<dataDir>/tls/agent.crt`)。その証明書そのものを
- *   `ca` にして繋ぐので、`TUNER_AGENT_URL` をどんな名前・IP で書いても通る (名前は見ない)
- * - 組むのは合言葉 (`TUNER_AGENT_URL` の `#pair=…`) が同じものどうしだけ。覚えた証明書で
- *   繋がらない・エージェントに断られたときは、合言葉があれば組み直してもう 1 度だけ試す
- *
- * 合言葉はログにも不具合報告にも出さない (`agentSecrets`)。
- */
-import {
-  createHash,
-  createHmac,
-  createPublicKey,
-  generateKeyPairSync,
-  sign,
-} from "node:crypto";
-import type { KeyObject } from "node:crypto";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
+/**
+ * エージェントへの呼び出し。**HTTPS で、お互いを証明書で確かめる** (docs/agent.md)。
+ *
+ * - こちらの証明書は自分で作る (`<dataDir>/tls/denpa.key` / `denpa.crt`。自己署名)
+ * - エージェントの証明書は、組んだときに DB の行に保存する (`agents.cert`)。その証明書そのものを
+ *   `ca` にして繋ぐので、`TUNER_AGENT_URL` をどんな名前・IP で書いても通る (名前は見ない)
+ * - 組むのは合言葉 (`TUNER_AGENT_URL` の `#pair=…`) が同じものどうしだけ。保存した証明書で
+ *   繋がらない・エージェントに断られたときは、合言葉があれば組み直してもう 1 度だけ試す
+ *
+ * 合言葉はログにも不具合報告にも DB にも出さない (`agentSecrets`)。
+ */
 import { connect } from "node:tls";
 
+import {
+  createIdentity,
+  derToPem,
+  fingerprint,
+  type Identity,
+  pairProof,
+  pemToDer,
+} from "./agent-identity";
+import { type Agent, agentCert, rememberAgentCert } from "./agents";
 import { config } from "./config";
-
-/** `TUNER_AGENT_URL` を、送る先 (`origin`) と合言葉に分けたもの */
-interface AgentTarget {
-  /** `https://host:port` (末尾の `/` と `#` から後ろは除く) */
-  origin: string;
-  /** `#pair=` の値。無ければ null */
-  pair: string | null;
-}
-
-/** `TUNER_AGENT_URL` を読む。`https://` でなければ誤り */
-export function parseAgentUrl(raw: string): AgentTarget {
-  const hash = raw.indexOf("#");
-  const base = (hash < 0 ? raw : raw.slice(0, hash)).replace(/\/+$/, "");
-  const fragment = hash < 0 ? "" : raw.slice(hash + 1);
-  /*
-   * **このフォークは平文 http も許す。** DT295 の dt295-agent は TLS も
-   * 合言葉 (denpa-pair) も喋らないため。https のときだけ相互 TLS で組む。
-   */
-  if (!/^https?:\/\//i.test(base)) {
-    throw new Error(
-      "TUNER_AGENT_URL は https:// (または平文の http://) で書きます (docs/agent.md)",
-    );
-  }
-  if (!URL.canParse(base) || new URL(base).hostname === "") {
-    throw new Error(
-      `TUNER_AGENT_URL のホストが読めません (${base})。https://ホスト:ポート の形で書きます (docs/agent.md)`,
-    );
-  }
-  const pair = new URLSearchParams(fragment).get("pair");
-  return { origin: base, pair: pair && pair.length > 0 ? pair : null };
-}
-
-/** 不具合報告で伏せる値 (合言葉) */
-export function agentSecrets(): string[] {
-  try {
-    const { pair } = parseAgentUrl(config.agentUrl);
-    return pair === null ? [] : [pair];
-  } catch {
-    return [];
-  }
-}
-
-/** エージェントの宛先のホスト名 (不具合報告で伏せるため) */
-export function agentHostname(): string | null {
-  try {
-    return new URL(parseAgentUrl(config.agentUrl).origin).hostname;
-  } catch {
-    return null;
-  }
-}
-
-// --- 証明書 -------------------------------------------------------------------
-
-/** 証明書の指紋。DER の SHA-256 を小文字の 16 進で (エージェントと同じ決まり) */
-export function fingerprint(der: Uint8Array): string {
-  return createHash("sha256").update(der).digest("hex");
-}
-
-function pemToDer(pem: string): Uint8Array {
-  const body = pem
-    .replace(/-----(BEGIN|END) CERTIFICATE-----/g, "")
-    .replace(/\s+/g, "");
-  return new Uint8Array(Buffer.from(body, "base64"));
-}
-
-function derToPem(der: Uint8Array): string {
-  const b64 = Buffer.from(der).toString("base64");
-  const lines = b64.match(/.{1,64}/g) ?? [];
-  return `-----BEGIN CERTIFICATE-----\n${lines.join("\n")}\n-----END CERTIFICATE-----\n`;
-}
-
-/*
- * 自己署名の証明書を DER で組む。Bun にも node:crypto にも証明書を作る API が無いので、
- * 要る形 (X.509 v3・ECDSA P-256・SHA-256・CN だけ・拡張なし) だけを手で並べる
- */
-function der(tag: number, ...parts: Uint8Array[]): Uint8Array {
-  const length = parts.reduce((n, p) => n + p.length, 0);
-  const head =
-    length < 0x80
-      ? [tag, length]
-      : length < 0x100
-        ? [tag, 0x81, length]
-        : [tag, 0x82, length >> 8, length & 0xff];
-  const out = new Uint8Array(head.length + length);
-  out.set(head);
-  let at = head.length;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
-}
-const seq = (...parts: Uint8Array[]) => der(0x30, ...parts);
-const bytes = (...values: number[]) => new Uint8Array(values);
-/** ecdsa-with-SHA256 (1.2.840.10045.4.3.2) */
-const ECDSA_SHA256 = seq(
-  bytes(0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02),
-);
-
-function commonName(name: string): Uint8Array {
-  const utf8 = new TextEncoder().encode(name);
-  // SET { SEQ { OID 2.5.4.3, UTF8String } }
-  return seq(
-    der(0x31, seq(bytes(0x06, 0x03, 0x55, 0x04, 0x03), der(0x0c, utf8))),
-  );
-}
-
-function generalizedTime(at: Date): Uint8Array {
-  const text = at.toISOString().replace(/[-:T]/g, "").slice(0, 14) + "Z";
-  return der(0x18, new TextEncoder().encode(text));
-}
-
-/** 自己署名の証明書 (PEM)。有効期間は前日から 100 年 (相手は証明書そのものを覚えるので、期限で切らない) */
-function selfSignedCertificate(key: KeyObject, name: string): string {
-  const spki = new Uint8Array(
-    createPublicKey(key).export({ type: "spki", format: "der" }),
-  );
-  const serial = crypto.getRandomValues(new Uint8Array(16));
-  // 正の数で、先頭のバイトを 0 にしない (0 で始まると DER の整数として余分な 0 になり、BoringSSL が INVALID_INTEGER で断る)
-  serial[0] = ((serial[0] ?? 0) & 0x7f) | 0x40;
-  const now = Date.now();
-  const tbs = seq(
-    der(0xa0, der(0x02, bytes(0x02))), // v3
-    der(0x02, serial),
-    ECDSA_SHA256,
-    commonName(name),
-    seq(
-      generalizedTime(new Date(now - 24 * 60 * 60 * 1000)),
-      generalizedTime(new Date(now + 100 * 365 * 24 * 60 * 60 * 1000)),
-    ),
-    commonName(name),
-    spki,
-  );
-  const signature = new Uint8Array(sign("sha256", tbs, key));
-  return derToPem(seq(tbs, ECDSA_SHA256, der(0x03, bytes(0x00), signature)));
-}
-
-export interface Identity {
-  key: string;
-  cert: string;
-  fingerprint: string;
-}
-
-/** EC P-256 の鍵と自己署名の証明書を作る */
-export function createIdentity(name: string): Identity {
-  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const cert = selfSignedCertificate(privateKey, name);
-  return {
-    key: privateKey.export({ type: "pkcs8", format: "pem" }) as string,
-    cert,
-    fingerprint: fingerprint(pemToDer(cert)),
-  };
-}
 
 // --- 置き場 -------------------------------------------------------------------
 
@@ -225,40 +72,7 @@ function loadIdentity(dir: string): Identity {
   return identity;
 }
 
-let remembered: { path: string; stamp: string; cert: string } | null = null;
-
-/**
- * 覚えているエージェントの証明書 (PEM)。まだ組んでいなければ null。
- * ファイルが変わっていなければ前に読んだものを使う (`tls` を毎回作り直さないため)
- */
-function agentCert(): string | null {
-  const path = `${tlsDir()}/agent.crt`;
-  if (!existsSync(path)) return null;
-  const { mtimeMs, size } = statSync(path);
-  const stamp = `${mtimeMs}:${size}`;
-  if (remembered?.path !== path || remembered.stamp !== stamp) {
-    remembered = { path, stamp, cert: readFileSync(path, "utf8") };
-  }
-  return remembered.cert;
-}
-
-function rememberAgent(cert: string): void {
-  writeSecret(`${tlsDir()}/agent.crt`, cert);
-}
-
 // --- 組む ---------------------------------------------------------------------
-
-/** 組むときの証し。base64url(HMAC-SHA256(合言葉, `denpa-pair/<役>\n<A>\n<D>`)) */
-export function pairProof(
-  token: string,
-  role: "client" | "agent",
-  agent: string,
-  client: string,
-): string {
-  return createHmac("sha256", token)
-    .update(`denpa-pair/${role}\n${agent}\n${client}`)
-    .digest("base64url");
-}
 
 /** 相手の証明書を、確かめずに取得する (このあと合言葉で確かめる) */
 function peerCertificate(
@@ -319,23 +133,53 @@ function makeTlsOptions(identity: Identity, ca: string) {
   };
 }
 
-let pairing: { origin: string; done: Promise<void> } | null = null;
+/** 組めた相手の証明書 (PEM) と指紋 */
+export interface PeerCert {
+  cert: string;
+  fingerprint: string;
+}
 
-/** 合言葉で組む。同時に呼ばれても 1 度だけ */
-function pair(target: AgentTarget): Promise<void> {
-  if (pairing?.origin === target.origin) return pairing.done;
-  const done = (async () => {
-    const token = target.pair;
-    if (token === null) {
-      throw new Error(
-        "エージェントとまだ組んでいません。TUNER_AGENT_URL に #pair=<合言葉> を付けてください (エージェントのログか `denpa-agent --pair` に出ます。docs/agent.md)",
-      );
-    }
-    const identity = ownIdentity();
-    const peer = await peerCertificate(target.origin, identity);
-    const agent = fingerprint(peer);
-    const peerPem = derToPem(peer);
-    const res = await fetch(`${target.origin}/denpa/pair`, {
+/**
+ * **組めなかったわけ。** 画面から登録するとき (`agent-admin.ts`) は、`kind` で出す文を決める。
+ * `unreachable` は繋がらない、`refused` はエージェントが断った (`message` はエージェントの `error`。200 字まで)、
+ * `proof` は相手の合言葉が違う (別の相手に繋がっている)
+ */
+export class PairError extends Error {
+  constructor(
+    readonly kind: "unreachable" | "refused" | "proof",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** エージェントが返した文。長いものは切る (人が書いた宛先の相手が返した本文なので、画面に出すのは 200 字まで) */
+const agentText = (text: string): string =>
+  text.length > 200 ? `${text.slice(0, 200)}…` : text;
+
+/**
+ * **合言葉で組み、相手の証明書を返す。** 保存はしない (環境変数のエージェントは `pair` が行に、画面から登録するものは
+ * `agent-admin.ts` が新しい行に保存する)。相手の証明書は確かめずに取り、合言葉の証し (pairProof) が合ったときだけ返す
+ */
+export async function handshake(
+  origin: string,
+  token: string,
+): Promise<PeerCert> {
+  const identity = ownIdentity();
+  let peer: Uint8Array;
+  try {
+    peer = await peerCertificate(origin, identity);
+  } catch (error) {
+    throw new PairError(
+      "unreachable",
+      `エージェントに繋がりません: ${error instanceof Error ? error.message : error}`,
+    );
+  }
+  const agent = fingerprint(peer);
+  const peerPem = derToPem(peer);
+  let res: Response;
+  try {
+    res = await fetch(`${origin}/denpa/pair`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -345,28 +189,60 @@ function pair(target: AgentTarget): Promise<void> {
       signal: AbortSignal.timeout(10_000),
       tls: tlsOptions(identity, peerPem),
     });
-    const body = (await res.json().catch(() => null)) as {
-      proof?: unknown;
-      error?: unknown;
-    } | null;
-    if (!res.ok) {
-      const why =
-        typeof body?.error === "string" ? body.error : `${res.status}`;
-      throw new Error(`エージェントと組めません: ${why}`);
-    }
-    if (
-      body?.proof !== pairProof(token, "agent", agent, identity.fingerprint)
-    ) {
+  } catch (error) {
+    throw new PairError(
+      "unreachable",
+      `エージェントに繋がりません: ${error instanceof Error ? error.message : error}`,
+    );
+  }
+  const body = (await res.json().catch(() => null)) as {
+    proof?: unknown;
+    error?: unknown;
+  } | null;
+  if (!res.ok) {
+    const why =
+      typeof body?.error === "string" ? agentText(body.error) : `${res.status}`;
+    throw new PairError("refused", why);
+  }
+  if (body?.proof !== pairProof(token, "agent", agent, identity.fingerprint)) {
+    throw new PairError(
+      "proof",
+      "相手の合言葉が違います (別の相手に繋がっているかもしれません)",
+    );
+  }
+  return { cert: peerPem, fingerprint: agent };
+}
+
+/** 組んでいる途中のもの (行の ID ごと)。別のエージェントとは同時に組める */
+const pairing = new Map<number, Promise<void>>();
+
+/** 環境変数の合言葉で組み、相手の証明書を行に保存する。同じエージェントに同時に呼ばれても 1 度だけ */
+function pair(target: Agent): Promise<void> {
+  const running = pairing.get(target.id);
+  if (running !== undefined) return running;
+  const done = (async () => {
+    const token = target.pair;
+    if (token === null) {
       throw new Error(
-        "エージェントと組めません: 相手の合言葉が違います (別の相手に繋がっているかもしれません)",
+        "エージェントとまだ組んでいません。TUNER_AGENT_URL に #pair=<合言葉> を付けてください (エージェントのログか `denpa-agent --pair` に出ます。docs/agent.md)",
       );
     }
-    rememberAgent(peerPem);
-    console.log(`[agent] エージェント (${agent.slice(0, 16)}) と組みました`);
+    let peer: PeerCert;
+    try {
+      peer = await handshake(target.origin, token);
+    } catch (error) {
+      throw new Error(
+        `エージェントと組めません: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+    rememberAgentCert(target.id, peer.cert, peer.fingerprint);
+    console.log(
+      `[agent] エージェント (${target.name}・${peer.fingerprint.slice(0, 16)}) と組みました`,
+    );
   })();
-  pairing = { origin: target.origin, done };
+  pairing.set(target.id, done);
   const clear = () => {
-    if (pairing?.done === done) pairing = null;
+    if (pairing.get(target.id) === done) pairing.delete(target.id);
   };
   done.then(clear, clear);
   return done;
@@ -393,15 +269,55 @@ async function notPaired(res: Response): Promise<boolean> {
 }
 
 /**
- * エージェントを呼ぶ。`path` は `/denpa/...`。返すのはふつうの `fetch` の応答。
- * まだ組んでいない・覚えた証明書と合わない・組んでいないと断られた、のどれかなら、合言葉で組み直して 1 度だけ試し直す。
- * 試し直すので、`init.body` は文字列など何度でも送れるものにする (いまの呼び出し元はどれも JSON の文字列か本文なし)
+ * **画面から登録したエージェントと、保存した証明書で繋がらない** (合言葉を持たないので組み直せない)。
+ * `changed` は相手の証明書が変わった、`unpaired` はエージェントに組んでいないと断られた (`tls/clients` から消された)。
+ * どちらも登録用の URL を貼り直してもらう (設定の「エージェント」の「URL を変える」)
  */
-export async function agentFetch(
+export class AgentTrustError extends Error {
+  constructor(readonly kind: "changed" | "unpaired") {
+    super(
+      kind === "changed"
+        ? "エージェントの証明書が変わりました。登録用の URL を貼り直してください"
+        : "エージェントにこの denpa の登録がありません。登録用の URL を貼り直してください",
+    );
+  }
+}
+
+/**
+ * 保存した証明書 (`cert`) で、行の無い宛先を呼ぶ。付け替え (`agent-admin.moveAgent`) で、新しいアドレスの相手が
+ * 同じエージェントかを確かめるときに使う。証明書が合わなければ `AgentTrustError` (`changed`)
+ */
+export async function fetchAt(
+  origin: string,
+  cert: string,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const target = parseAgentUrl(config.agentUrl);
+  try {
+    return await fetch(`${origin}${path}`, {
+      ...init,
+      tls: tlsOptions(ownIdentity(), cert),
+    });
+  } catch (error) {
+    if (isTrustError(error)) throw new AgentTrustError("changed");
+    throw error;
+  }
+}
+
+/**
+ * 決まったエージェントを呼ぶ。`path` は `/denpa/...`。返すのはふつうの `fetch` の応答。
+ * どのエージェントに送るかは呼ぶ側が決める (`agents.ts` の `listAgents`・`primaryAgent`。選局は `tuner.openChannel` が振り分ける)。
+ * まだ組んでいない・保存した証明書と合わない・組んでいないと断られた、のどれかなら、合言葉で組み直して 1 度だけ試し直す。
+ * 試し直すので、`init.body` は文字列など何度でも送れるものにする (いまの呼び出し元はどれも JSON の文字列か本文なし)。
+ *
+ * **合言葉を持たないエージェント (画面から登録したもの) は組み直さない。** 証明書が合わなければ `AgentTrustError` を送出し、
+ * 組んでいないと断られた 403 はそのまま返す
+ */
+export async function fetchAgent(
+  target: Agent,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
   /*
    * **平文 http のエージェントは、このフォークではそのまま許す。**
    * 上流は相互 TLS と合言葉 (denpa-pair) を必須にしたが、DT295 の
@@ -410,7 +326,7 @@ export async function agentFetch(
   const plain = target.origin.startsWith("http://");
   const attempt = async (): Promise<Response> => {
     if (plain) return fetch(`${target.origin}${path}`, init);
-    const ca = agentCert();
+    const ca = agentCert(target.id);
     if (ca === null) throw new NeedsPairing();
     try {
       return await fetch(`${target.origin}${path}`, {
@@ -428,10 +344,19 @@ export async function agentFetch(
     if (!(await notPaired(res))) return res;
   } catch (error) {
     if (!(error instanceof NeedsPairing)) throw error;
+    if (target.pair === null && agentCert(target.id) !== null)
+      throw new AgentTrustError("changed");
   }
   if (init.signal?.aborted) throw init.signal.reason;
   await pair(target);
   return attempt();
+}
+
+/**
+ * 組んでいないと断られた応答か (403 の `paired: false`)。画面から登録したエージェントの状態に使う (`agent-admin.ts`)
+ */
+export async function refusedAsUnpaired(res: Response): Promise<boolean> {
+  return res.status === 403 && (await notPaired(res));
 }
 
 class NeedsPairing extends Error {}
