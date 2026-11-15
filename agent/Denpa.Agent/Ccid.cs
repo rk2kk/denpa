@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Globalization;
 using System.Text;
 
 namespace Denpa.Agent;
@@ -11,10 +10,10 @@ namespace Denpa.Agent;
  *
  * - UsbFs.cs … /dev/bus/usb をバルク転送で読み書きする部分と、ディスクリプタの読み方
  * - Ccid.cs  … CCID の命令 (電源・パラメータ・XfrBlock) と、それを ICardLink にしたもの
- * - T1.cs    … ATR の読み方と、TPDU 単位の読み取り機のための T=1 のブロックのやり取り
+ * - T1.cs    … ATR の読み方と、TPDU 単位のリーダーのための T=1 のブロックのやり取り
  *
  * 本番は Gemalto (Gemplus) PC Twin Reader (08e6:3437) に B-CAS。これは TPDU 単位で、
- * ATR から勝手にパラメータを決めてくれない (dwFeatures 0x00010230) ので、
+ * ATR からパラメータを自動では決めない (dwFeatures 0x00010230) ので、
  * T=1 の枠組みも SetParameters もこちらが持つ。
  */
 
@@ -64,7 +63,7 @@ public static class CcidMessage
         return message;
     }
 
-    /// <summary>頭の dwLength が言うメッセージ全体の長さ</summary>
+    /// <summary>ヘッダの dwLength が示すメッセージ全体の長さ</summary>
     public static int Length(ReadOnlySpan<byte> header) =>
         Header + (int)Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(header[1..]), int.MaxValue - Header);
 
@@ -104,19 +103,19 @@ public static class CcidMessage
 /// CCID のリーダー 1 台 (のスロット 0) を <see cref="ICardLink"/> にしたもの。
 ///
 /// <para>
-/// **読み取り機の単位で方式が分かれる。** TPDU 単位なら T=1 のブロックをこちらで組み
+/// **リーダーの単位で方式が分かれる。** TPDU 単位なら T=1 のブロックをこちらで組み
 /// (<see cref="T1Protocol"/>)、APDU 単位なら APDU をそのまま XfrBlock に載せる。
 /// 文字単位は断る。
 /// </para>
 ///
 /// <para>
-/// 失敗はすべて <see cref="IOException"/>。抜かれた・カードが抜けたあとは使えないので、
+/// 失敗はすべて <see cref="IOException"/> (Reset の前に Transmit を呼ぶ誤りだけは <see cref="InvalidOperationException"/>)。抜かれた・カードが抜けたあとは使えないので、
 /// 呼んだ側が捨てて <see cref="Ccid.Find()"/> から開き直す (繋ぎ直しは B-CAS の側)。
 /// </para>
 /// </summary>
 public sealed class CcidLink : ICardLink
 {
-    /// <summary>番号の合わない応答を、投げるまでに読み飛ばす数 (前のプロセスが残した応答など)</summary>
+    /// <summary>番号の合わない応答を、例外にするまでに読み飛ばす数 (前のプロセスが残した応答など)</summary>
     private const int MaxStale = 8;
 
     private readonly IBulkPipe _pipe;
@@ -155,10 +154,10 @@ public sealed class CcidLink : ICardLink
     /// </para>
     ///
     /// <para>
-    /// **SetParameters を忘れると、B-CAS とは話が通じない。** B-CAS は specific mode で、
-    /// ATR の直後から TA1 の速さ (Di 2) で話すのに、PC Twin はそれを自分では読まない
+    /// **SetParameters を送らないと、B-CAS とはやり取りできない。** B-CAS は specific mode で、
+    /// ATR の直後から TA1 の速さ (Di 2) で通信するのに、PC Twin はそれを自動では読み取らない
     /// (dwFeatures に「ATR からパラメータを決める」0x02 が無い)。リーダーは既定の速さのまま
-    /// 聞くので、最初のブロックから黙る。
+    /// 受信するので、最初のブロックから応答が無い。
     /// </para>
     /// </summary>
     public byte[] Reset()
@@ -175,9 +174,9 @@ public sealed class CcidLink : ICardLink
         }
         catch (IOException) when (!_portReset)
         {
-            // 最初の命令から黙るなら、リーダーが固まっている。ポートをリセットして 1 回だけやり直す
+            // 最初の命令から応答が無いなら、リーダーが固まっている。ポートをリセットして 1 回だけやり直す
             _portReset = true;
-            Log.Write($"{Name} が応えないので、USB のポートをリセットします");
+            Log.Write($"[{Name}] 応答しないので、USB のポートをリセットします");
             _pipe.ResetPort();
             Call(CcidMessage.PowerOff, []);
         }
@@ -212,7 +211,7 @@ public sealed class CcidLink : ICardLink
         if (Interface.Tpdu)
         {
             _t1 = new T1Protocol(atr, Exchange);
-            // 1 ブロック = NAD PCB LEN + INF + LRC。CCID の頭 10 バイトと一緒に 1 メッセージに収まる長さまで
+            // 1 ブロック = NAD PCB LEN + INF + LRC。CCID のヘッダ 10 バイトと一緒に 1 メッセージに収まる長さまで
             var ifsd = Math.Min(Interface.MaxIfsd > 0 ? Interface.MaxIfsd : 254, Interface.MaxMessage - CcidMessage.Header - 4);
             _t1.NegotiateIfsd(ifsd);
         }
@@ -240,11 +239,11 @@ public sealed class CcidLink : ICardLink
     }
 
     /// <summary>
-    /// T=1 のパラメータを教える (abProtocolDataStructure の 7 バイト)。
+    /// T=1 のパラメータをリーダーに設定する (abProtocolDataStructure の 7 バイト)。
     ///
     /// <para>
     /// 速さ (Fi/Di) は **specific mode なら TA1 そのもの**。negotiable mode のカードは PPS を
-    /// しない限り既定の速さ (0x11) のままなので、リーダーが PPS を自分でする (0x80) ときだけ TA1 を渡す
+    /// しない限り既定の速さ (0x11) のままなので、リーダーが PPS を自動でする (0x80) ときだけ TA1 を渡す
     /// </para>
     /// </summary>
     private void SetT1Parameters(Atr atr)
@@ -266,7 +265,7 @@ public sealed class CcidLink : ICardLink
 
     /// <summary>
     /// T=1 のブロックを 1 つ送って 1 つ受ける (<see cref="T1Protocol"/> の下の層)。
-    /// カードが黙った・化けたは null (T=1 の側で送り直す)
+    /// カードの応答が無い・化けたときは null (T=1 の側で送り直す)
     /// </summary>
     private byte[]? Exchange(byte[] block, byte wtx)
     {
@@ -328,7 +327,7 @@ public sealed class CcidLink : ICardLink
     }
 
     /// <summary>
-    /// 命令を 1 つ送って、**同じ番号の**答えを返す。
+    /// 命令を 1 つ送って、**同じ番号の**応答を返す。
     ///
     /// <para>
     /// 番号の違う応答は読み飛ばす (前のプロセスが途中で終わって残した応答など)。
@@ -358,7 +357,7 @@ public sealed class CcidLink : ICardLink
     /// <para>
     /// **長さぴったりで要求する。** メッセージがパケットの大きさの倍数で終わるとき、
     /// ZLP を送らないリーダーがあり、大きめのバッファで待つと時間切れまで返らない。
-    /// 先に 1 パケット読んで頭の dwLength を知り、残りをパケットの倍数に切り上げて要求する。
+    /// 先に 1 パケット読んでヘッダの dwLength を読み、残りをパケットの倍数に切り上げて要求する。
     /// 前のメッセージのあとの ZLP (0 バイト) は読み飛ばす。
     /// </para>
     /// </summary>
@@ -376,7 +375,7 @@ public sealed class CcidLink : ICardLink
                 continue;
             }
             total += got;
-            // 短いパケットはメッセージの終わり。頭も揃わないうちに終わるのは壊れている
+            // 短いパケットはメッセージの終わり。ヘッダも揃わないうちに終わるのは壊れている
             if (total < CcidMessage.Header && got % packet != 0)
             {
                 throw new IOException($"{Name} の応答が短すぎます ({total} バイト)");
@@ -420,43 +419,32 @@ public sealed class CcidLink : ICardLink
 /// <summary>USB の CCID リーダーを探す</summary>
 public static class Ccid
 {
+    /// <summary>CCID のインターフェースの bInterfaceClass</summary>
+    public const int InterfaceClass = 0x0B;
+
     /// <summary>
     /// 挿さっている CCID のインターフェース (bInterfaceClass 0x0b) を並べる。**開かない。**
-    /// sysfs だけを読むので、別のプロセスが使っていても並ぶ (開くときに断られる)
+    /// 並べるだけなので、ほかのソフトが使っていても並ぶ (開くときに断られる)。
+    /// カードリーダーを自前の CCID で開かない OS (Windows・macOS は PC/SC。<see cref="IUsbHost.Readers"/>) は null
     /// </summary>
-    public static IReadOnlyList<CardLinkCandidate> Find() => Find(UsbSysfs.Devices, UsbSysfs.DevUsb);
+    public static IReadOnlyList<CardLinkCandidate>? Find() => Find(UsbHost.Current);
 
-    internal static List<CardLinkCandidate> Find(string sysfs, string devUsb)
+    internal static List<CardLinkCandidate>? Find(IUsbHost host)
     {
+        if (host.Readers() is not { } readers) return null;
+        // 並びは sysfs のインターフェースの名前 (4-11:1.0 → 機材 4-11、構成 1、インターフェース 0) の順
+        var interfaces = readers
+            .SelectMany(device => device.Interfaces.Where(entry => entry.Class == InterfaceClass).Select(entry => (Device: device, entry.Config, entry.Number)))
+            .OrderBy(item => $"{item.Device.Port}:{item.Config}.{item.Number}", StringComparer.Ordinal);
         var found = new List<CardLinkCandidate>();
-        if (!Directory.Exists(sysfs)) return found;
-        foreach (var entry in Directory.EnumerateFileSystemEntries(sysfs, "*:*").Order(StringComparer.Ordinal))
+        foreach (var (device, config, number) in interfaces)
         {
-            // 4-11:1.0 → 機材 4-11、構成 1、インターフェース 0
-            var name = Path.GetFileName(entry);
-            var colon = name.IndexOf(':');
-            var dot = name.IndexOf('.', colon + 1);
-            if (colon <= 0 || dot < 0 || !int.TryParse(name.AsSpan(colon + 1, dot - colon - 1), out var config)) continue;
-            if (UsbSysfs.Read(entry, "bInterfaceClass") != "0b") continue;
-            if (!int.TryParse(UsbSysfs.Read(entry, "bInterfaceNumber"), NumberStyles.HexNumber, null, out var number)) continue;
-
-            var port = name[..colon];
-            var device = Path.Combine(sysfs, port);
-            if (!int.TryParse(UsbSysfs.Read(device, "busnum"), out var bus)
-                || !int.TryParse(UsbSysfs.Read(device, "devnum"), out var address)
-                || !int.TryParse(UsbSysfs.Read(device, "idVendor"), NumberStyles.HexNumber, null, out var vendor)
-                || !int.TryParse(UsbSysfs.Read(device, "idProduct"), NumberStyles.HexNumber, null, out var product))
-            {
-                continue;
-            }
-
-            var label = Label(UsbSysfs.Read(device, "manufacturer"), UsbSysfs.Read(device, "product"), vendor, product);
-            var where = number == 0 ? port : $"{port}:{config}.{number}";
+            var label = Label(device.Manufacturer, device.ProductName, device.Vendor, device.Product);
+            var where = number == 0 ? device.Port : $"{device.Port}:{config}.{number}";
             var display = $"{label} (usb {where})";
-            var path = $"{devUsb}/{bus:000}/{address:000}";
             found.Add(new CardLinkCandidate(display, () =>
             {
-                var pipe = UsbFsPipe.Open(path, vendor, product, config, number);
+                var pipe = host.OpenCcid(device.Port, device.Vendor, device.Product, config, number);
                 return new CcidLink(display, pipe, pipe.Interface);
             }));
         }
@@ -473,16 +461,17 @@ public static class Ccid
 
     /// <summary>
     /// 診断用 (<c>denpa-agent --card</c>)。見つかったリーダーを並べ、最初の 1 台のカードに
-    /// 電源を入れて ATR と読み取り機の種類を書く。**実機で最初に当てるのはここ。**
+    /// 電源を入れて ATR とリーダーの種類を書く。**実機で最初に当てるのはここ。**
+    /// 自前の CCID で開かない OS (<see cref="Find()"/> が null) は null
     /// </summary>
-    public static string Describe()
+    public static string? Describe()
     {
-        var text = new StringBuilder();
-        var found = Find();
+        if (Find() is not { } found) return null;
         if (found.Count == 0)
         {
-            return $"CCID のカードリーダーが見つかりません ({UsbSysfs.Devices} に bInterfaceClass 0b のインターフェースがありません)";
+            return $"CCID のカードリーダーが見つかりません ({(UsbHost.Brokered ? "アプリから受け取った機材" : UsbSysfs.Devices)} に bInterfaceClass 0b のインターフェースがありません)";
         }
+        var text = new StringBuilder();
         foreach (var candidate in found) text.AppendLine(candidate.Name);
 
         try

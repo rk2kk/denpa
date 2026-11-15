@@ -4,6 +4,7 @@
   import Menu from "../Menu.svelte";
   import ControlButton from "./ControlButton.svelte";
   import { stageMenu } from "./controls.svelte";
+  import { hold } from "./hold";
   import Icon from "./Icon.svelte";
   import { BACK, FORWARD, SETTINGS } from "./icons";
   import type {
@@ -95,7 +96,7 @@
       next === null
         ? pane?.querySelector<HTMLElement>(`[data-setting="${from}"]`)
         : (pane?.querySelector<HTMLElement>(
-            ".option[data-active]:not([data-disabled])",
+            '.option[aria-checked="true"]:not([data-disabled])',
           ) ??
           pane?.querySelector<HTMLElement>(".option:not([data-disabled])"));
     target?.focus({ preventScroll: true });
@@ -147,6 +148,7 @@
     onclick={() => {
       if (item.disabled !== true) item.toggle();
     }}
+    {@attach item.hold !== undefined && hold(item.hold)}
   >
     <Icon icon={item.icon} />
     <span class="label"
@@ -250,7 +252,6 @@
           aria-checked={option.active}
           aria-disabled={option.disabled === true ? "true" : undefined}
           data-disabled={option.disabled === true ? "" : undefined}
-          data-active={option.active ? "" : undefined}
           data-testid="{prefix}-{opened.id}-option"
           {...{ [`data-${opened.id}`]: option.key }}
           onclick={() => {
@@ -266,10 +267,10 @@
 
 <style>
   /*
-     * **幅は上の並びと選択肢の並びで変えない。** 入るたびに枠の幅が変わると、押した位置から行が逃げる。
-     * 名前と値が 1 行に収まる幅から。**値は省かずに出したい** (音声の「主音声ステレオ (日本語)」など) ので、
-     * 映像の上のほかのメニュー (20rem まで) より広く取り、それでも入らなければ値だけ 2 行に折る
-     */
+   * **幅は上の並びと選択肢の並びで変えない。** 入るたびに枠の幅が変わると、押した位置から行が逃げる。
+   * 名前と値が 1 行に収まる幅から。**値は省かずに出したい** (音声の「主音声ステレオ (日本語)」など) ので、
+   * 映像の上のほかのメニュー (20rem まで) より広く取り、それでも入らなければ値だけ 2 行に折る
+   */
   :global(.overlay-menu.settings-menu) {
     min-width: 17rem;
     max-width: min(24rem, 90vw);
@@ -285,12 +286,12 @@
   .label {
     flex: 1 1 auto;
     white-space: nowrap;
-    padding-inline-end: 0.75rem;
+    padding-inline-end: var(--dp-space-3);
   }
   /*
-     * 値は名前と同じ大きさの字で、色だけ控える。長い値は 2 行まで右にそろえて折り、
-     * それでも入らないぶんだけ「…」で止める
-     */
+   * 値は名前と同じ大きさの字で、色だけ控える。長い値は 2 行まで右にそろえて折り、
+   * それでも入らないぶんだけ「…」で止める
+   */
   .value {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -312,11 +313,11 @@
     margin-bottom: 0.375rem;
   }
   /*
-     * 音量の行。カプセルは行の幅いっぱいで、中のアイコンと名前はほかの行と同じ位置に来る (左の余白が `.menu-item` と同じ)。
-     * 高さ 44px (車のタブレットで指でつまめる)。上下は項目の間より少し空ける
-     */
+   * 音量の行。カプセルは行の幅いっぱいで、中のアイコンと名前はほかの行と同じ位置に来る (左の余白が `.menu-item` と同じ)。
+   * 高さ 44px (車のタブレットで指でつまめる)。上下は項目の間より少し空ける
+   */
   .volume {
-    margin: 0.125rem 0 0.25rem;
+    margin: 0.125rem 0 var(--dp-space-1);
   }
   /* オン/オフのスイッチ。状態は行の `aria-checked` で読ませ、これは見た目だけ */
   .switch {
@@ -338,13 +339,13 @@
     height: 1rem;
     border-radius: var(--dp-radius-full);
     background: var(--dp-on-video);
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--dp-video) 30%, transparent);
     transition: transform var(--dp-duration-move) var(--dp-ease-spring);
   }
   /*
-     * 入っているときもテーマの主の色は使わない (映像の上はテーマで変えない。docs/design.md の「色」)。
-     * 白を濃く敷いた溝にし、オン/オフは丸の位置でも分かる。メニューの面はいつも暗い (app.css の `.overlay-menu`)
-     */
+   * 入っているときもテーマの主の色は使わない (映像の上はテーマで変えない。docs/design.md の「色」)。
+   * 白を濃く敷いた溝にし、オン/オフは丸の位置でも分かる。メニューの面はいつも暗い (app.css の `.overlay-menu`)
+   */
   .switch[data-on] {
     background: color-mix(in srgb, var(--dp-on-video) 60%, transparent);
   }

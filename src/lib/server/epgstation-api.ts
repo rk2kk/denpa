@@ -239,7 +239,7 @@ export class EpgstationClient {
     return `${this.source.base}/api${path}${query === "" ? "" : `?${query}`}`;
   }
 
-  /** JSON を 1 つ取る。本文まで含めて {@link timing.header} の 3 倍で諦める */
+  /** JSON を 1 つ取る。本文まで含めて {@link timing.header} の 3 倍で打ち切る */
   async json(
     path: string,
     params: Record<string, string | number> = {},
@@ -491,6 +491,8 @@ export async function downloadVideo(
       });
       if (res.status === 404) {
         await res.body?.cancel();
+        // 続きから取っていたファイルが消えた。数えたぶんを戻す (書きかけは呼ぶ側が消す)
+        onBytes(-have);
         return "missing";
       }
       if (res.status === 416) {
@@ -574,7 +576,6 @@ export async function downloadVideo(
         await file.close();
       }
 
-      if (announced !== null && announced !== size) break;
       if (have > size) break;
       if (have < size) throw new Retriable("途中で切れました");
     } catch (error) {
@@ -599,7 +600,7 @@ export async function downloadVideo(
   }
 
   const final = await sizeOf(temporary);
-  if (final !== size || (announced !== null && announced !== size)) {
+  if (final !== size) {
     await unlink(temporary).catch(() => {});
     onBytes(-have);
     throw new LengthMismatch(

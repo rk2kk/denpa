@@ -13,7 +13,7 @@ import { packetize, patSection, programMap } from "./synth.js";
 
 /**
  * 変換せずに送る経路の受け側。**ffmpeg がやっていた「TS を PES に戻す」を自前でやる**ので、
- * 組み立てた放送 (`synth-av.ts`) を食わせて、映像の 1 枚・音声の 1 コマが時刻ごと
+ * 組み立てた放送 (`synth-av.ts`) を渡して、映像の 1 枚・音声の 1 コマが時刻ごと
  * そのまま戻ってくるかを見る。
  */
 
@@ -35,7 +35,7 @@ function head(): Uint8Array {
 }
 
 describe("PesDemuxer", () => {
-  test("映像の1枚と時刻が戻る。**長さ 0 の PES は次の頭で出てくる**", () => {
+  test("映像の 1 枚と時刻が戻る。**長さ 0 の PES は次の PES の先頭で出てくる**", () => {
     const demuxer = new PesDemuxer();
     const frames = [0, 1, 2].map((n) => mpeg2Frame(n));
     let counter = 0;
@@ -53,15 +53,15 @@ describe("PesDemuxer", () => {
     const { pes: found, changed } = demuxer.feed(Uint8Array.from(parts));
     expect(changed).toBe(true);
     expect(demuxer.streams).toEqual({ video: VIDEO, audio: AUDIO });
-    // 3 枚目は次の頭が来るまで終わりが分からない
+    // 3 枚目は次の PES の先頭が来るまで終わりが分からない
     expect(found.map((p) => p.pts)).toEqual([90_000, 90_000 + FRAME_TICKS]);
     expect(found[0]!.data).toEqual(frames[0]!);
     expect(found[1]!.kind).toBe("video");
   });
 
-  test("64KB を超える1枚も欠けずに戻り、返した中身は次の PES を組み立てても変わらない", () => {
+  test("64KB を超える 1 枚も欠けずに戻り、返した中身は次の PES を組み立てても変わらない", () => {
     const demuxer = new PesDemuxer();
-    // 中身は読まないので、決まった並びのバイトで足りる。1 枚目は入れ物を何度か広げる大きさ
+    // 中身は読まないので、決まった並びのバイトで足りる。1 枚目はバッファを何度か広げる大きさ
     const big = Uint8Array.from({ length: 200_000 }, (_, i) => (i * 7) & 0xff);
     const small = Uint8Array.from({ length: 1000 }, (_, i) => i & 0xff);
     let counter = 0;
@@ -84,14 +84,14 @@ describe("PesDemuxer", () => {
     expect(first.map((p) => p.data.length)).toEqual([big.length]);
     const kept = first[0]!.data;
     expect(kept).toEqual(big);
-    // 広げた入れ物の余りは詰めてある (キューや worker へ余りごと渡さない)
+    // 広げたバッファの余りは詰めてある (キューや worker へ余りごと渡さない)
     expect(kept.buffer.byteLength).toBeLessThanOrEqual(big.length * 1.25);
     const next = feed([big, small], 2);
     expect(next.map((p) => p.data.length)).toEqual([small.length, big.length]);
     expect(kept).toEqual(big);
   });
 
-  test("音声は選んだ1本だけ組み立てる。長さが書いてあるので揃った時点で出る", () => {
+  test("音声は選んだ 1 本だけ組み立てる。長さが書いてあるので揃った時点で出る", () => {
     const demuxer = new PesDemuxer();
     demuxer.feed(head());
     const frame = silentAac();
@@ -112,6 +112,69 @@ describe("PesDemuxer", () => {
     demuxer.feed(head());
     expect(demuxer.audioPid).toBe(AUDIO[0]);
   });
+
+  /*
+   * エージェントは、覚えた PAT・PMT で流し始めたとき、その 1 組を先頭に差し込む (docs/agent.md「素の TS を流す」)。
+   * 差し込んだぶんのあとに本物の PAT・PMT が続き、連続性カウンタは本物とつながらない
+   */
+  test("先頭に差し込んだ PAT・PMT で読み始め、あとから来た同じ本物の PAT・PMT (連続性カウンタが飛ぶ) では作り直さない", () => {
+    const demuxer = new PesDemuxer();
+    const frames = [0, 1, 2].map((n) => mpeg2Frame(n));
+    let counter = 0;
+    const video = (n: number) => {
+      const out = packetizePes(
+        VIDEO,
+        pes(0xe0, 90_000 + n * FRAME_TICKS, frames[n]!),
+        counter,
+        80_000,
+      );
+      counter = out.counter;
+      return out.packets;
+    };
+    const real = Uint8Array.from([
+      ...packetize(0x0000, patSection([[1024, 0x1f0]]), 7),
+      ...packetize(
+        0x1f0,
+        programMap(1024, VIDEO, [
+          [0x02, VIDEO],
+          [0x0f, AUDIO[0]],
+          [0x0f, AUDIO[1]],
+        ]),
+        11,
+      ),
+    ]);
+
+    const first = demuxer.feed(Uint8Array.from([...head(), ...video(0)]));
+    expect(first.changed).toBe(true);
+    const second = demuxer.feed(
+      Uint8Array.from([...real, ...video(1), ...video(2)]),
+    );
+    expect(second.changed).toBe(false);
+    expect(second.pes.map((p) => p.pts)).toEqual([
+      90_000,
+      90_000 + FRAME_TICKS,
+    ]);
+    expect(second.pes[0]!.data).toEqual(frames[0]!);
+  });
+
+  test("先頭に差し込んだ PMT とあとから来た本物の PMT が違えば、本物の ES に移る", () => {
+    const demuxer = new PesDemuxer();
+    demuxer.feed(head());
+    expect(demuxer.audioPid).toBe(AUDIO[0]);
+    const changed = demuxer.feed(
+      packetize(
+        0x1f0,
+        programMap(1024, VIDEO, [
+          [0x02, VIDEO],
+          [0x0f, 0x112],
+        ]),
+        9,
+      ),
+    ).changed;
+    expect(changed).toBe(true);
+    expect(demuxer.streams).toEqual({ video: VIDEO, audio: [0x112] });
+    expect(demuxer.audioPid).toBe(0x112);
+  });
 });
 
 describe("parsePes", () => {
@@ -124,7 +187,7 @@ describe("parsePes", () => {
     expect([...(parsed?.data ?? [])]).toEqual([1, 2, 3]);
   });
 
-  test("頭が壊れていれば null", () => {
+  test("ヘッダが壊れていれば null", () => {
     expect(
       parsePes(Uint8Array.from([0, 0, 2, 0xe0, 0, 0, 0x80, 0x80, 5])),
     ).toBeNull();
@@ -132,7 +195,7 @@ describe("parsePes", () => {
 });
 
 describe("AdtsSplitter", () => {
-  test("コマごとに割り、続くコマには1コマぶんずつ時刻を足す", () => {
+  test("コマごとに割り、続くコマには 1 コマぶんずつ時刻を足す", () => {
     const splitter = new AdtsSplitter();
     const frame = silentAac();
     const out = splitter.feed(

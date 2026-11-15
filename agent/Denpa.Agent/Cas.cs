@@ -5,23 +5,24 @@ namespace Denpa.Agent;
  *
  * 上から順に 3 段に分けてある。
  *
- * - Descrambler … TS を読んで ECM を取り出し、鍵を貰って MULTI2 で復号する (B25.cs / Multi2.cs)
+ * - Descrambler … TS を読んで ECM を取り出し、鍵を受け取って MULTI2 で復号する (B25.cs / Multi2.cs)。
+ *                 選局のときは CAT から EMM も取り出し、自分宛てだけを渡し先に渡す (Emm.cs)
  * - IKeySource  … ECM を渡すと鍵を返す相手。手元のカード (LocalCard → BCas.cs) か、別の拠点 (RemoteCard)。どちらも CardShare.cs
  * - ICardLink   … カードと APDU をやり取りする接続。USB の CCID リーダーを直接扱う (Ccid.cs。
- *                 macOS / Windows は OS の PC/SC 越し、Pcsc.cs) か、px4d・asicend の内蔵リーダー (Px4Card.cs) か、
+ *                 macOS / Windows は OS の PC/SC 越し、Pcsc.cs) か、IT930x の機材の内蔵リーダー (It930xCard.cs) か、
  *                 CECH-ZD1 J と PIX-DT295 の差し込み口 (Zd1j.cs の Zd1jCard・Dt295NativeCard.cs の Dt295NativeCard)
  */
 
-/// <summary>カードの素。**鍵を作るのに要る定数**で、初めに 1 回だけ貰う</summary>
+/// <summary>カードの定数。**鍵を作るのに要る定数**で、初めに 1 回だけ受け取る</summary>
 /// <param name="SystemKey">32 バイト</param>
 /// <param name="InitCbc">8 バイト</param>
-/// <param name="Ids">カードの番号 (表示用。10 進 16 桁で見せる)</param>
+/// <param name="Ids">カードの番号 (個別とグループ)。画面には 10 進 16 桁で表示し、EMM が自分宛てかもこれと比べる (<see cref="Emm"/>)</param>
 public sealed record CardInit(byte[] SystemKey, byte[] InitCbc, int CaSystemId, long[] Ids);
 
-/// <summary>ECM の答え。鍵は奇数・偶数の順に 8 バイトずつ</summary>
-/// <param name="Code">カードの返り値 (0x0200 など。契約の有無が分かる)</param>
+/// <summary>ECM の応答。鍵は奇数・偶数の順に 8 バイトずつ</summary>
+/// <param name="Code">カードの返り値 (0x0200 など。契約の有無を示す)</param>
 /// <param name="Cached">
-/// カードに聞かず、覚えていた答えを返した (同じ ECM を別のストリームが先に聞いていた)。
+/// カードに問い合わせず、キャッシュした応答を返した (同じ ECM で別のストリームが先に問い合わせていた)。
 /// 選局の内訳の記録に出すだけで、鍵の扱いは変わらない。拠点のあいだでは運ばない (<see cref="CardWire"/>)
 /// </param>
 /// <param name="WaitedMs">カードを順番に使うロック (<see cref="BCas"/>) を待った時間 (ミリ秒)。記録に出すだけ</param>
@@ -32,8 +33,8 @@ public readonly record struct EcmAnswer(byte[] Odd, byte[] Even, int Code, bool 
 /// (順番に通すのは実装の側)。
 ///
 /// <para>
-/// 失敗は投げる (<see cref="IOException"/>)。カードを抜き差ししたり px4d を起こし直したりしても
-/// 次の ECM では読めているように、繋ぎ直せるものは中で繋ぎ直してから投げる。
+/// 失敗は <see cref="IOException"/> にして送出する。カードが使えない応答を返したときは <see cref="CardRefusedException"/> を送出する。カードを抜き差ししたりリーダーを挿し直したりしても
+/// 次の ECM では読めているように、繋ぎ直せるものは中で繋ぎ直してから送出する。
 /// </para>
 /// </summary>
 public interface IKeySource
@@ -41,6 +42,12 @@ public interface IKeySource
     CardInit Init();
     EcmAnswer Ecm(ReadOnlySpan<byte> ecm);
     int Confirm(ReadOnlySpan<byte> verificationData, ushort dateMjd);
+
+    /// <summary>
+    /// 契約の更新 (EMM 受信、<c>90 36</c>)。渡すのは EMM セクションの中のペイロード 1 つ (カード ID から MAC まで)。
+    /// 返すのはカードの返り値 (<c>0x2100</c> が正常終了)。カードと通信できなければ例外を送出する (<see cref="Emm"/>)
+    /// </summary>
+    int Emm(ReadOnlySpan<byte> payload);
 }
 
 /// <summary>
@@ -75,7 +82,7 @@ public interface ICardLink : IDisposable
     /// <summary>画面やログに出す名前 (「Gemalto PC Twin Reader (usb 4-11)」など)</summary>
     string Name { get; }
 
-    /// <summary>電源を入れて ATR を返す。カードが無ければ投げる</summary>
+    /// <summary>電源を入れて ATR を返す。カードが無ければ例外を送出する</summary>
     byte[] Reset();
 
     /// <summary>APDU を 1 つ送り、SW1 SW2 まで含んだ応答を返す</summary>

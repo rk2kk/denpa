@@ -13,7 +13,8 @@ import {
   stream,
 } from "@danything/arib/synth";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * 衛星のロゴを、**チューナーを取り合いながら**揃える (`logo.ride` / `logo.sweep`)。
@@ -138,7 +139,6 @@ const agent = Bun.serve({
         rank: index,
         device: null,
         lnb: null,
-        pid: null,
         error: null,
         ...tuner,
       })),
@@ -155,6 +155,7 @@ config.agentUrl = fakeAgentUrl(agent.port!);
 trustFakeAgent();
 
 const { orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { services } = await import("./schema");
 const { serviceKey } = await import("./tuner");
 const { logoState, readLogo, ride, stats, sweep } = await import("./logo");
@@ -170,20 +171,26 @@ orm()
   .insert(services)
   .values(
     STATIONS.map((s) => ({
-      id: serviceKey(s.network, s.sid),
+      id: serviceKey(s.network, s.sid, s.type),
       service_id: s.sid,
       network_id: s.network,
       name: `局${s.sid}`,
       type: s.type,
-      channel: s.channel,
       updated_at: 1,
     })),
   )
   .run();
+placeServices(
+  STATIONS.map((s) => ({
+    id: serviceKey(s.network, s.sid, s.type),
+    channel: s.channel,
+  })),
+);
 
 const logos = () =>
-  STATIONS.filter((s) => readLogo(serviceKey(s.network, s.sid)) !== null)
-    .length;
+  STATIONS.filter(
+    (s) => readLogo(serviceKey(s.network, s.sid, s.type)) !== null,
+  ).length;
 
 describe("衛星のロゴをチューナーを取り合いながら揃える", () => {
   test("チューナーがどれも使われていれば、自分では開かない", async () => {
@@ -231,7 +238,7 @@ describe("衛星のロゴをチューナーを取り合いながら揃える", (
     expect(opened).toEqual(["BS01_0", "BS15_0", "BS15_0", "BS15_0"]);
     expect(logos()).toBe(3);
     // 読み切っても来なかった局は「取れない局」。待っている局はもう無い
-    expect(logoState(serviceKey(4, 101))).toBe("absent");
+    expect(logoState(serviceKey(4, 101, "BS"))).toBe("absent");
     expect(stats().satellite).toEqual({ missing: 0, carrier: null });
   });
 

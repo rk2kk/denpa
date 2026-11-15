@@ -1,13 +1,25 @@
 import { fail, redirect } from "@sveltejs/kit";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
+import { parseId } from "#lib/id.js";
 import { countClips, findClips } from "#lib/server/clips.js";
+import { reserveWarning } from "#lib/server/contracts.js";
 import { now, orm } from "#lib/server/db.js";
-import { currentServices, watchableServices } from "#lib/server/epg.js";
-import { deleteRecordingFiles } from "#lib/server/files.js";
+import {
+  currentServices,
+  SERVICE_ORDER,
+  SERVICE_TYPE_ORDER,
+  unwatchableServices,
+  watchableServices,
+} from "#lib/server/epg.js";
+import { removeRecording } from "#lib/server/files.js";
 import { relative } from "#lib/server/paths.js";
 import { recordingFromForm } from "#lib/server/recording.js";
-import { cancel, reserveFromForm } from "#lib/server/reservations.js";
+import {
+  cancelReservation,
+  reservationStates,
+  reserveFromForm,
+} from "#lib/server/reservations.js";
 import {
   createRule,
   deleteRule,
@@ -49,41 +61,51 @@ const CLIP_PREVIEW = 6;
  * 結果の画面を開いてその番組の詳細を出す (番組表には番組を名指しで開く URL が無いため)
  */
 function focusOf(url: URL) {
-  const id = Number(url.searchParams.get("program"));
-  if (!url.searchParams.has("program") || !Number.isInteger(id)) return null;
-  return (
-    orm()
-      .select({
-        id: programs.id,
-        name: programs.name,
-        description: programs.description,
-        service_id: programs.service_id,
-        service_name: serviceTable.name,
-        start_at: programs.start_at,
-        end_at: programs.end_at,
-        copy_never: programs.copy_never,
-        reservation_id: reservations.id,
-        // 詳細のボタンを決める (`ProgramActions`)。ここで引く状態はどれも取り消せるもの
-        reservation_state: reservations.state,
-      })
-      .from(programs)
-      .innerJoin(serviceTable, eq(serviceTable.id, programs.service_id))
-      .leftJoin(
-        reservations,
-        and(
-          eq(reservations.program_id, programs.id),
-          inArray(reservations.state, HELD_STATES),
-        ),
-      )
-      .where(eq(programs.id, id))
-      .get() ?? null
-  );
+  const id = parseId(url.searchParams.get("program"));
+  if (id === null) return null;
+  const row = orm()
+    .select({
+      id: programs.id,
+      name: programs.name,
+      description: programs.description,
+      service_id: programs.service_id,
+      service_name: serviceTable.name,
+      start_at: programs.start_at,
+      end_at: programs.end_at,
+      copy_never: programs.copy_never,
+      reservation_id: reservations.id,
+      state: reservations.state,
+    })
+    .from(programs)
+    .innerJoin(serviceTable, eq(serviceTable.id, programs.service_id))
+    .leftJoin(
+      reservations,
+      and(
+        eq(reservations.program_id, programs.id),
+        inArray(reservations.state, HELD_STATES),
+      ),
+    )
+    .where(eq(programs.id, id))
+    .get();
+  if (row === undefined) return null;
+  const { state, ...program } = row;
+  return {
+    ...program,
+    /*
+     * 詳細のボタンを決める (`ProgramActions`)。予約の行の `state` は録り始めても `scheduled` のままなので、
+     * 番組表と同じく録画の行と合わせた状態にする (`reservationStates`)。録画中・録り終えたものに取消を出さない
+     */
+    reservation_state:
+      state === null
+        ? null
+        : (reservationStates([program.id]).get(program.id) ?? state),
+  };
 }
 
 /** 編集するルール (`?rule=<ID>`)。無ければ undefined */
 function ruleById(raw: unknown) {
-  const id = Number(raw);
-  if (!Number.isInteger(id)) return undefined;
+  const id = parseId(raw);
+  if (id === null) return undefined;
   return orm().select().from(ruleTable).where(eq(ruleTable.id, id)).get();
 }
 
@@ -133,7 +155,7 @@ export function load({ url }) {
     fields.set("keyword", origin?.prefill?.keyword ?? q);
   const seed = editing ?? draftRule(fields);
 
-  // 取り残しの局は選ばせない (currentServices)。もう録れない局が並ぶだけ
+  // 取り残しの局は選ばせない (currentServices)。もう録れない局が並ぶだけ。並びは番組表・ライブと同じ
   const services = orm()
     .select({
       id: serviceTable.id,
@@ -142,7 +164,7 @@ export function load({ url }) {
     })
     .from(serviceTable)
     .where(currentServices())
-    .orderBy(serviceTable.type, serviceTable.channel)
+    .orderBy(sql.raw(SERVICE_TYPE_ORDER), sql.raw(SERVICE_ORDER))
     .all();
 
   const options = { limit: LIMIT, count: true };
@@ -164,6 +186,8 @@ export function load({ url }) {
     focus: focusOf(url),
     // 詳細の「視聴」を出すかどうか。決め方は番組表と揃えてある (watchableServices)
     watchable: watchableServices(now()),
+    /** 番組表に出すが観られない局と、そのわけ (`unwatchableServices`)。予約のボタンを出さず、詳細でわけを出す。番組表と同じ */
+    unwatchable: unwatchableServices(),
     /** 右の書く欄 */
     draft: {
       editing: editing ?? null,
@@ -194,18 +218,20 @@ export function load({ url }) {
 export const actions = {
   /** 番組を予約する。録画のしかたは設定画面の 1 箇所で決める (番組表の予約と同じ) */
   reserve: async ({ request }) => {
-    const refused = await reserveFromForm(await request.formData());
-    if (refused !== null) return fail(400, { message: refused });
-    return { success: true };
+    const form = await request.formData();
+    const reserved = await reserveFromForm(form);
+    if ("refused" in reserved) return fail(400, { message: reserved.refused });
+    // 有料の番組で、録ってよい局と確かめていなければ知らせる (予約はそのまま。`contracts.reserveWarning`)
+    return { success: true, warning: reserveWarning(reserved.programId) };
   },
 
   /** 予約を取り消す。ルールが立てた予約でも作り直されない (戻すのはホームの「戻す」) */
   cancel: async ({ request }) => {
     const form = await request.formData();
-    const id = Number(form.get("reservationId"));
-    if (!Number.isFinite(id))
-      return fail(400, { message: "予約 ID が不正です" });
-    await cancel(id);
+    const id = parseId(form.get("reservationId"));
+    if (id === null) return fail(400, { message: "予約 ID が不正です" });
+    const result = await cancelReservation(id);
+    if (!result.ok) return fail(result.status, { message: result.message });
     return { success: true };
   },
 
@@ -214,7 +240,8 @@ export const actions = {
     const recording = recordingFromForm(await request.formData());
     if (recording === undefined)
       return fail(400, { message: "録画が見つかりません" });
-    deleteRecordingFiles(recording, "手動削除");
+    if (!removeRecording(recording, "手動削除"))
+      return fail(409, { message: "録画中は消せません" });
     return { success: true };
   },
 

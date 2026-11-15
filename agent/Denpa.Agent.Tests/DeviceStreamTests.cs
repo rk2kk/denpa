@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO.Pipelines;
-using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using TUnit.Core.Enums;
@@ -18,7 +17,7 @@ namespace Denpa.Agent.Tests;
  * 本物のチューナーは要らない。何も来ないパイプで「来ないときにどうするか」は
  * そのまま試せる。
  */
-// libc の pipe で作る読み出し側 (poll で待つ方式)。Windows の方式は下の DeviceStreamPipeTests
+// libc の pipe で作る読み出し側 (poll で待つ方式)。Pipe で受ける方式は下の DeviceStreamPipedTests
 [ExcludeOn(OS.Windows)]
 public partial class DeviceStreamTests
 {
@@ -29,14 +28,14 @@ public partial class DeviceStreamTests
     private static (DeviceStream Stream, SafeFileHandle Write) Silent()
     {
         Span<int> fds = stackalloc int[2];
-        // Assert は await が要るので、stackalloc を跨げないここでは素直に投げる
+        // Assert は await が要るので、stackalloc を跨げないここではそのまま例外を送出する
         if (Pipe(fds) != 0) throw new InvalidOperationException("pipe() に失敗");
         return (new DeviceStream(new SafeFileHandle(fds[0], ownsHandle: true)),
             new SafeFileHandle(fds[1], ownsHandle: true));
     }
 
     [Test]
-    public async Task 降りると言えば_何も来なくても戻る()
+    public async Task 抜けるよう指示されれば_何も来なくても戻る()
     {
         var (stream, write) = Silent();
         using (stream)
@@ -44,7 +43,7 @@ public partial class DeviceStreamTests
         {
             var buffer = new byte[188];
             var clock = Stopwatch.StartNew();
-            // 0.2 秒ごとに起きて印を見る。1 周ぶんで戻れば十分
+            // 0.2 秒ごとに印を確かめる。1 周ぶんで戻れば十分
             var read = stream.Read(buffer, 0, buffer.Length, () => true);
             clock.Stop();
 
@@ -55,7 +54,7 @@ public partial class DeviceStreamTests
 
     /*
      * **止めたあとは、読みかけが戻るまでだけ待つ** (`WaitReaders`)。局替えのたびに
-     * 固定で 300ms 寝ていたのを、読む側がいなければ待たないようにした
+     * 固定で 300ms 待っていたのを、読む側がいなければ待たないようにした
      */
     [Test]
     public async Task 読んでいる処理がなければ待たず_あれば戻るまで待つ()
@@ -79,7 +78,7 @@ public partial class DeviceStreamTests
                 () => stream.Read(buffer, 0, buffer.Length, () => false),
                 CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             /*
-             * **読む側が中に入ったのを見てから止める。** 決め打ちで 100ms 寝ていた頃は、混んだ Mac の
+             * **読む側が中に入ったのを見てから止める。** 決め打ちで 100ms 待っていた頃は、混んだ Mac の
              * ランナーでまだ入っていないうちに止めてしまい、待つ相手のいない WaitReaders が
              * すぐ戻って落ちた (CI)
              */
@@ -96,13 +95,13 @@ public partial class DeviceStreamTests
     }
 
     /*
-     * **降りると言うまでは戻らない。**
+     * **抜けるよう指示されるまでは戻らない。**
      *
      * 何も来ないからといって勝手に終わると、電波が一瞬途切れただけで録画が
      * 落ちることになる。実際に来ていないだけなら待ち続けるのが正しい
      */
     [Test]
-    public async Task 降りると言わなければ_来るまで待つ()
+    public async Task 抜けるよう指示されなければ_来るまで待つ()
     {
         var (stream, write) = Silent();
         using (stream)
@@ -110,9 +109,9 @@ public partial class DeviceStreamTests
         {
             var buffer = new byte[188];
             /*
-             * **専用のスレッドで読む。** 共用のスレッドプールから借りると、他のテストがプールを塞いでいる間は
+             * **専用のスレッドで読む。** 共用のスレッドプールで読むと、他のテストがプールを塞いでいる間は
              * 読み始めることすらできず、書いてから 2 秒待っても返らない (CI で 1 度落ちた。
-             * 手元では 2 コアに絞っても出ない揺れ)。Px4CardTests の偽の px4d と同じ理由
+             * 手元では 2 コアに絞っても出ない揺れ)
              */
             var reading = Task.Factory.StartNew(
                 () => stream.Read(buffer, 0, buffer.Length, () => false),
@@ -169,57 +168,13 @@ public partial class DeviceStreamTests
     private static unsafe partial nint WriteFd(int fd, byte* buffer, nuint count);
 }
 /*
- * Windows の読み出し側 (.NET の Stream を裏のスレッドに読ませる方式)。どの OS でも同じに動くので、
- * Linux の CI でもここで見る。何も来ない pipe は .NET の匿名 pipe で作る
- */
-public class DeviceStreamPipeTests
-{
-    /// <summary>読み出し側と書き込み側。読み出し側が Windows で子の標準出力にあたる</summary>
-    private static (DeviceStream Stream, Stream Write) Silent(Func<string?>? ended = null)
-    {
-        var read = new AnonymousPipeServerStream(PipeDirection.In);
-        var write = new AnonymousPipeClientStream(PipeDirection.Out, read.ClientSafePipeHandle);
-        return (new DeviceStream(read, ended), write);
-    }
-
-    [Test]
-    public async Task 降りると言えば_何も来なくても戻り_あとから来たものは次に読む処理に渡る()
-    {
-        var (stream, write) = Silent();
-        using var _ = write;
-        var buffer = new byte[188];
-
-        var clock = Stopwatch.StartNew();
-        await Assert.That(stream.Read(buffer, 0, buffer.Length, () => clock.ElapsedMilliseconds > 300)).IsEqualTo(0);
-        await Assert.That(clock.ElapsedMilliseconds < 1000).IsTrue().Because($"{clock.ElapsedMilliseconds}ms 掛かった");
-
-        // 抜けた側の読みかけに届いたものも、次に読む側が受け取る (捨てない)
-        write.Write([0x47, 0x01, 0x02]);
-        write.Flush();
-        await Assert.That(stream.Read(buffer, 0, 2, () => false)).IsEqualTo(2);
-        await Assert.That(stream.Read(buffer, 2, 10, () => false)).IsEqualTo(1);
-        await Assert.That(buffer[..3]).IsEquivalentTo([(byte)0x47, (byte)0x01, (byte)0x02]);
-    }
-
-    [Test]
-    public async Task 尽きたら理由を添えて投げる()
-    {
-        var (stream, write) = Silent(() => "siano-ts が終了しました");
-        using var _ = stream;
-        // 書き手 (子) がいなくなった
-        write.Dispose();
-        var error = Assert.Throws<IOException>(() => stream.Read(new byte[188], 0, 188, () => false));
-        await Assert.That(error.Message).Contains("終了しました");
-    }
-}
-/*
- * px4d から受けた TS (PipeReader) の読み出し側。待っている読みが済むと PipeReader が合図を呼ぶが、
+ * 機材から受けた TS (PipeReader) の読み出し側。待っている読み出しが済むと PipeReader が合図を呼ぶが、
  * **合図は済んだ印より少し遅れて届く** (書く側は印を立ててから、ロックの外で合図を呼ぶ)。
- * 読む側は印を見て先に読み進めるので、前の読みの合図が次の読みを待っている最中に届くことがある
+ * 読む側は印を見て先に読み進めるので、前の読み出しの合図が次の読み出しを待っている最中に届くことがある
  */
 public class DeviceStreamPipedTests
 {
-    /// <summary>合図を言われるまで溜めておく。止めると、来た合図はその場で呼ぶ</summary>
+    /// <summary>Release を呼ぶまで合図を溜めておく。止めると、来た合図はその場で呼ぶ</summary>
     private sealed class HeldScheduler : PipeScheduler
     {
         private readonly Lock _gate = new();
@@ -258,14 +213,14 @@ public class DeviceStreamPipedTests
     }
 
     [Test]
-    public async Task 前の読みの合図が遅れて届いても_次の読みを取り違えない(CancellationToken cancel)
+    public async Task 前の読み出しの合図が遅れて届いても_次の読み出しを取り違えない(CancellationToken cancel)
     {
         var scheduler = new HeldScheduler();
         var pipe = new Pipe(new System.IO.Pipelines.PipeOptions(readerScheduler: scheduler, writerScheduler: PipeScheduler.Inline, useSynchronizationContext: false));
         using var stream = new DeviceStream(pipe.Reader);
         var buffer = new byte[188];
 
-        // 1 回目: 待っている間に届く。合図は溜めたままなので、読む側は 200ms ごとに起きて印を見て読む
+        // 1 回目: 待っている間に届く。合図は溜めたままなので、読む側は 200ms ごとに印を確かめて読む
         var first = Task.Run(() => stream.Read(buffer, 0, buffer.Length), cancel);
         while (stream.Readers == 0) await Task.Delay(5, cancel);
         await Task.Delay(50, cancel);
@@ -273,7 +228,7 @@ public class DeviceStreamPipedTests
         await Assert.That(await first.WaitAsync(TimeSpan.FromSeconds(5), cancel)).IsEqualTo(2);
         await Assert.That(scheduler.Held).IsEqualTo(1);
 
-        // 2 回目の読みが待ちに入ってから、1 回目の合図を届ける
+        // 2 回目の読み出しが待ちに入ってから、1 回目の合図を届ける
         var second = Task.Run(() => stream.Read(buffer, 0, buffer.Length), cancel);
         while (stream.Readers == 0) await Task.Delay(5, cancel);
         await Task.Delay(100, cancel);
@@ -287,12 +242,11 @@ public class DeviceStreamPipedTests
     }
 
     /*
-     * **止めたら、待っている読む側はすぐ起きる** (次に起きる 200ms を待たない)。200ms ごとに起きて
-     * 印を見るだけだと、止めてから戻るまでに最大 200ms 掛かり、混んだ CI では 500ms を超えていた
-     * (Px4TunerTests の「待っている読む側は畳めと言われたらすぐ抜ける」が落ちた)
+     * **止めたら、待っている読む側はすぐ戻る** (200ms ごとの確認を待たない)。200ms ごとに
+     * 印を確かめるだけだと、止めてから戻るまでに最大 200ms 掛かり、混んだ CI では 500ms を超えていた
      */
     [Test]
-    public async Task 止めたら_待っている読む側はすぐ起きる(CancellationToken cancel)
+    public async Task 止めたら_待っている読む側はすぐ戻る(CancellationToken cancel)
     {
         var pipe = new Pipe(new System.IO.Pipelines.PipeOptions(readerScheduler: PipeScheduler.Inline, writerScheduler: PipeScheduler.Inline, useSynchronizationContext: false));
         using var stream = new DeviceStream(pipe.Reader);
@@ -304,7 +258,7 @@ public class DeviceStreamPipedTests
         }, cancel, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         while (stream.Readers == 0) await Task.Delay(5, cancel);
-        // 待ちに入ってすぐ止める (200ms ごとに起きるだけなら、次に起きるまで 180ms ほど掛かる)
+        // 待ちに入ってすぐ止める (200ms ごとに確かめるだけなら、次の確認まで 180ms ほど掛かる)
         await Task.Delay(20, cancel);
         Volatile.Write(ref stoppedAt, Stopwatch.GetTimestamp());
         stream.Stop();
@@ -312,9 +266,38 @@ public class DeviceStreamPipedTests
 
         await Assert.That(read).IsEqualTo(0);
         /*
-         * 200ms ごとに起きるだけなら、止めてから戻るまで 180ms ほど掛かる。それより短ければ止めたことで起きている。
-         * 100ms にしていた頃は、混んだ Windows のランナーで 131ms になって落ちた (起きてから戻るまでのスレッドの待ち)
+         * 200ms ごとに確かめるだけなら、止めてから戻るまで 180ms ほど掛かる。それより短ければ、止めたことで待ちから戻っている。
+         * 100ms にしていた頃は、混んだ Windows のランナーで 131ms になって落ちた (待ちが終わってから、スレッドが動き出すまでの遅れ)
          */
         await Assert.That(left).IsLessThan(TimeSpan.FromMilliseconds(160));
+    }
+
+    [Test]
+    public async Task 抜けるよう指示されれば_何も来なくても戻り_あとから来たものは次に読む処理に渡る(CancellationToken cancel)
+    {
+        var pipe = new Pipe(new System.IO.Pipelines.PipeOptions(readerScheduler: PipeScheduler.Inline, writerScheduler: PipeScheduler.Inline, useSynchronizationContext: false));
+        using var stream = new DeviceStream(pipe.Reader);
+        var buffer = new byte[188];
+
+        var clock = Stopwatch.StartNew();
+        await Assert.That(stream.Read(buffer, 0, buffer.Length, () => clock.ElapsedMilliseconds > 300)).IsEqualTo(0);
+        await Assert.That(clock.ElapsedMilliseconds < 1000).IsTrue().Because($"{clock.ElapsedMilliseconds}ms 掛かった");
+
+        // 抜けた側の待っていた読みに届いたものも、次に読む側が受け取る (捨てない)
+        await pipe.Writer.WriteAsync(new byte[] { 0x47, 0x01, 0x02 }, cancel);
+        await Assert.That(stream.Read(buffer, 0, 2, () => false)).IsEqualTo(2);
+        await Assert.That(stream.Read(buffer, 2, 10, () => false)).IsEqualTo(1);
+        await Assert.That(buffer[..3]).IsEquivalentTo([(byte)0x47, (byte)0x01, (byte)0x02]);
+    }
+
+    [Test]
+    public async Task 尽きたら理由を添えて例外を送出する()
+    {
+        var pipe = new Pipe();
+        using var stream = new DeviceStream(pipe.Reader, () => "TS のストリームが終了しました");
+        // 書く側が終わった
+        await pipe.Writer.CompleteAsync();
+        var error = Assert.Throws<IOException>(() => stream.Read(new byte[188], 0, 188, () => false));
+        await Assert.That(error.Message).Contains("終了しました");
     }
 }

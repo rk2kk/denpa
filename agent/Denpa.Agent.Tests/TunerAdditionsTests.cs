@@ -31,4 +31,22 @@ public sealed class TunerAdditionsTests
         var added = Config.Additions(written, found, new HashSet<string?>());
         await Assert.That(added[0].Name).IsEqualTo("PIXELA PIX-DT295 1-1 (2)");
     }
+
+    /*
+     * **受けられる種別は、見つけた機材の種別。** 定義の種別を書き換えても変わらない。
+     * 見つけていない機材 (抜いた・手で書いたデバイス) は分からないので null (#2386)
+     */
+    [Test]
+    [NotInParallel(nameof(DeviceProbe))]
+    public async Task 受けられる種別は見つけた機材のもので_見つけていない機材は_null()
+    {
+        DeviceProbe.Remember([
+            new TunerSpec("PX-W3U3 2-3 #0", ["BS", "CS"], false, "asicen:2-3:0"),
+            new TunerSpec("PX-W3U3 2-3 #2", ["GR"], false, "asicen:2-3:2"),
+        ]);
+        await Assert.That(DeviceProbe.Receivable("asicen:2-3:0")).IsEquivalentTo(new[] { "BS", "CS" });
+        await Assert.That(DeviceProbe.Receivable("asicen:2-3:2")).IsEquivalentTo(new[] { "GR" });
+        await Assert.That(DeviceProbe.Receivable("asicen:2-3:9")).IsNull();
+        await Assert.That(DeviceProbe.Receivable(null)).IsNull();
+    }
 }

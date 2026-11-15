@@ -8,7 +8,7 @@
 
 import { dirname, join } from "node:path";
 
-import type { CmMode, VideoCodec } from "../types";
+import type { VideoCodec } from "../types";
 
 function str(key: string, fallback: string): string {
   const v = process.env[key];
@@ -45,12 +45,12 @@ export const config = {
   /**
    * チューナーエージェントの場所。
    *
-   * 選局もスクランブルの復号もチャンネルスキャンも、全部ここが窓口。
+   * 選局もスクランブルの復号もチャンネルスキャンも、全部エージェントが窓口。
    * B-CAS カードのリーダーを使うのも向こう側。
-   * 別 PC のチューナーを足すときは、その PC のエージェントを指す。
-   * `https://<名前>:<ポート>#pair=<合言葉>` の形 (agent-client.ts)
+   * `https://<名前>:<ポート>#pair=<合言葉>` の形で、カンマで区切って何台でも書ける。
+   * 書いたものは起動のたびに DB の `agents` と突き合わせる (agents.ts)。既定は空 (エージェントなし)
    */
-  agentUrl: str("TUNER_AGENT_URL", "https://tuner-agent:25252"),
+  agentUrl: str("TUNER_AGENT_URL", ""),
 
   /**
    * チューナーの取り合いでの優先度。**大きいほうが勝つ。**
@@ -110,7 +110,7 @@ export const config = {
   fontDir: str("FONT_DIR", "/usr/share/denpa-font"),
   /** 録ったあとのエンコードを同時に走らせる本数。**ジョブではなく ffmpeg の本数で数える** (コーデックごとに 1 本。`encode-slots.ts`) */
   encodeConcurrency: num("ENCODE_CONCURRENCY", 2),
-  /** 先頭が壊れていて初期化に失敗したときに先頭を捨てて再試行する秒数 (enc.js 由来) */
+  /** 先頭が壊れていて初期化に失敗したときに先頭を捨てて再試行する秒数 */
   encodeRetrySeek: 0.2,
   /**
    * 1 つのエンコードを何回まで試すか。**毒ジョブでキューを止めないため。**
@@ -150,13 +150,17 @@ export const config = {
    * ここを変えても ffmpeg が使う GPU は変わらない。変えるのはテスト (偽のデバイス) だけ
    */
   nvidiaDir: str("NVIDIA_DIR", "/dev"),
+  /**
+   * Android のアプリが渡す、MediaCodec のハードウェアのエンコーダの名前 (`h264=c2.qti.avc.encoder,hevc=…`)。
+   * 名前のあるコーデックだけを `mediacodec` で試す (server/hwenc.ts の `probeAndroid`)。アプリが `MediaCodecList` で集めて毎回書くので、
+   * `denpa.env` に書いても効かない
+   */
+  mediacodecEncoders: str("MEDIACODEC_ENCODERS", ""),
   /** GPU の試しのエンコード 1 本に待つ上限 (ms)。ドライバが固まっても起動が止まらないように */
   hwProbeTimeout: num("HW_PROBE_TIMEOUT", 20000),
 
   /** 録画エンコードの初期コーデック。設定画面で変えられる */
   encodeCodec: "av1" as VideoCodec,
-  /** CM の扱いの初期値。実カットは検出を誤ると本編が消えるのでチャプターのみ */
-  cmCutDefault: "chapter" as CmMode,
 
   /** CM 検出のために覚えた局ロゴ (`own-logo-*.bin`) の置き場。放送波から取得した局ロゴ (PNG) の隣 */
   cmLogoDir: `${dataDir}/logos/cm`,
@@ -164,11 +168,6 @@ export const config = {
   cmFallbackFps: 30000 / 1001,
   /** CM 検出のために別に回す ffmpeg (ロゴを覚える・読み直す・CM 検出だけやり直す) 1 回の上限時間(ms)。エンコードする ffmpeg で一緒に行う読み込みには掛けない */
   cmDetectTimeout: 30 * MIN,
-  /**
-   * CM を実際に切るとき、境目にキーフレームが無ければ CM 側へ寄せてよい長さ(秒) (`cm-cut.planCut`)。
-   * 寄せたぶん CM の端が残るが、本編を削るよりはいい。これでも届かなければ境目を指して再エンコードする
-   */
-  cmCutMargin: num("CM_CUT_MARGIN", 0.8),
 
   /**
    * サムネイルを切り出す位置(秒)。冒頭は提供表示や CM のことが多いので少し進める。
@@ -357,7 +356,7 @@ export const config = {
   /**
    * **ホーム画面に置いたときの名前を、来た名前ごとに変える。**
    * 書き方は `ホスト名=表示名` のカンマ区切り
-   * (`dp.l.doany.io=denpa 宅内`)。載っていない名前で来たら `denpa`。
+   * (`lan.denpa.example=denpa 宅内`)。載っていない名前で来たら `denpa`。
    *
    * 同じ denpa を 2 つの名前で出していると、両方入れたときに**同じ名前の
    * アイコンが 2 つ並ぶ**。どちらが家の中から繋がるほうか分からない

@@ -5,7 +5,9 @@ import { dirname, join } from "node:path";
 
 import { count, eq, sql } from "drizzle-orm";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import type { ChannelType, Transport } from "../types";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * 局だけの取り込み。
@@ -42,13 +44,29 @@ let offered = [
   channel(700, "ＭＸデータ１", 192),
 ];
 
+/** 立ち上がる前のエージェントのように、局の一覧を返さない間は true */
+let starting = false;
+
 const server = Bun.serve({
   port: 0,
   tls: fakeAgentTls(),
   fetch(request) {
     const path = new URL(request.url).pathname;
     asked.push(path);
-    if (path === "/denpa/channels") return Response.json(offered);
+    if (path === "/denpa/channels")
+      return starting
+        ? new Response("starting", { status: 503 })
+        : Response.json(offered);
+    // 通知は繋いだまま、心拍のコメント行だけ流す (本物と同じく、繋いだ時点でヘッダが届く)
+    if (path === "/denpa/events")
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(": keep-alive\n\n"));
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
     return new Response("not found", { status: 404 });
   },
 });
@@ -64,16 +82,22 @@ const {
   savePrograms,
   SERVICE_ORDER,
   SERVICE_TYPE_ORDER,
+  serviceCounts,
   settle,
+  readChannels,
+  sync,
+  syncPending,
   syncServicesOnly,
+  typeRank,
+  unlistType,
+  unwatchableServices,
   widenServices,
 } = await import("./epg");
 const { subscribe } = await import("./events");
-const { getChannels } = await import("./tuner");
 
 describe("syncServicesOnly", () => {
   test("番組表を待たずに局だけ取り込む", async () => {
-    expect(syncServicesOnly(await getChannels())).toBe(1);
+    expect(syncServicesOnly(await readChannels())).toBe(1);
 
     const rows = orm()
       .select({ id: services.id, name: services.name, type: services.type })
@@ -91,7 +115,7 @@ describe("syncServicesOnly", () => {
   });
 
   test("何度呼んでも増えない", async () => {
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     expect(orm().select({ n: count() }).from(services).get()).toEqual({ n: 1 });
   });
 });
@@ -116,7 +140,7 @@ describe("局名の幅", () => {
       .where(eq(services.id, 3239123608))
       .run();
     offered = [channel(23608, "TOKYO MX")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     expect(name()).toBe("TOKYO MX");
     const at = Date.now();
     const recording = (id: number, service_name: string) => ({
@@ -135,7 +159,11 @@ describe("局名の幅", () => {
       .run();
 
     expect(
-      widenServices(32391, [{ serviceId: 23608, name: "ＴＯＫＹＯ　ＭＸ" }]),
+      widenServices(
+        32391,
+        [{ serviceId: 23608, name: "ＴＯＫＹＯ　ＭＸ" }],
+        "GR",
+      ),
     ).toBe(1);
     expect(name()).toBe("ＴＯＫＹＯ　ＭＸ");
     expect(
@@ -152,18 +180,18 @@ describe("局名の幅", () => {
   });
 
   test("毎分の取り込みは幅だけ違う名前で戻さない。名前そのものが変われば入れ替える", async () => {
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     expect(name()).toBe("ＴＯＫＹＯ　ＭＸ");
 
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ２")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     expect(name()).toBe("ＴＯＫＹＯ　ＭＸ２");
   });
 
   test("SDT は名前そのものを変えない (スキャンが決める)", () => {
-    expect(widenServices(32391, [{ serviceId: 23608, name: "別の局" }])).toBe(
-      0,
-    );
+    expect(
+      widenServices(32391, [{ serviceId: 23608, name: "別の局" }], "GR"),
+    ).toBe(0);
     expect(name()).toBe("ＴＯＫＹＯ　ＭＸ２");
     offered = [
       channel(23608, "ＴＯＫＹＯ　ＭＸ"),
@@ -211,6 +239,17 @@ describe("消えた局の片付け", () => {
       .run();
   }
 
+  /** いま一覧にある局 (`services.listed`) */
+  function listedIds(): number[] {
+    return orm()
+      .select({ id: services.id })
+      .from(services)
+      .where(eq(services.listed, true))
+      .all()
+      .map((row) => row.id)
+      .sort((a, b) => a - b);
+  }
+
   /** その局を「しばらく見かけていない」ことにする。時計を進める代わり */
   function unseenFor(serviceId: number, ms: number): void {
     orm()
@@ -221,14 +260,14 @@ describe("消えた局の片付け", () => {
   }
 
   test("番組表は消し、まだ始めていない予約は取り消す。局の行は残す", async () => {
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     seed(3239123608);
 
     // 局が丸ごと入れ替わった (スキャンのやり直し)
     offered = [channel(23609, "別の局")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     unseenFor(3239123608, config.serviceForgetAfter + 1);
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
 
     expect(orm().select({ n: count() }).from(programs).get()).toEqual({ n: 0 });
     expect(
@@ -249,7 +288,7 @@ describe("消えた局の片付け", () => {
 
   test("1 局も返ってこなかった回では何もしない", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     seed(3239123608);
 
     /*
@@ -257,7 +296,7 @@ describe("消えた局の片付け", () => {
      * 読むと、次の取り込みまで番組表が丸ごと消える
      */
     offered = [];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
 
     expect(orm().select({ n: count() }).from(programs).get()).toEqual({ n: 1 });
     expect(
@@ -279,12 +318,12 @@ describe("消えた局の片付け", () => {
    */
   test("1 回見かけなかっただけでは片付けない", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ"), channel(23609, "別の局")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     seed(3239123608);
 
     // 一覧が欠けた回
     offered = [channel(23609, "別の局")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
 
     expect(orm().select({ n: count() }).from(programs).get()).toEqual({ n: 1 });
     expect(
@@ -296,6 +335,42 @@ describe("消えた局の片付け", () => {
     ).toEqual({
       state: "scheduled",
     });
+  });
+
+  test("見かけなかった局は、すぐに一覧から外す (片付けるのは待つ)", async () => {
+    offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ"), channel(23609, "別の局")];
+    syncServicesOnly(await readChannels());
+    offered = [channel(23609, "別の局")];
+    syncServicesOnly(await readChannels());
+    expect(listedIds()).toEqual([3239123609]);
+    // 1 局も返ってこなかった回は、一覧をそのままにする
+    offered = [];
+    syncServicesOnly(await readChannels());
+    expect(listedIds()).toEqual([3239123609]);
+  });
+
+  /*
+   * 最後の 1 種別を消すとエージェントの一覧が空になり、取り込みは何もしない。
+   * 「いちばん新しい取り込みの時刻」で決めていた頃は、消した局が「いまの局」のまま残っていた
+   */
+  test("種別を消すと、最後の 1 種別でもその場で一覧から外し、番組表と予約を片付ける", async () => {
+    offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
+    syncServicesOnly(await readChannels());
+    seed(3239123608);
+
+    expect(unlistType("GR")).toBe(1);
+    offered = [];
+    syncServicesOnly(await readChannels());
+
+    expect(listedIds()).toEqual([]);
+    expect(orm().select({ n: count() }).from(programs).get()).toEqual({ n: 0 });
+    // 局の行は残す (録画を辿るため)。スキャンし直せば戻る
+    expect(
+      orm().select({ n: count() }).from(services).get()!.n,
+    ).toBeGreaterThan(0);
+    offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
+    syncServicesOnly(await readChannels());
+    expect(listedIds()).toEqual([3239123608]);
   });
 });
 
@@ -334,26 +409,26 @@ describe("savePrograms", () => {
    */
   test("コピー禁止の印を持つ。言っていない回 (null) では前のまま", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
     const copyNever = () =>
       orm().select({ copy_never: programs.copy_never }).from(programs).get()
         ?.copy_never;
 
-    savePrograms([event({ copyNever: null })]);
+    savePrograms([event({ copyNever: null })], { type: "GR" });
     expect(copyNever()).toBe(false);
-    savePrograms([event({ copyNever: true })]);
+    savePrograms([event({ copyNever: true })], { type: "GR" });
     expect(copyNever()).toBe(true);
-    savePrograms([event({ copyNever: null })]);
+    savePrograms([event({ copyNever: null })], { type: "GR" });
     expect(copyNever()).toBe(true);
-    savePrograms([event({ copyNever: false })]);
+    savePrograms([event({ copyNever: false })], { type: "GR" });
     expect(copyNever()).toBe(false);
   });
 
   /* シリーズ (docs/data.md「シリーズ」)。詳細の表は記述子を載せないので、項目ごと無い回では前のまま */
   test("シリーズを持つ。言っていない回では前のまま、載せずに来たら外す", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
     const series = () =>
       orm()
@@ -375,7 +450,7 @@ describe("savePrograms", () => {
       name: "連続ドラマ",
     };
 
-    savePrograms([event()]);
+    savePrograms([event()], { type: "GR" });
     expect(series()).toEqual({
       id: null,
       repeat: null,
@@ -383,7 +458,7 @@ describe("savePrograms", () => {
       last: null,
       name: null,
     });
-    savePrograms([event({ series: told })]);
+    savePrograms([event({ series: told })], { type: "GR" });
     expect(series()).toEqual({
       id: 0x1234,
       repeat: 1,
@@ -392,28 +467,36 @@ describe("savePrograms", () => {
       name: "連続ドラマ",
     });
     // 詳細の表から (項目ごと無い)
-    savePrograms([event({ name: "" })]);
+    savePrograms([event({ name: "" })], { type: "GR" });
     expect(series()?.episode).toBe(12);
     // 話数を言わないシリーズ
-    savePrograms([
-      event({ series: { ...told, episode: null, lastEpisode: null } }),
-    ]);
+    savePrograms(
+      [event({ series: { ...told, episode: null, lastEpisode: null } })],
+      { type: "GR" },
+    );
     expect(series()).toMatchObject({ id: 0x1234, episode: null, last: null });
     // 基本の表が載せずに来た
-    savePrograms([event({ series: null })]);
+    savePrograms([event({ series: null })], { type: "GR" });
     expect(series()?.id).toBeNull();
   });
 
   test("タイトルの無い回で、入っているタイトルを消さない", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
-    savePrograms([event()]);
+    savePrograms([event()], { type: "GR" });
     // 詳細だけ読めた回。タイトルも説明も空で来る
-    savePrograms([
-      event({ name: "", description: "", extended: { 番組内容: "あらすじ" } }),
-    ]);
+    savePrograms(
+      [
+        event({
+          name: "",
+          description: "",
+          extended: { 番組内容: "あらすじ" },
+        }),
+      ],
+      { type: "GR" },
+    );
 
     expect(
       orm()
@@ -436,21 +519,24 @@ describe("savePrograms", () => {
   // 文を使い回すようにしたとき (drizzle の placeholder)、null が文字の "null" になりかけた
   test("空の JSON 列は NULL のまま、中身があれば JSON の文字で入る", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
-    savePrograms([
-      event({ eventId: 1 }),
-      event({
-        eventId: 2,
-        startAt: Date.now() + 3600_000,
-        isFree: false,
-        extended: { 番組内容: "あらすじ" },
-        genres: [{ lv1: 7, lv2: 0 }],
-        audios: [{ componentType: 3, langs: ["jpn"], text: "解説" }],
-        video: { type: "mpeg2", resolution: "1080i" },
-      }),
-    ]);
+    savePrograms(
+      [
+        event({ eventId: 1 }),
+        event({
+          eventId: 2,
+          startAt: Date.now() + 3600_000,
+          isFree: false,
+          extended: { 番組内容: "あらすじ" },
+          genres: [{ lv1: 7, lv2: 0 }],
+          audios: [{ componentType: 3, langs: ["jpn"], text: "解説" }],
+          video: { type: "mpeg2", resolution: "1080i" },
+        }),
+      ],
+      { type: "GR" },
+    );
 
     const raw = orm().all<Record<string, unknown>>(
       sql`SELECT event_id, typeof(extended) AS kind, extended, genres, genre_detail, audios, audio_type, is_free, video_type, video_resolution FROM programs ORDER BY event_id`,
@@ -489,20 +575,23 @@ describe("savePrograms", () => {
    */
   test("番組表が動いたら、まだ始めていない予約だけ追従する", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
     orm().delete(reservations).run();
 
     const base = Date.now() + 3 * 3600_000;
-    savePrograms([
-      event({ eventId: 1, startAt: base, duration: 1800_000 }),
-      event({
-        eventId: 2,
-        name: "録画中の番組",
-        startAt: base + 3600_000,
-        duration: 1800_000,
-      }),
-    ]);
+    savePrograms(
+      [
+        event({ eventId: 1, startAt: base, duration: 1800_000 }),
+        event({
+          eventId: 2,
+          name: "録画中の番組",
+          startAt: base + 3600_000,
+          duration: 1800_000,
+        }),
+      ],
+      { type: "GR" },
+    );
     const [waiting, started] = orm()
       .select({ id: programs.id })
       .from(programs)
@@ -562,13 +651,20 @@ describe("savePrograms", () => {
 
   test("タイトルだけ読めた回で、入っている番組内容を消さない", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
-    savePrograms([
-      event({ name: "", description: "", extended: { 番組内容: "あらすじ" } }),
-    ]);
-    savePrograms([event()]);
+    savePrograms(
+      [
+        event({
+          name: "",
+          description: "",
+          extended: { 番組内容: "あらすじ" },
+        }),
+      ],
+      { type: "GR" },
+    );
+    savePrograms([event()], { type: "GR" });
 
     expect(
       orm()
@@ -580,11 +676,11 @@ describe("savePrograms", () => {
 
   test("タイトルの書き換えはこれまでどおり通る", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
-    savePrograms([event()]);
-    savePrograms([event({ name: "[新]テスト番組" })]);
+    savePrograms([event()], { type: "GR" });
+    savePrograms([event({ name: "[新]テスト番組" })], { type: "GR" });
 
     expect(orm().select({ name: programs.name }).from(programs).all()).toEqual([
       { name: "[新]テスト番組" },
@@ -593,31 +689,47 @@ describe("savePrograms", () => {
 
   test("延長で重なった番組は消える (あとから来たほうが勝つ)", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
     const base = Date.now();
     // 野球 10:15〜11:05 と、その後の 2 本
-    savePrograms([
-      event({ eventId: 1, name: "野球", startAt: base, duration: 50 * 60_000 }),
-      event({
-        eventId: 2,
-        name: "きょうの料理",
-        startAt: base + 50 * 60_000,
-        duration: 25 * 60_000,
-      }),
-      event({
-        eventId: 3,
-        name: "うまいッ!",
-        startAt: base + 75 * 60_000,
-        duration: 24 * 60_000,
-      }),
-    ]);
+    savePrograms(
+      [
+        event({
+          eventId: 1,
+          name: "野球",
+          startAt: base,
+          duration: 50 * 60_000,
+        }),
+        event({
+          eventId: 2,
+          name: "きょうの料理",
+          startAt: base + 50 * 60_000,
+          duration: 25 * 60_000,
+        }),
+        event({
+          eventId: 3,
+          name: "うまいッ!",
+          startAt: base + 75 * 60_000,
+          duration: 24 * 60_000,
+        }),
+      ],
+      { type: "GR" },
+    );
 
     // 野球が 11:54 まで延長 (EIT[p/f])。潰された 2 本は局の送り直しまで書き換わらない
-    savePrograms([
-      event({ eventId: 1, name: "野球", startAt: base, duration: 99 * 60_000 }),
-    ]);
+    savePrograms(
+      [
+        event({
+          eventId: 1,
+          name: "野球",
+          startAt: base,
+          duration: 99 * 60_000,
+        }),
+      ],
+      { type: "GR" },
+    );
 
     expect(
       orm()
@@ -630,33 +742,39 @@ describe("savePrograms", () => {
 
   test("隣り合っているだけ (境界が同じ) の番組は消えない", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-    syncServicesOnly(await getChannels());
+    syncServicesOnly(await readChannels());
     orm().delete(programs).run();
 
     const base = Date.now();
-    savePrograms([
-      event({
-        eventId: 1,
-        name: "前の番組",
-        startAt: base,
-        duration: 30 * 60_000,
-      }),
-      event({
-        eventId: 2,
-        name: "次の番組",
-        startAt: base + 30 * 60_000,
-        duration: 30 * 60_000,
-      }),
-    ]);
+    savePrograms(
+      [
+        event({
+          eventId: 1,
+          name: "前の番組",
+          startAt: base,
+          duration: 30 * 60_000,
+        }),
+        event({
+          eventId: 2,
+          name: "次の番組",
+          startAt: base + 30 * 60_000,
+          duration: 30 * 60_000,
+        }),
+      ],
+      { type: "GR" },
+    );
     // 同じものをもう一度読んでも (カルーセルは回り続ける) 隣は消えない
-    savePrograms([
-      event({
-        eventId: 1,
-        name: "前の番組",
-        startAt: base,
-        duration: 30 * 60_000,
-      }),
-    ]);
+    savePrograms(
+      [
+        event({
+          eventId: 1,
+          name: "前の番組",
+          startAt: base,
+          duration: 30 * 60_000,
+        }),
+      ],
+      { type: "GR" },
+    );
 
     expect(
       orm()
@@ -682,7 +800,7 @@ describe("savePrograms", () => {
         if (name === "programs") told++;
       });
       try {
-        return { wrote: followOnAir(events), told };
+        return { wrote: followOnAir(events, "GR"), told };
       } finally {
         unsubscribe();
       }
@@ -690,21 +808,24 @@ describe("savePrograms", () => {
 
     async function fresh(): Promise<number> {
       offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
-      syncServicesOnly(await getChannels());
+      syncServicesOnly(await readChannels());
       orm().delete(programs).run();
       return Date.now();
     }
 
     test("番組表と同じなら書かず、知らせない", async () => {
       const base = await fresh();
-      savePrograms([
-        event({
-          eventId: 1,
-          name: "前の番組",
-          startAt: base,
-          duration: 30 * 60_000,
-        }),
-      ]);
+      savePrograms(
+        [
+          event({
+            eventId: 1,
+            name: "前の番組",
+            startAt: base,
+            duration: 30 * 60_000,
+          }),
+        ],
+        { type: "GR" },
+      );
       const same = event({
         eventId: 1,
         name: "前の番組",
@@ -716,20 +837,23 @@ describe("savePrograms", () => {
 
     test("延びたら書き直して知らせる。重なった後ろの番組は消える", async () => {
       const base = await fresh();
-      savePrograms([
-        event({
-          eventId: 1,
-          name: "野球",
-          startAt: base,
-          duration: 30 * 60_000,
-        }),
-        event({
-          eventId: 2,
-          name: "ニュース",
-          startAt: base + 30 * 60_000,
-          duration: 30 * 60_000,
-        }),
-      ]);
+      savePrograms(
+        [
+          event({
+            eventId: 1,
+            name: "野球",
+            startAt: base,
+            duration: 30 * 60_000,
+          }),
+          event({
+            eventId: 2,
+            name: "ニュース",
+            startAt: base + 30 * 60_000,
+            duration: 30 * 60_000,
+          }),
+        ],
+        { type: "GR" },
+      );
       const extended = event({
         eventId: 1,
         name: "野球",
@@ -766,9 +890,10 @@ describe("savePrograms", () => {
         event({ eventId: 9, name: "臨時", startAt: base, duration: 60_000 }),
       ]);
       expect(epgAt()).toBeNull();
-      savePrograms([
-        event({ eventId: 1, name: "番組", startAt: base, duration: 60_000 }),
-      ]);
+      savePrograms(
+        [event({ eventId: 1, name: "番組", startAt: base, duration: 60_000 })],
+        { type: "GR" },
+      );
       expect(epgAt()).toBeNumber();
     });
 
@@ -785,17 +910,27 @@ describe("savePrograms", () => {
 });
 
 /**
- * 枠はあるが放送していない局を、番組表から外す。
+ * 番組表とライブに出す局。本チャンネルは番組が無くても出し、外すのは次の 2 つ。
  *
- * - 終わったチャンネル (BS103 は 2024 年 3 月で放送終了。SDT に枠だけ残る)
+ * - 終わったチャンネル (BS103 は 2024 年 3 月で放送終了。SDT に枠だけ残り、局名は「-」)
  * - 本チャンネルと同じ番組を流しているサブチャンネル (NHK総合2 は、マルチ編成でない間ずっと名前が無い)
  */
 describe("番組表に出す局", () => {
   // 別々の放送局 (TS が違う)。サブチャンネルは下で別に作る
-  const service = (id: number, channel = `T${id}`, type = "GR") => ({
+  const service = (
+    id: number,
+    channel = `T${id}`,
+    type = "GR",
+    name = `局${id}`,
+  ) => ({
     id,
+    name,
     service_id: 1024 + id,
-    channel,
+    network_id: 0x7fe0,
+    transport_stream_id: [...channel].reduce(
+      (h, c) => (h * 31 + c.charCodeAt(0)) % 65_521,
+      0,
+    ),
     type,
   });
   const program = (serviceId: number, name: string, start = 0, end = 1) => ({
@@ -805,25 +940,45 @@ describe("番組表に出す局", () => {
     end_at: end,
   });
 
-  test("名前の付いた番組が 1 つも無い局は出さない", () => {
-    const services = [service(1), service(2), service(3)];
-    const programs = [
-      program(1, "ニュース"),
-      // 本チャンネルと同じ番組を流しているサブチャンネル。名前の無い番組だけが並ぶ
-      program(2, ""),
-      program(2, ""),
-      // 3 は終わったチャンネル。番組が 1 つも来ない
+  test("番組が無くても本チャンネルは出す", () => {
+    // スキャンしたばかりのケーブルの局のように、番組表がまだ無い局
+    const services = [service(1), service(2)];
+
+    expect(airing(services, [program(1, "ニュース")]).map((s) => s.id)).toEqual(
+      [1, 2],
+    );
+    expect(airing(services, []).map((s) => s.id)).toEqual([1, 2]);
+  });
+
+  test("局名が「-」の終わったチャンネルは出さない", () => {
+    const services = [
+      service(1),
+      service(2, "T2", "GR", "-"),
+      service(3, "T3", "GR", " "),
+      service(4, "T4", "GR", "－"),
     ];
+
+    expect(airing(services, []).map((s) => s.id)).toEqual([1]);
+  });
+
+  test("番組の無いサブチャンネルと、名前の無い番組だけのサブチャンネルは出さない", () => {
+    // 1 が本チャンネル、2・3 はサブ (同じ TS)。どちらも本チャンネルと同じ番組を流している
+    const services = [service(1, "T9"), service(2, "T9"), service(3, "T9")];
+    const programs = [program(1, "ニュース"), program(3, ""), program(3, "")];
 
     expect(airing(services, programs).map((s) => s.id)).toEqual([1]);
   });
 
-  test("1 つでも名前が付いていれば出す", () => {
-    // マルチ編成の日だけサブチャンネルにも名前が付く
-    const services = [service(1), service(2)];
-    const programs = [program(2, ""), program(2, "大相撲")];
+  test("分割放送をしているサブチャンネルは出す", () => {
+    // マルチ編成の日だけサブチャンネルにも本チャンネルと違う名前が付く
+    const services = [service(1, "T9"), service(2, "T9")];
+    const programs = [
+      program(1, "ニュース"),
+      program(2, ""),
+      program(2, "大相撲"),
+    ];
 
-    expect(airing(services, programs).map((s) => s.id)).toEqual([2]);
+    expect(airing(services, programs).map((s) => s.id)).toEqual([1, 2]);
   });
 
   test("本チャンネルと同じ名前の番組を流しているサブチャンネルは出さない", () => {
@@ -841,8 +996,13 @@ describe("番組表に出す局", () => {
   test("BS も同じ TS のサブは同じ番組を流している間は出さない。TS が別なら同じ会社でも出す", () => {
     const bs = (sid: number, channel: string) => ({
       id: sid,
+      name: `BS${sid}`,
       service_id: sid,
-      channel,
+      network_id: 4,
+      transport_stream_id: [...channel].reduce(
+        (h, c) => (h * 31 + c.charCodeAt(0)) % 65_521,
+        0,
+      ),
       type: "BS",
     });
     const services = [
@@ -884,13 +1044,6 @@ describe("番組表に出す局", () => {
 
     expect(airing(services, programs).map((s) => s.id)).toEqual([1, 2]);
   });
-
-  test("1 局も残らないときは全部出す", () => {
-    // 入れたばかりで番組表が空のとき。列ごと消えると先へ進めない
-    const services = [service(1), service(2)];
-
-    expect(airing(services, []).map((s) => s.id)).toEqual([1, 2]);
-  });
 });
 
 /**
@@ -903,10 +1056,14 @@ describe("SERVICE_ORDER", () => {
   function put(
     id: number,
     serviceId: number,
-    type: "GR" | "BS" | "CS",
-    channel: string,
+    type: "GR" | "BS" | "CS" | "CATV" | "SKY",
+    _channel: string,
     key: number | null,
     name: string,
+    /** 取り込みが決める値 (`syncServices`)。ここでは SKY だけを復号できないものにする */
+    decodable = type !== "SKY",
+    /** 番組表を読めるか (`syncServices`)。復号できる局はいつも読める */
+    epgReadable = decodable,
   ) {
     orm()
       .insert(services)
@@ -917,8 +1074,9 @@ describe("SERVICE_ORDER", () => {
         name,
         type,
         service_type: 1,
-        channel,
         remote_control_key: key,
+        decodable,
+        epg_readable: epgReadable,
         updated_at: 1,
       })
       .run();
@@ -944,12 +1102,6 @@ describe("SERVICE_ORDER", () => {
       "BS-TBS",
       "WOWOWプライム",
     ]);
-    // 物理チャンネル順だと、テレビと食い違う
-    expect(ordered("channel, service_id")).toEqual([
-      "BS-TBS",
-      "BS朝日1",
-      "WOWOWプライム",
-    ]);
   });
 
   test("地上波はリモコン番号順。同じ番号ならサービス ID 順", () => {
@@ -965,8 +1117,10 @@ describe("SERVICE_ORDER", () => {
     ]);
   });
 
-  test("地上波 → BS → CS の順。テレビの切り替えもこの順", () => {
+  test("地上波 → BS → CS → ケーブル → スカパー！プレミアムの順。テレビの切り替えもこの順", () => {
     orm().delete(services).run();
+    put(1000600, 600, "SKY", "H40", null, "プレミアム");
+    put(6553900101, 101, "CATV", "QC30", null, "ケーブル1");
     put(400151, 151, "BS", "BS01_3", null, "BS朝日1");
     put(600292, 292, "CS", "CS04", null, "時代劇専門ch");
     put(3239123608, 23608, "GR", "T16", 9, "TOKYO MX1");
@@ -975,6 +1129,248 @@ describe("SERVICE_ORDER", () => {
       "TOKYO MX1",
       "BS朝日1",
       "時代劇専門ch",
+      "ケーブル1",
+      "プレミアム",
     ]);
+    // JS で並べるときも同じ順
+    expect(
+      ["SKY", "CATV", "CS", "GR", "BS"].sort(
+        (a, b) => typeRank(a) - typeRank(b),
+      ),
+    ).toEqual(["GR", "BS", "CS", "CATV", "SKY"]);
+  });
+
+  test("番組表のタブと局が無いときの案内に使う数には、番組表を読めない局を入れない", () => {
+    orm().delete(services).run();
+    put(1000600, 600, "SKY", "H40", null, "プレミアム");
+    // B-CAS 以外の方式でスクランブルされた CATV の局。番組表もスクランブルされている
+    put(6553900102, 102, "CATV", "QC31", null, "ケーブル2", false);
+    expect(serviceCounts()).toEqual({});
+    put(400151, 151, "BS", "BS01_3", null, "BS朝日1");
+    put(6553900101, 101, "CATV", "QC30", null, "ケーブル1");
+    expect(serviceCounts()).toEqual({ BS: 1, CATV: 1 });
+    // 復号できなくても、番組表を読める局は数える (番組表に「観られません」で出る)
+    put(1000601, 601, "SKY", "H41", null, "プレミアム2", false, true);
+    put(6554700161, 161, "CATV", "QC26", null, "ＢＳでんぱ　４Ｋ", false, true);
+    expect(serviceCounts()).toEqual({ BS: 1, CATV: 2, SKY: 1 });
+  });
+});
+
+/**
+ * ケーブルの局。BS の再送信はアンテナの BS と同じ original_network_id と service_id を持つ (`tuner.serviceKey`)
+ */
+describe("ケーブルの局", () => {
+  const BS_ASAHI = 400151;
+  const CABLE_ASAHI = (0x10000 + 4) * 100000 + 151;
+  const CABLE_PAY = (0x10000 + 4) * 100000 + 152;
+  const CABLE_4K = (0x10000 + 0x000b) * 100000 + 161;
+
+  function event(serviceId: number, eventId: number) {
+    return {
+      serviceId,
+      transportStreamId: 16400,
+      originalNetworkId: 4,
+      eventId,
+      startAt: Date.now() + 3600_000,
+      duration: 1800_000,
+      isFree: true,
+      runningStatus: 0,
+      name: `番組 ${eventId}`,
+      description: "",
+      extended: {},
+      genres: [],
+      audios: [],
+      video: null,
+      copyNever: false,
+    } as Parameters<typeof savePrograms>[0][number];
+  }
+
+  test("取り込みのたびに復号できるか・番組表を読めるか・伝送の形式を決め、CATV の局はアンテナの局と別の ID で入れる", async () => {
+    orm().delete(programs).run();
+    orm().delete(services).run();
+    offered = [
+      {
+        type: "BS",
+        channel: "BS01:16400",
+        networkId: 4,
+        transportStreamId: 16400,
+        remoteControlKeyId: null,
+        services: [{ serviceId: 151, serviceType: 1, name: "BS朝日1" }],
+      },
+      {
+        type: "CATV",
+        channel: "QC30",
+        networkId: 4,
+        transportStreamId: 16400,
+        remoteControlKeyId: null,
+        services: [
+          {
+            serviceId: 151,
+            serviceType: 1,
+            name: "BS朝日1",
+            caSystemIds: [0x0005],
+          },
+          // B-CAS 以外の方式でスクランブルされた局。スキャンで番組表もスクランブルされていると分かった
+          {
+            serviceId: 152,
+            serviceType: 1,
+            name: "有料の局",
+            caSystemIds: [0x000a],
+            epgReadable: false,
+          },
+        ],
+      },
+      // 4K の局 (TLV)。0x0005 は B-CAS と同じ値でも ACAS が要るので復号できない。スクランブルしていない局は復号できる。
+      // どちらも番組表 (MH-EIT) は読める
+      {
+        type: "CATV",
+        channel: "QC26",
+        networkId: 0x000b,
+        transportStreamId: 0xb111,
+        remoteControlKeyId: null,
+        transport: "tlv",
+        services: [
+          {
+            serviceId: 161,
+            serviceType: 1,
+            name: "ＢＳでんぱ　４Ｋ",
+            caSystemIds: [0x0005],
+            epgReadable: true,
+          },
+          {
+            serviceId: 162,
+            serviceType: 1,
+            name: "無料の 4K",
+            caSystemIds: [],
+            epgReadable: true,
+          },
+        ],
+      },
+      {
+        type: "SKY",
+        channel: "H40",
+        networkId: 10,
+        transportStreamId: 1,
+        remoteControlKeyId: null,
+        services: [{ serviceId: 600, serviceType: 1, name: "プレミアム" }],
+      },
+    ] as unknown as typeof offered;
+    syncServicesOnly(await readChannels());
+
+    const rows = orm()
+      .select({
+        id: services.id,
+        type: services.type,
+        network_id: services.network_id,
+        decodable: services.decodable,
+        epg_readable: services.epg_readable,
+        transport: services.transport,
+      })
+      .from(services)
+      .orderBy(services.id)
+      .all();
+    const row = (
+      id: number,
+      type: ChannelType,
+      network_id: number,
+      decodable: boolean,
+      epg_readable: boolean,
+      transport: Transport = "ts",
+    ) => ({ id, type, network_id, decodable, epg_readable, transport });
+    expect(rows).toEqual([
+      row(BS_ASAHI, "BS", 4, true, true),
+      // スキャンが番組表を読めると書いていない (EIT がスクランブルされている) SKY の局は、番組表にも出さない
+      row(1000600, "SKY", 10, false, false),
+      row(CABLE_ASAHI, "CATV", 4, true, true),
+      row(CABLE_PAY, "CATV", 4, false, false),
+      row(CABLE_4K, "CATV", 0x000b, false, true, "tlv"),
+      row(CABLE_4K + 1, "CATV", 0x000b, true, true, "tlv"),
+    ]);
+    // 番組表に出す局の数。番組表を読める 4K の局は、復号できなくても数える
+    expect(serviceCounts()).toEqual({ BS: 1, CATV: 3 });
+    // 番組表に出すが観られない局と、そのわけ
+    expect(unwatchableServices()).toEqual({
+      [CABLE_4K]:
+        "4K の放送のスクランブル (ACAS) には、まだ対応していないため観られません",
+    });
+  });
+
+  test("CATV で読んだ番組表は CATV の局にだけ書き、アンテナの BS には書かない", () => {
+    expect(savePrograms([event(151, 1)], { type: "CATV" })).toBe(1);
+    const owners = () =>
+      orm()
+        .select({ id: programs.id, service_id: programs.service_id })
+        .from(programs)
+        .orderBy(programs.id)
+        .all();
+    expect(owners()).toEqual([
+      { id: CABLE_ASAHI * 100000 + 1, service_id: CABLE_ASAHI },
+    ]);
+
+    // アンテナで読んだ同じ番組は、アンテナの局に別の ID で入る
+    expect(savePrograms([event(151, 1)], { type: "BS" })).toBe(1);
+    expect(owners()).toEqual([
+      { id: BS_ASAHI * 100000 + 1, service_id: BS_ASAHI },
+      { id: CABLE_ASAHI * 100000 + 1, service_id: CABLE_ASAHI },
+    ]);
+
+    // 番組表を読めない局の番組は書かない (番組表に出さない)
+    expect(savePrograms([event(152, 2)], { type: "CATV" })).toBe(0);
+    // 番組表を読める 4K の局の番組は、復号できなくても書く (番組表に「観られません」で出す)
+    expect(
+      savePrograms(
+        [
+          {
+            ...event(161, 3),
+            originalNetworkId: 0x000b,
+            transportStreamId: 0xb111,
+          },
+        ],
+        { type: "CATV" },
+      ),
+    ).toBe(1);
+    expect(owners().map((row) => row.service_id)).toContain(CABLE_4K);
+  });
+});
+
+describe("読めなかったエージェントの取り込み直し", () => {
+  test("控えを読めなかったエージェントは、読めるまで取り込み直しを待つ", async () => {
+    // denpa とエージェントを同時に入れ替えると、起動直後の取り込みはエージェントに繋がらない
+    const { listAgents } = await import("./agents");
+    const agent = listAgents()[0]!;
+    expect(syncPending(agent.id)).toBe(false);
+
+    starting = true;
+    await expect(sync()).rejects.toThrow();
+    expect(syncPending(agent.id)).toBe(true);
+
+    // 定期の局の取り込みが読めても、予約を組み直していないので残す
+    starting = false;
+    syncServicesOnly(await readChannels());
+    expect(syncPending(agent.id)).toBe(true);
+
+    await sync(agent);
+    expect(syncPending(agent.id)).toBe(false);
+  });
+
+  test("起動して最初に購読が始まったときも知らせる", async () => {
+    const { listAgents } = await import("./agents");
+    const { listen } = await import("./agent-events");
+    const agent = listAgents()[0]!;
+    let subscribed = 0;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const stop = listen(
+      agent,
+      () => {},
+      undefined,
+      () => {
+        subscribed += 1;
+        resolve();
+      },
+    );
+    await promise;
+    stop();
+    // 繋ぎ直しと同じく知らせる (`onReachable` は起動時に呼ばない)。起動時の取り込みが読めなかったときに使うため
+    expect(subscribed).toBe(1);
   });
 });

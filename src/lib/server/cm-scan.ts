@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Range } from "../ts/cm-decide";
 import { framer } from "../ts/logo-detect";
 import { config } from "./config";
+import { recordingInput } from "./recording-io";
 import { run } from "./stream";
 
 /**
@@ -16,12 +17,12 @@ import { run } from "./stream";
  * - 局ロゴの枠は、枠だけ切り出した白黒のコマを標準出力へ出す。点を付けるのは呼ぶ側 (`logo-own.ts`)
  * - 無音は、主音声の `silencedetect` を `ametadata` で一時ファイルへ書く
  *
- * ふだんは**エンコードと同じ ffmpeg で一緒に読む** (`scanReader` の `outputs` をエンコードする出口のあとに足す。
+ * ふだんは**エンコードと同じ ffmpeg で一緒に読む** (`scanReader` の `outputs` をエンコードする出力のあとに足す。
  * `encoder.ts`)。ここの `scan` が自分で ffmpeg を起こすのは、ロゴを覚え直して枠だけ読み直すとき、
  * CM 検出だけやり直すとき、エンコードのあとに音だけ読み直すとき。
  *
  * **材料は標準エラーに出させない。** ffmpeg はログを書けなければ黙って捨てるので、エンコードと一緒に読むと
- * 行が落ちる (実測 30 分で 54712 行のうち 1 行)。ファイルへ書かせれば落ちない。標準エラーから読むのは入れ物の尺 (`Duration:`) だけ。
+ * 行が落ちる (実測 30 分で 54712 行のうち 1 行)。ファイルへ書かせれば落ちない。標準エラーから読むのはコンテナの尺 (`Duration:`) だけ。
  */
 
 /** 無音とみなす音の大きさ。16 ビットで ±50 */
@@ -134,8 +135,8 @@ export function parseSilences(text: string, end: number): Range[] {
 }
 
 /**
- * 材料を取る出口 (ffmpeg の引数の、入力より後ろ)。映像と音で 2 つに分ける。`files` は書き出し先。
- * **エンコードの出口のあとに足しても同じに動く。** `-map` は出口ごとなので、映像の出口は
+ * 材料を取る出力 (ffmpeg の引数の、入力より後ろ)。映像と音で 2 つに分ける。`files` は書き出し先。
+ * **エンコードの出力のあとに足しても同じに動く。** `-map` は出力ごとなので、映像の出力は
  * ffmpeg の自動の選び方 (いちばん大きい映像) のまま
  */
 export function scanOutputs(
@@ -147,11 +148,10 @@ export function scanOutputs(
     /*
      * 映像は ffmpeg に選ばせる (いちばん大きいもの)。1 本の TS に局がいくつも入っていても (TOKYO MX)、
      * 中身のある映像を選ぶ。**コマは間引かない・増やさない。** `times` とロゴの枠を順番で突き合わせる。
-     * `scdet` は点を全部のコマに付ける。閾値を上げておくのはログを出させないため (キーフレームを置く
-     * `scdet@key` と名前で分ける)
+     * `scdet` は点を全部のコマに付ける。閾値を上げておくのはログを出させないため
      */
     const filters = [
-      "scdet@cm=threshold=100",
+      "scdet=threshold=100",
       `metadata=mode=print:key=lavfi.scd.score:file=${files.cuts}`,
     ];
     if (want.logo) filters.push(want.logo.filter, "format=gray");
@@ -185,7 +185,7 @@ export function scanOutputs(
 
 /** ffmpeg の出力を読んで材料にする。エンコードと一緒に読むときも、自分で読むときも同じもの */
 export interface ScanReader {
-  /** ffmpeg に足す出口 (`scanOutputs`) */
+  /** ffmpeg に足す出力 (`scanOutputs`) */
   outputs: string[];
   /** 標準出力 (ロゴの枠) の塊。ロゴを読まないときは無い */
   onStdout: ((chunk: Uint8Array) => void) | undefined;
@@ -267,8 +267,7 @@ function scanArgs(
     "-progress",
     "pipe:2",
     ...before,
-    "-i",
-    input,
+    ...recordingInput(input),
     ...outputs,
   ];
 }

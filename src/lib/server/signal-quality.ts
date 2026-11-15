@@ -1,13 +1,14 @@
 import { PACKET, packetPid, PacketStream } from "@danything/arib/psi";
 
 import type { ChannelType } from "../types";
+import type { Place } from "./agent-order";
 import { config } from "./config";
 import { chunks } from "./stream";
 import {
-  getTuners,
   openChannelStream,
   type StreamUse,
   type TunerSignal,
+  tunersOf,
 } from "./tuner";
 
 /**
@@ -15,6 +16,9 @@ import {
  * エージェントが C/N を読む間隔 (5 秒) と同じにして、終わるまでに 1 回は読まれるようにする
  */
 const MEASURE = 5_000;
+
+/** 速さを出すのに要る、最初のパケットからの長さ (ms)。PX-MLT8PE で同期が数ミリ秒で外れ、1561 Mbps と出た */
+const RATE_MIN = 1_000;
 /**
  * エージェントが C/N を読む間隔 (ms。agent の `TunerSignal.Every`) に、読み終わるまでの 1 秒を足したもの。
  * エージェントは選局と関係ない時刻に 5 秒ごとに読むので、選局からこれだけ待てば 1 回は読まれている
@@ -30,6 +34,7 @@ const GIVE_UP = 15_000;
  * `stop` が立つか `READ_LIMIT` を過ぎたら待たずに null を返す (エージェントが遅くても、チューナーを放すのを遅らせない)
  */
 async function readSignal(
+  agent: number,
   use: StreamUse,
   stop: AbortSignal,
 ): Promise<TunerSignal | null> {
@@ -39,7 +44,8 @@ async function readSignal(
     limit.addEventListener("abort", () => resolve(null), { once: true }),
   );
   try {
-    const tuners = await Promise.race([getTuners(), gaveUp]);
+    // 測っているエージェントにだけ訊く (ほかのエージェントが遅くても C/N を落とさない)
+    const tuners = await Promise.race([tunersOf(agent, READ_LIMIT), gaveUp]);
     return (
       tuners?.find((tuner) => tuner.users.some((user) => user.use === use))
         ?.signal ?? null
@@ -57,8 +63,10 @@ export interface SignalQuality {
   errors: number;
   /** 連続性カウンタの飛びから数えた、欠けたパケットの数 */
   drops: number;
-  /** 受け取った速さ (Mbps) */
-  mbps: number;
+  /** 受け取った速さ (Mbps)。測れた長さが 1 秒に満たなければ null (数ミリ秒で割ると、ありえない値になる) */
+  mbps: number | null;
+  /** 測り終える前に TS が止まった (同期が外れたなど)。画面を閉じたときは false */
+  stopped: boolean;
   /** 測っている間のチューナーの受信の状態と C/N。機材が測れなければ null (docs/tuners.md「信号レベル」) */
   signal: TunerSignal | null;
 }
@@ -101,7 +109,8 @@ export class PacketCheck {
 }
 
 /**
- * チャンネルを選局し、受けた TS の誤り・欠け・速さと、チューナーの C/N を測る。
+ * チャンネルを選局し、受けた TS の誤り・欠け・速さと、チューナーの C/N を測る。**測るのは `place` のエージェント** (振り分けない。
+ * 設定の「チャンネル」の行と同じエージェント)。
  *
  * **スキャンと同じ順でチューナーを取る** (録画・ライブ視聴・番組表をいますぐ集める処理・スキャンからは取り上げない。
  * 名乗りの先頭が `scan` なので、エージェントはカードに聞かずに流す)。
@@ -109,10 +118,10 @@ export class PacketCheck {
  */
 export async function measureSignal(
   type: ChannelType,
-  channel: string,
+  place: Place,
   signal: AbortSignal,
 ): Promise<SignalQuality> {
-  const use: StreamUse = `scan quality ${channel}`;
+  const use: StreamUse = `scan quality ${place.channel}`;
   const done = new AbortController();
   const stop = AbortSignal.any([
     signal,
@@ -123,10 +132,14 @@ export async function measureSignal(
   let started = 0;
   let ms = 0;
   let tuned: Promise<TunerSignal | null> = Promise.resolve(null);
+  /** 測り終えたか。測り終える前にストリームが終わったら、読む間隔を待たずに返す */
+  let measured = false;
+  /** 読む間隔が過ぎて読めた値 (ストリームが先に終わったときに使う) */
+  let early: TunerSignal | null = null;
   try {
     const stream = await openChannelStream(
       type,
-      channel,
+      [place],
       stop,
       use,
       config.priority.scan,
@@ -135,7 +148,9 @@ export async function measureSignal(
      * C/N はチューナーを持っている間に読む (エージェントは使用中のチューナーの値だけを返す)。
      * パケットが届かずに測り終わらないときのために、読む間隔が過ぎたら一度読んでおく
      */
-    tuned = Bun.sleep(SIGNAL_READ).then(() => readSignal(use, stop));
+    tuned = Bun.sleep(SIGNAL_READ)
+      .then(() => readSignal(place.agent, use, stop))
+      .then((value) => (early = value));
     for await (const chunk of chunks(stream)) {
       started ||= Date.now();
       check.feed(chunk);
@@ -147,8 +162,9 @@ export async function measureSignal(
          * 選局からは読む間隔より長い。ここで読んだ値を使い、パケットが届かないときの読みは待たない
          * (まだ走っていなければ、チューナーを放したあとに走って null になるだけ)
          */
-        tuned = readSignal(use, stop);
+        tuned = readSignal(place.agent, use, stop);
         await tuned;
+        measured = true;
         break;
       }
     }
@@ -162,9 +178,11 @@ export async function measureSignal(
       packets,
       errors,
       drops,
-      mbps: ms > 0 ? (packets * PACKET * 8) / ms / 1000 : 0,
-      // 画面を閉じたなら、読み終わるのを待たない
-      signal: signal.aborted ? null : await tuned,
+      mbps: ms >= RATE_MIN ? (packets * PACKET * 8) / ms / 1000 : null,
+      stopped: !measured && !signal.aborted,
+      // 画面を閉じたなら、読み終わるのを待たない。測り終える前にストリームが終わったなら、チューナーはもう放しているので
+      // 読む間隔 (SIGNAL_READ) を待っても値は返らない。それまでに読めた値を使う
+      signal: signal.aborted ? null : measured ? await tuned : early,
     };
   } finally {
     done.abort();

@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
-import { autoCodec, autoOrder, readChoice } from "./live-choice";
+import {
+  autoCodec,
+  autoOrder,
+  broadcastCodec,
+  broadcastFormat,
+  formatLabel,
+  hiddenCodecs,
+  keptChoice,
+  readChoice,
+  shownCodec,
+} from "./live-choice";
 
 const all = { rawOk: true, av1: true, hevc: true, h264: true };
 const where = { indoor: false, compat: false };
@@ -93,19 +103,104 @@ describe("自動の形式", () => {
 describe("覚えていた選択の読み方", () => {
   test("自動・AV1・H.265・H.264・MPEG-2 はそのまま", () => {
     for (const choice of ["auto", "av1", "hevc", "h264", "raw"] as const)
-      expect(readChoice(choice, false)).toBe(choice);
+      expect(readChoice(choice)).toBe(choice);
   });
 
   test("知らない値・前の形式 (選択が無い) は自動", () => {
-    expect(readChoice(undefined, false)).toBe("auto");
-    expect(readChoice("vp9", false)).toBe("auto");
-    expect(readChoice(3, false)).toBe("auto");
+    expect(readChoice(undefined)).toBe("auto");
+    expect(readChoice("vp9")).toBe("auto");
+    expect(readChoice(3)).toBe("auto");
   });
 
-  test("H.264 と H.265 を出さない設定では、それを選んでいた端末も自動", () => {
-    expect(readChoice("h264", true)).toBe("auto");
-    expect(readChoice("hevc", true)).toBe("auto");
-    expect(readChoice("av1", true)).toBe("av1");
-    expect(readChoice("raw", true)).toBe("raw");
+  test("エンコードするものは、いまメニューに並んでいるものと同じときだけ使い、違えば自動", () => {
+    expect(keptChoice("hevc", "hevc")).toBe("hevc");
+    expect(keptChoice("h264", "hevc")).toBe("auto");
+    expect(keptChoice("av1", "h264")).toBe("auto");
+    expect(keptChoice("av1", null)).toBe("auto");
+    // 自動と MPEG-2 は並びに関わらずそのまま
+    expect(keptChoice("auto", "h264")).toBe("auto");
+    expect(keptChoice("raw", null)).toBe("raw");
+  });
+});
+
+/**
+ * **メニューに並べるエンコードするもの** (`shownCodec`)。サーバがその場でエンコードできる並びの先頭から、端末で再生できるもの 1 つ。
+ * テレビのアプリに外させるもの (`hiddenCodecs`) は、並びの先頭以外
+ */
+describe("メニューに並べるコーデック", () => {
+  const plays =
+    (...ok: string[]) =>
+    (codec: string) =>
+      ok.includes(codec);
+
+  test("GPU が無ければ H.264", () => {
+    expect(shownCodec(["h264"], plays("av1", "hevc", "h264"))).toBe("h264");
+  });
+
+  test("GPU で H.264 と H.265 をエンコードできれば、H.265 を再生できる端末は H.265、できない端末は H.264", () => {
+    expect(shownCodec(["hevc", "h264"], plays("av1", "hevc", "h264"))).toBe(
+      "hevc",
+    );
+    expect(shownCodec(["hevc", "h264"], plays("av1", "h264"))).toBe("h264");
+  });
+
+  test("GPU で AV1 をエンコードできれば、AV1 を再生できる端末は AV1", () => {
+    expect(
+      shownCodec(["av1", "hevc", "h264"], plays("av1", "hevc", "h264")),
+    ).toBe("av1");
+    expect(shownCodec(["av1", "h264"], plays("h264"))).toBe("h264");
+  });
+
+  test("どれも再生できなければ並びの先頭、並びが空なら null", () => {
+    expect(shownCodec(["hevc", "h264"], plays())).toBe("hevc");
+    expect(shownCodec([], plays("h264"))).toBeNull();
+  });
+
+  test("テレビのアプリには、並びの先頭以外を外させる", () => {
+    expect(hiddenCodecs(["h264"])).toEqual(["av1", "hevc"]);
+    expect(hiddenCodecs(["hevc", "h264"])).toEqual(["av1", "h264"]);
+    expect(hiddenCodecs(["av1", "hevc", "h264"])).toEqual(["hevc", "h264"]);
+  });
+});
+
+/** **4K の局** (`broadcast` が `hevc`)。放送のまま (MPEG-2) の場所に HEVC の詰め替えが入り、H.265 にはエンコードしない */
+describe("4K の局の自動", () => {
+  const uhd = { broadcast: "hevc" as const };
+
+  test("家の中は HEVC → H.264 → AV1、外は AV1 → H.264、互換モードは AV1 → H.264 (canvas は HEVC を描かない)", () => {
+    expect(autoOrder({ indoor: true, compat: false, ...uhd })).toEqual([
+      "hevc",
+      "h264",
+      "av1",
+    ]);
+    expect(autoOrder({ indoor: false, compat: false, ...uhd })).toEqual([
+      "av1",
+      "h264",
+    ]);
+    expect(autoOrder({ indoor: true, compat: true, ...uhd })).toEqual([
+      "av1",
+      "h264",
+    ]);
+  });
+
+  test("hevc は放送の HEVC を再生できるか。MPEG-2 をデコードできても使わない", () => {
+    const indoor = { ...where, indoor: true, ...uhd };
+    expect(autoCodec({ ...all, ...indoor })).toBe("hevc");
+    expect(autoCodec({ ...all, ...indoor, hevc: false })).toBe("h264");
+    // 外では放送のままを選ばない
+    expect(autoCodec({ ...all, ...where, ...uhd })).toBe("av1");
+    expect(autoCodec({ ...all, ...where, ...uhd, av1: false })).toBe("h264");
+    expect(
+      autoCodec({ ...all, ...where, ...uhd, av1: false, h264: false }),
+    ).toBe(null);
+  });
+
+  test("伝送の形式から放送のコーデック、放送のままでリクエストする形式と名前", () => {
+    expect(broadcastCodec("tlv")).toBe("hevc");
+    expect(broadcastCodec("ts")).toBe("mpeg2");
+    expect(broadcastFormat("hevc")).toBe("hevc");
+    expect(broadcastFormat("mpeg2")).toBe("raw");
+    expect(formatLabel("raw", "hevc")).toBe("H.265");
+    expect(formatLabel("raw")).toBe("MPEG-2");
   });
 });

@@ -30,43 +30,56 @@ const {
 } = await import("./viewing");
 
 describe("観るときの決まり (画面の load と GET /api/playback/options)", () => {
-  test("設定が無ければ、外の名前は外・家の中のアドレスは家の中。外すコーデックは無い", () => {
+  test("設定が無ければ、外の名前は外・家の中のアドレスは家の中。GPU が無ければその場でエンコードできるのは H.264 だけで、AV1 と H.265 を外させる", () => {
     expect(
-      viewingOptions(new URL("https://dp.example.com/live"), false),
+      viewingOptions(new URL("https://dp.example.com/live"), ["h264"]),
     ).toEqual({
       indoor: false,
-      hidden: [],
+      liveCodecs: ["h264"],
+      hidden: ["av1", "hevc"],
       hevc: false,
     });
-    expect(viewingOptions(new URL("http://192.168.1.20:3000/"), false)).toEqual(
-      {
-        indoor: true,
-        hidden: [],
-        hevc: false,
-      },
-    );
-  });
-
-  test("家の中の名前に載せた名前は家の中。H.264 と H.265 を出さない設定なら両方を返す", () => {
-    saveSettings({ indoorHosts: ["dp.l.example.com"], hideH264Hevc: true });
     expect(
-      viewingOptions(new URL("https://dp.l.example.com/live"), false),
+      viewingOptions(new URL("http://192.168.1.20:3000/"), ["h264"]),
     ).toEqual({
       indoor: true,
-      hidden: ["h264", "hevc"],
+      liveCodecs: ["h264"],
+      hidden: ["av1", "hevc"],
       hevc: false,
     });
+  });
+
+  test("家の中の名前に載せた名前は家の中", () => {
+    saveSettings({ indoorHosts: ["dp.l.example.com"] });
+    expect(
+      viewingOptions(new URL("https://dp.l.example.com/live"), ["h264"]).indoor,
+    ).toBe(true);
     // 同じ家でも、外の名前で開けば外
     expect(viewingOptions(new URL("https://dp.example.com/live")).indoor).toBe(
       false,
     );
-    saveSettings({ indoorHosts: [], hideH264Hevc: false });
+    saveSettings({ indoorHosts: [] });
   });
 
-  test("ライブで H.265 を出せるか (ライブのエンコーダが GPU か) をそのまま返す", () => {
+  test("GPU で H.265 と H.264 をエンコードできれば H.265 を出せて、テレビのアプリには AV1 と H.264 を外させる", () => {
     expect(
-      viewingOptions(new URL("https://dp.example.com/live"), true).hevc,
-    ).toBe(true);
+      viewingOptions(new URL("https://dp.example.com/live"), ["hevc", "h264"]),
+    ).toEqual({
+      indoor: false,
+      liveCodecs: ["hevc", "h264"],
+      hidden: ["av1", "h264"],
+      hevc: true,
+    });
+  });
+
+  test("GPU で AV1 もエンコードできれば、テレビのアプリには H.265 と H.264 を外させる", () => {
+    const options = viewingOptions(new URL("https://dp.example.com/live"), [
+      "av1",
+      "hevc",
+      "h264",
+    ]);
+    expect(options.hidden).toEqual(["hevc", "h264"]);
+    expect(options.hevc).toBe(true);
   });
 });
 
@@ -83,9 +96,9 @@ describe("前回の局と選択の控え (cookie)", () => {
           audio: "1:main",
           choice: "raw",
         }),
-        false,
       ),
     ).toEqual({
+      serviceId: 1,
       channelType: "GR",
       channel: "27",
       audio: "1:main",
@@ -97,16 +110,22 @@ describe("前回の局と選択の控え (cookie)", () => {
     expect(
       readKept(
         cookie({ channelType: "GR", channel: "27", codec: "av1", raw: true }),
-        false,
       ),
     ).toEqual({ channelType: "GR", channel: "27", choice: "auto" });
-    expect(readKept("{", false)).toEqual({ choice: "auto" });
-    expect(readKept(undefined, false)).toEqual({ choice: "auto" });
+    expect(readKept("{")).toEqual({ choice: "auto" });
+    expect(readKept(undefined)).toEqual({ choice: "auto" });
   });
 
-  test("H.264 を出さない設定では、H.264 の選択は自動", () => {
-    expect(readKept(cookie({ choice: "h264" }), true).choice).toBe("auto");
-    expect(readKept(cookie({ choice: "h264" }), false).choice).toBe("h264");
+  test("エンコードするものの選択は、いまその場でエンコードできるときだけ読み、できなければ自動", () => {
+    expect(readKept(cookie({ choice: "h264" })).choice).toBe("h264");
+    expect(readKept(cookie({ choice: "hevc" }), ["hevc", "h264"]).choice).toBe(
+      "hevc",
+    );
+    expect(readKept(cookie({ choice: "hevc" }), ["h264"]).choice).toBe("auto");
+    expect(readKept(cookie({ choice: "av1" }), ["hevc", "h264"]).choice).toBe(
+      "auto",
+    );
+    expect(readKept(cookie({ choice: "raw" }), ["h264"]).choice).toBe("raw");
   });
 });
 
@@ -119,7 +138,7 @@ describe("開いたときに先回りする形式と局", () => {
   test("自動なら家の中は MPEG-2、外は AV1。選んだものは場所によらずそれ", () => {
     expect(warmFormat("auto", true)).toBe("raw");
     expect(warmFormat("auto", false)).toBe("av1");
-    expect(warmFormat("h264", true)).toBe("h264");
+    expect(warmFormat("av1", true)).toBe("av1");
     expect(warmFormat("raw", false)).toBe("raw");
   });
 
@@ -146,18 +165,35 @@ describe("開いたときに先回りする形式と局", () => {
     });
   });
 
+  test("前回の局は局の ID で探す (同じチャンネルのサブチャンネル)。無い ID ならチャンネルで探す", () => {
+    const sub = [
+      { id: 30, type: "GR", channel: "16" },
+      { id: 31, type: "GR", channel: "16" },
+    ];
+    const kept = {
+      serviceId: 31,
+      channelType: "GR",
+      channel: "16",
+      choice: "av1" as const,
+    };
+    expect(liveStart(sub, NaN, kept, true)?.serviceId).toBe(31);
+    expect(
+      liveStart(sub, NaN, { ...kept, serviceId: 99 }, true)?.serviceId,
+    ).toBe(30);
+  });
+
   test("名指しの局が先。音声の控えは前回の局のときだけ。無い局なら一覧の先頭", () => {
     const kept = {
       channelType: "BS",
       channel: "BS01_0",
       audio: "1:sub",
-      choice: "h264" as const,
+      choice: "av1" as const,
     };
     expect(liveStart(channels, 10, kept, true)).toEqual({
       channelType: "GR",
       channel: "27",
       serviceId: 10,
-      codec: "h264",
+      codec: "av1",
     });
     expect(
       liveStart(channels, NaN, { choice: "auto", channel: "99" }, false),
@@ -297,5 +333,75 @@ describe("形式をサーバに選ばせる (codec=auto)", () => {
     expect(liveAudioOnly(at("audio=0:sub&rung=2"))).toBeNull();
     expect(audioArgs("audio", 2).join(" ")).toContain("-b:a 96k");
     expect(audioArgs("audio", 0).join(" ")).toContain("-b:a 256k");
+  });
+});
+
+/** **4K の局** (`broadcast` が `hevc`。TLV と、TS で送る局)。放送のままは HEVC の詰め替えで、GPU は要らない。`raw` (MPEG-2 の TS) は自動の候補にしない */
+describe("4K の局の形式", () => {
+  const at = (query: string) => new URL(`http://192.168.1.20/x?${query}`);
+  const outside = (query: string) =>
+    new URL(`https://dp.example.com/x?${query}`);
+  const noGpu = () => null;
+
+  test("自動は家の中が HEVC → H.264 → AV1、外が AV1 → H.264。GPU が無くても HEVC (詰め替え)", () => {
+    const base = {
+      scene: "live" as const,
+      rung: 0 as const,
+      hevc: false,
+      broadcast: "hevc" as const,
+    };
+    const all = ["raw", "av1", "hevc", "h264"] as const;
+    expect(autoFormat({ ...base, formats: all, indoor: true })).toBe("hevc");
+    expect(autoFormat({ ...base, formats: all, indoor: false })).toBe("av1");
+    expect(
+      autoFormat({ ...base, formats: ["raw", "h264"], indoor: true }),
+    ).toBe("h264");
+    expect(
+      autoFormat({ ...base, formats: ["hevc", "h264"], indoor: false }),
+    ).toBe("h264");
+  });
+
+  test("HTTP の codec。hevc は GPU が無くても詰め替え、段を下げるなら H.265 を外して選ぶ", () => {
+    const tlv = (url: URL) =>
+      askedFormat(url, "live", { hevc: false, pick: noGpu }, "hevc");
+    expect(tlv(at("codec=hevc"))).toEqual({ codec: "hevc", rung: 0 });
+    expect(tlv(at("codec=raw"))).toEqual({ codec: "raw", rung: 0 });
+    expect(tlv(at("codec=auto&playable=hevc,h264"))).toEqual({
+      codec: "hevc",
+      rung: 0,
+    });
+    expect(tlv(outside("codec=auto&playable=hevc,h264"))).toEqual({
+      codec: "h264",
+      rung: 0,
+    });
+    expect(tlv(at("codec=hevc&rung=2&playable=hevc,h264"))).toEqual({
+      codec: "h264",
+      rung: 2,
+    });
+    expect(tlv(at("codec=auto&rung=1&playable=hevc"))).toBeNull();
+  });
+
+  test("先回りは、放送のままを選んでいれば・家の中の自動なら HEVC の詰め替え", () => {
+    expect(warmFormat("raw", false, "hevc")).toBe("hevc");
+    expect(warmFormat("auto", true, "hevc")).toBe("hevc");
+    expect(warmFormat("auto", false, "hevc")).toBe("av1");
+    // 4K の局では H.265 にエンコードしないので、選んでいた H.265 は自動 (家の中は詰め替え、外は AV1)
+    expect(warmFormat("hevc", true, "hevc")).toBe("hevc");
+    expect(warmFormat("hevc", false, "hevc")).toBe("av1");
+    expect(warmFormat("h264", false, "hevc")).toBe("h264");
+    expect(
+      liveStart(
+        [{ id: 30, type: "CATV", channel: "QC28", broadcast: "hevc" }],
+        NaN,
+        { choice: "auto" },
+        true,
+      ),
+    ).toEqual({
+      channelType: "CATV",
+      channel: "QC28",
+      serviceId: 30,
+      codec: "hevc",
+      broadcast: "hevc",
+    });
   });
 });

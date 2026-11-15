@@ -1,0 +1,161 @@
+<script lang="ts">
+  /**
+   * **「いま」の行** (いまの境目。名前だけで、目に見える線は引かない。docs/design.md)。ホームの一覧 (`home/TimelineHeading`) と番組表で同じ見た目にする。
+   * 赤い太字の時刻。ホームは先頭に赤い点を付けて地に置き、すぐ後ろに一言を続ける。番組表は時刻を操作の層のカプセルに乗せる (点は付けない)。
+   *
+   * - `inline` (ホーム) … 時刻 (地に置く) と控えた字の一言 (`status`) を左から 1 行に並べる。幅が足りなければ一言を短い形 (`status.short`) に替え、それでも入らなければ「…」で切る (折り返さない)
+   * - `overlay` (番組表) … 時刻のカプセルだけを時の列のいまの位置に置き、左端に貼り付ける (`sticky`)。表を横切る線は引かない
+   *   (過ぎた所はマスを沈めて見せる)。目に見えるのは分だけ (時は同じ時の列に出ている。読み上げには時まで渡す)。
+   *   時の数字の上に乗るので、カプセルの面で読ませる
+   *
+   * 読み上げは「いま 18:01、次の録画まで 3 時間 59 分」。短い形は目に見えるだけで、読み上げはいつも長い形
+   */
+  import type { HTMLAttributes } from "svelte/elements";
+
+  import type { NowStatus } from "#lib/format.js";
+
+  let {
+    time,
+    status = null,
+    layout = "inline",
+    heading = false,
+    labelWidth,
+    element = $bindable(null),
+    class: className = "",
+    ...rest
+  }: {
+    /** 時刻の字 (`time(clock)`) */
+    time: string;
+    /** 時刻の後ろに添える一言 (`inline` だけ) */
+    status?: NowStatus | null;
+    layout?: "inline" | "overlay";
+    /** `h2` にする (見出し移動でここへ来られる) */
+    heading?: boolean;
+    /** 時刻の幅 (`overlay` で時刻の列にそろえる) */
+    labelWidth?: string;
+    element?: HTMLElement | null;
+    class?: string;
+  } & HTMLAttributes<HTMLElement> = $props();
+
+  const shown = $derived(layout === "inline" ? status : null);
+</script>
+
+<!-- 「いま」と読点は読み上げにだけ渡す -->
+<svelte:element
+  this={heading ? "h2" : "div"}
+  bind:this={element}
+  class="now-mark {layout} {className}"
+  {...rest}
+>
+  <span class="now-time num" style:width={labelWidth}
+    ><span class="visually-hidden">いま </span>{#if layout === "overlay"}<span
+        class="visually-hidden">{time.slice(0, 3)}</span
+      >{time.slice(3)}{:else}{time}{/if}{#if shown}<span class="visually-hidden"
+        >、</span
+      >{/if}</span
+  >
+  {#if shown}
+    <span class="now-status">
+      <span class="now-full">{shown.text}</span><span
+        class="now-short"
+        aria-hidden="true">{shown.short}</span
+      >
+    </span>
+  {/if}
+</svelte:element>
+
+<style>
+  .now-mark {
+    margin: 0;
+    font-size: inherit;
+    font-weight: var(--dp-weight);
+  }
+  /* 赤い点と赤い太字の時刻。字は淡い地の上で読める濃さの側 (`--dp-rec-text`) */
+  .now-time {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--dp-space-1);
+    padding: 0.125rem var(--dp-space-3);
+    color: var(--dp-rec-text);
+    font-weight: var(--dp-weight-bold);
+    white-space: nowrap;
+  }
+  /* 「いま」の印の赤い点 (カレンダーの今日の点と同じ赤) */
+  .now-time::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--dp-rec);
+  }
+
+  /* ---- 1 行に並べる (ホーム) ---- */
+  .inline {
+    container-type: inline-size;
+    display: flex;
+    align-items: center;
+    gap: var(--dp-space-2);
+  }
+  /* 左の余白は日付の字にそろえるため。右は空けず、一言をすぐ続ける */
+  .inline .now-time {
+    flex-shrink: 0;
+    padding-right: 0;
+    font-size: var(--now-time-size, var(--dp-text-sm));
+  }
+  /* 一言は時刻のすぐ後ろに控えた字で (補足なので、時刻ほど目立たせない) */
+  .now-status {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--dp-muted);
+    font-size: var(--dp-text-sm);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .now-short {
+    display: none;
+  }
+  /* 狭いと短い形 (「次まで 3:59」)。長い形は読み上げにだけ残す */
+  @container (max-width: 19rem) {
+    .now-full {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .now-short {
+      display: inline;
+    }
+  }
+
+  /* ---- 時の列に置く (番組表) ---- */
+  .overlay {
+    position: relative;
+    pointer-events: none;
+  }
+  /*
+     * 高さの半分だけ上げる (`translateY(-50%)`)。字の大きさが変わっても、いまの位置の真ん中に乗る。
+     * `sticky` (`left: 0`) で横に流しても左端に残る
+     */
+  .overlay .now-time {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    display: flex;
+    justify-content: center;
+    width: fit-content;
+    padding: 0 var(--dp-space-1);
+    border-radius: var(--dp-radius-full);
+    background: var(--dp-float);
+    box-shadow: var(--dp-shadow-pop);
+    transform: translateY(-50%);
+    font-size: var(--dp-text-2xs);
+    line-height: 1rem;
+  }
+  /* 時の列の幅に収めるため、点は付けない */
+  .overlay .now-time::before {
+    display: none;
+  }
+</style>

@@ -14,7 +14,8 @@ import {
   stream,
 } from "@danything/arib/synth";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * 衛星のロゴを流す中継で、**カルーセルが来るまで待つ** (`logo.awaitCarousel`・「いますぐ」)。
@@ -141,7 +142,6 @@ const agent = Bun.serve({
         rank: index,
         device: null,
         lnb: null,
-        pid: null,
         error: null,
         ...tuner,
       })),
@@ -163,6 +163,7 @@ afterAll(() => {
 });
 
 const { orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { services } = await import("./schema");
 const { serviceKey } = await import("./tuner");
 const { readLogo, sweep, sweepNow, sweepState, waitedMessage } =
@@ -177,20 +178,26 @@ orm()
   .insert(services)
   .values(
     STATIONS.map((s) => ({
-      id: serviceKey(s.network, s.sid),
+      id: serviceKey(s.network, s.sid, s.type),
       service_id: s.sid,
       network_id: s.network,
       name: `局${s.sid}`,
       type: s.type,
-      channel: s.channel,
       updated_at: 1,
     })),
   )
   .run();
+placeServices(
+  STATIONS.map((s) => ({
+    id: serviceKey(s.network, s.sid, s.type),
+    channel: s.channel,
+  })),
+);
 
 const logos = () =>
-  STATIONS.filter((s) => readLogo(serviceKey(s.network, s.sid)) !== null)
-    .length;
+  STATIONS.filter(
+    (s) => readLogo(serviceKey(s.network, s.sid, s.type)) !== null,
+  ).length;
 
 /** `sweep` の間に出た記録の行のうち、ロゴのもの */
 async function logged(run: () => Promise<unknown>): Promise<string[]> {

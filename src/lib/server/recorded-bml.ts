@@ -14,23 +14,30 @@
  * `BmlDecoder` にそのまま流せる。
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { open } from "node:fs/promises";
+import {
+  createReadStream,
+  existsSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { createInterface } from "node:readline";
 
 import type { ResponseMessage } from "@danything/arib/bml-protocol";
 import { eq } from "drizzle-orm";
 
+import { autoStarts } from "#lib/ts/data-auto-start.js";
 import { DataBroadcastCapture } from "#lib/ts/data-capture.js";
 import {
   type PlacedMessage,
   type TimedMessage,
   toPlaybackTimeline,
 } from "#lib/ts/data-timeline.js";
-import type { Ruler } from "#lib/ts/watch.js";
 
 import type { Recording } from "../types";
 import { orm } from "./db";
 import { fillTsHead } from "./recording";
+import { openRecording } from "./recording-io";
 import { programs, services } from "./schema";
 
 /**
@@ -40,7 +47,7 @@ import { programs, services } from "./schema";
  * ライブと同じく DB から組み立てる (`live.ts` の `programInfo`)。局の番号は
  * `services`、番組は録画の行が持っている。
  *
- * **中継の番号 (`transportStreamId`) は null のままにします。** ライブでは放送から
+ * **TS の ID (`transportStreamId`) は null のままにします。** ライブでは放送から
  * 読み取って渡していますが (あちらは TVer リンクが訊いてくる)、**放送のアプリは録画の
  * 再生中に双方向通信を使いません。** テレ朝の TVer リンクは `IsRecorded()` で分かれて
  * 「録画再生中は、このサービスをご利用いただけません」を出す。訊かれないものを
@@ -79,7 +86,7 @@ function programInfoOf(recording: Recording): ResponseMessage | null {
 }
 
 /**
- * 変化ログの頭に番組情報を足す。**サイドカーに書くときも、読むときも通す。**
+ * 変化ログの先頭に番組情報を足す。**サイドカーに書くときも、読むときも通す。**
  * 書く側は `event_id` が番組表から消える前に写し取るため (`epg.ts` の
  * `pruneOldPrograms`)、読む側は番組情報を書いていなかった頃のサイドカーのため
  */
@@ -113,7 +120,7 @@ async function capture(
   path: string,
 ): Promise<{ timeline: TimedMessage[]; head: number | null }> {
   const found = new DataBroadcastCapture();
-  const file = await open(path, "r");
+  const file = await openRecording(path);
   try {
     const buffer = Buffer.alloc(CHUNK);
     for (;;) {
@@ -131,23 +138,23 @@ async function capture(
  * 録画のデータ放送を取り出して、サイドカーに書く。
  *
  * 時刻は**エンコードしたものの再生位置**で書く (観る画面の物差し。`playbackPlan` の `axis`)。
- * 基準は元の TS の頭 (`DataBroadcastCapture.head`) で、番組の始まり (`start_at`) ではない。
- * 測った頭は、録画の行の `ts_head` が空なら書く (`recording.fillTsHead`。実況のコメントを合わせるのに使う)
+ * 基準は元の TS の先頭 (`DataBroadcastCapture.head`) で、番組の始まり (`start_at`) ではない。
+ * 測った先頭は、録画の行の `ts_head` が空なら書く (`recording.fillTsHead`。実況のコメントを合わせるのに使う)
  *
- * @param tsPath 元の TS (**CM を切る前のほう**。放送の実時刻 (TDT) が続いている)
+ * @param tsPath 元の TS (放送の実時刻 (TDT) が続いている)
  * @param sidecarPath 書き先 (`metadata.sidecarPaths` の `dataBroadcast`)
  * @param recording 録画の行。番組情報に使う
- * @param ruler 元の TS からエンコードしたものへの直し方 (録画の行に書く `cm_kept`・`encode_skip` と同じもの)
+ * @param skip エンコードで元の TS の先頭から捨てた秒 (録画の行に書く `encode_skip` と同じもの)
  * @returns 書いた変化の数。**0 なら書かない** (データ放送を持たない録画)
  */
 export async function saveRecordedBml(
   tsPath: string,
   sidecarPath: string,
   recording: Recording,
-  ruler: Ruler,
+  skip: number,
 ): Promise<number> {
   const { timeline, head } = await capture(tsPath);
-  // 頭の放送時刻は実況のコメントにも使う。録っている間に測れていなければここで書く (データ放送の有る無しに関わらず)
+  // 先頭の放送時刻は実況のコメントにも使う。録っている間に測れていなければここで書く (データ放送の有る無しに関わらず)
   if (head !== null) fillTsHead(recording.id, head);
   /*
    * **描けるモジュールが 1 つも無ければ書かない。** データ放送の載っていない局でも
@@ -156,9 +163,9 @@ export async function saveRecordedBml(
    */
   if (!timeline.some((item) => item.message.type === "moduleDownloaded"))
     return 0;
-  // TDT を一度も見ていなければ、どの変化も時刻を持たない (頭の 0 に並ぶ) ので基準は使われない
+  // TDT を一度も見ていなければ、どの変化も時刻を持たない (先頭の 0 に並ぶ) ので基準は使われない
   const placed = withProgramInfo(
-    toPlaybackTimeline(timeline, head ?? 0, ruler),
+    toPlaybackTimeline(timeline, head ?? 0, { kept: null, skip }),
     recording,
   );
   writeFileSync(
@@ -166,6 +173,82 @@ export async function saveRecordedBml(
     `${placed.map((item) => JSON.stringify(item)).join("\n")}\n`,
   );
   return placed.length;
+}
+
+/** 変化ログの 1 行が PMT か。中身は JSON にする前に文字で絞る (モジュールの行は base64 で大きく、引用符を含まない) */
+const PMT_LINE = '"type":"pmt"';
+
+/** 覚えておくサイドカーの数。超えたら長く開いていないものから捨てる (捨てたものは次に開くときに読み直す) */
+export const AUTO_START_KEEP = 512;
+
+/** 読んで決まった答え (サイドカーのパスごと)。読んだときの大きさと更新時刻を添える */
+const autoStartHeld = new Map<
+  string,
+  { size: number; mtime: number; on: boolean }
+>();
+
+/**
+ * **録画の入口の部品に自動起動の指定があるか** (`ts/data-auto-start.ts` の `autoStarts`)。観る画面は、データ放送を
+ * 自動で受信する端末でこれが true のときだけ、開く前から変化ログを取得する (`components/player/data-receive.ts`)。
+ *
+ * 変化ログの PMT の行だけを JSON にして見る。録画の途中で番組が替わって指定が付いたり外れたりしても、どこかの PMT に
+ * 指定があれば true (再生位置で分けない)。行を先頭から読み、指定のある PMT が見つかったところでやめる。
+ * PMT はふつう先頭近くにあるが、指定が無い録画はファイルを最後まで読む (読むのはサーバの中だけで、端末へは送らない)
+ *
+ * 観る画面を開くたびに呼ぶので、答えはサイドカーのパスごとにメモリに覚える (`AUTO_START_KEEP` まで)。
+ * ファイルの大きさか更新時刻が読んだときと違えば読み直す (エンコードし直して書き替わった・まだ伸びている)
+ *
+ * @returns サイドカーが無ければ false
+ */
+export async function recordedAutoStart(sidecarPath: string): Promise<boolean> {
+  let size: number;
+  let mtime: number;
+  try {
+    ({ size, mtimeMs: mtime } = statSync(sidecarPath));
+  } catch {
+    // 無い (データ放送を持たない録画)。覚えない
+    autoStartHeld.delete(sidecarPath);
+    return false;
+  }
+  const held = autoStartHeld.get(sidecarPath);
+  // 読んでいる間に伸びても、覚えるのは読む前の大きさと時刻。次に開くときに違いが分かって読み直す
+  const on =
+    held !== undefined && held.size === size && held.mtime === mtime
+      ? held.on
+      : await readAutoStart(sidecarPath);
+  // 開いたものを新しい側 (後ろ) へ置き、上限を超えたら古いもの (先頭) から捨てる
+  autoStartHeld.delete(sidecarPath);
+  if (autoStartHeld.size >= AUTO_START_KEEP) {
+    const oldest = autoStartHeld.keys().next().value;
+    if (oldest !== undefined) autoStartHeld.delete(oldest);
+  }
+  autoStartHeld.set(sidecarPath, { size, mtime, on });
+  return on;
+}
+
+/** 変化ログを先頭から読み、どこかの PMT の入口の部品に自動起動の指定があるか (`recordedAutoStart`) */
+async function readAutoStart(sidecarPath: string): Promise<boolean> {
+  const input = createReadStream(sidecarPath, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
+  try {
+    for await (const line of lines) {
+      if (!line.includes(PMT_LINE)) continue;
+      // 録画中は最後の行が書きかけのことがある。読めない行は飛ばす (観る画面を開けなくしない)
+      let placed: PlacedMessage;
+      try {
+        placed = JSON.parse(line) as PlacedMessage;
+      } catch {
+        continue;
+      }
+      const { message } = placed;
+      if (message.type === "pmt" && autoStarts(message.components)) return true;
+    }
+    return false;
+  } finally {
+    // 途中でやめたとき、readline を閉じるだけではファイルが閉じないことがある
+    lines.close();
+    input.destroy();
+  }
 }
 
 /** サイドカーを読む。無ければ空 (データ放送を持たない録画・古い録画) */

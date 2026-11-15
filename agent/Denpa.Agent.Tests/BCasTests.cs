@@ -77,7 +77,7 @@ public class BCasTests
         return response;
     }
 
-    /// <summary>送られてきた APDU の頭 (CLA INS) で答えを決める接続</summary>
+    /// <summary>送られてきた APDU の先頭 (CLA INS) で応答を決める接続</summary>
     private sealed class FakeLink(string name, Func<byte[], byte[]>? ecm = null) : ICardLink
     {
         private int _busy;
@@ -90,6 +90,7 @@ public class BCasTests
         public Func<byte[]> Int { get; set; } = () => IntResponse();
         public Func<byte[]> Idi { get; set; } = () => IdiResponse(CardNumber);
         public Func<byte[], byte[]>? Confirm { get; set; }
+        public Func<byte[], byte[]>? Emm { get; set; }
 
         public byte[] Reset()
         {
@@ -113,6 +114,7 @@ public class BCasTests
                     0x32 => Idi(),
                     0x34 => (ecm ?? (_ => EcmResponse()))(sent),
                     0x3c => (Confirm ?? (_ => ConfirmResponse()))(sent),
+                    0x36 => (Emm ?? (_ => ConfirmResponse(0x2100)))(sent),
                     _ => [0x6d, 0x00],
                 };
             }
@@ -136,7 +138,7 @@ public class BCasTests
     private static int EcmsSent(FakeLink link) => link.Sent.Count(apdu => apdu[1] == 0x34);
 
     [Test]
-    public async Task 開くとINTとIDIを読む()
+    public async Task 開くと_INT_と_IDI_を読む()
     {
         var link = new FakeLink("reader");
         using var card = BCas.Open(() => [Candidate(link)]);
@@ -191,7 +193,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 契約確認で短い応答は2回まで送り直す()
+    public async Task 契約確認で短い応答は_2_回まで送り直す()
     {
         var link = new FakeLink("reader");
         var attempts = 0;
@@ -220,14 +222,14 @@ public class BCasTests
     }
 
     [Test]
-    public async Task CardWire_Confirmのパックとアンパック()
+    public async Task CardWire_Confirm_のパックとアンパック()
     {
         var packed = CardWire.Pack(0x0800);
         await Assert.That(packed.Length).IsEqualTo(2);
-        await Assert.That(CardWire.ReadConfirm(packed)).IsEqualTo(0x0800);
+        await Assert.That(CardWire.ReadCode(packed, "契約確認")).IsEqualTo(0x0800);
 
-        var err = Assert.Throws<IOException>(() => CardWire.ReadConfirm([0x08]));
-        await Assert.That(err?.Message).Contains("契約確認の答えが短すぎます");
+        var err = Assert.Throws<IOException>(() => CardWire.ReadCode([0x08], "契約確認"));
+        await Assert.That(err?.Message).Contains("契約確認の応答が短すぎます");
     }
 
     /// <summary>
@@ -235,7 +237,7 @@ public class BCasTests
     /// 48 ビットの符号なしで読み、それを 10 進 16 桁で見せていた
     /// </summary>
     [Test]
-    public async Task カードの番号はlibaribb25と同じ読み方()
+    public async Task カードの番号は_libaribb25_と同じ読み方()
     {
         var link = new FakeLink("reader");
         using var card = BCas.Open(() => [Candidate(link)]);
@@ -257,7 +259,7 @@ public class BCasTests
 
     /// <summary>APDU は <c>90 34 00 00 Lc ECM 00</c>。鍵は応答の 7 バイト目から奇数・偶数の順</summary>
     [Test]
-    public async Task ECMを送って鍵を貰う()
+    public async Task ECM_を送って鍵を受け取る()
     {
         var link = new FakeLink("reader");
         using var card = BCas.Open(() => [Candidate(link)]);
@@ -275,7 +277,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 契約が無くても投げずに返り値で返す()
+    public async Task 契約が無くても例外にせず返り値で返す()
     {
         var link = new FakeLink("reader", _ => EcmResponse(0xa102));
         using var card = BCas.Open(() => [Candidate(link)]);
@@ -284,7 +286,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 短い応答は同じ接続で2回まで送り直す()
+    public async Task 短い応答は同じ接続で_2_回まで送り直す()
     {
         var calls = 0;
         var link = new FakeLink("reader", _ => ++calls < 3 ? [0x90, 0x00] : EcmResponse());
@@ -296,7 +298,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task INTに答えないリーダーは飛ばす()
+    public async Task INT_に応答しないリーダーは飛ばす()
     {
         var empty = new FakeLink("empty") { Int = () => throw new IOException("カードが挿さっていません") };
         var acas = new FakeLink("other") { Int = () => IntResponse(0xa101) };
@@ -310,7 +312,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task どれも駄目なら理由を並べて投げる()
+    public async Task どれも駄目なら理由を並べた例外にする()
     {
         var empty = new FakeLink("empty") { Int = () => throw new IOException("カードが挿さっていません") };
         var error = Assert.Throws<IOException>(() => BCas.Open(() => [Candidate(empty)]));
@@ -321,7 +323,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 接続が切れたら探し直してINTからやり直す()
+    public async Task 接続が切れたら探し直して_INT_からやり直す()
     {
         var first = new FakeLink("first", _ => throw new IOException("USB が外れました"));
         var second = new FakeLink("second");
@@ -338,7 +340,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 繋ぎ直しても駄目なら投げて次の呼び出しでまた探す()
+    public async Task 繋ぎ直しても駄目なら例外にして次の呼び出しでまた探す()
     {
         var broken = new FakeLink("broken", _ => throw new IOException("USB が外れました"));
         var finds = 0;
@@ -366,7 +368,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 同じECMは3秒のあいだカードに聞かない()
+    public async Task 同じ_ECM_は_3_秒のあいだカードに問い合わせない()
     {
         var clock = new FakeClock();
         var link = new FakeLink("reader");
@@ -378,11 +380,11 @@ public class BCasTests
         await Assert.That(EcmsSent(link)).IsEqualTo(1);
         await Assert.That(cached.Code).IsEqualTo(0x0200);
 
-        card.Ecm([.. SampleEcm[..^1], 0xff]);  // 違う ECM は聞く
+        card.Ecm([.. SampleEcm[..^1], 0xff]);  // 違う ECM は問い合わせる
         await Assert.That(EcmsSent(link)).IsEqualTo(2);
 
         clock.Now += TimeSpan.FromSeconds(2);
-        card.Ecm(SampleEcm);  // 古くなったら聞き直す
+        card.Ecm(SampleEcm);  // 古くなったら問い合わせ直す
         await Assert.That(EcmsSent(link)).IsEqualTo(3);
     }
 
@@ -390,20 +392,20 @@ public class BCasTests
     public async Task 同時に呼ばれてもカードには順番に触る()
     {
         var link = new FakeLink("reader");
-        // 時計は止めておく。混んだ CI で 64 本が 3 秒を跨ぐと、覚えた答えが切れて数が合わなくなる
+        // 時計は止めておく。混んだ CI で 64 本が 3 秒を跨ぐと、キャッシュした応答が切れて数が合わなくなる
         using var card = BCas.Open(() => [Candidate(link)], new FakeClock());
 
         var ecms = Enumerable.Range(0, 32).Select(n => new byte[] { 0x80, (byte)n, 0x01, 0x02 }).ToArray();
         await Task.WhenAll(Enumerable.Range(0, 64).Select(n => Task.Run(() => card.Ecm(ecms[n % ecms.Length]))));
 
         await Assert.That(link.Overlapped).IsEqualTo(0);
-        // 同じ ECM を同時に聞かれても、カードに聞くのは 1 回ずつ
+        // 同じ ECM の要求が同時に来ても、カードに問い合わせるのは 1 回ずつ
         await Assert.That(EcmsSent(link)).IsEqualTo(ecms.Length);
     }
 
-    /// <summary>覚えていた答えを返したら、そうと言う (選局の内訳の記録。鍵は同じ)</summary>
+    /// <summary>キャッシュした応答を返したら、そのことを示す (選局の内訳の記録。鍵は同じ)</summary>
     [Test]
-    public async Task 覚えていた答えはそうと言う()
+    public async Task キャッシュした応答はそのことを示す()
     {
         var link = new FakeLink("reader");
         using var card = BCas.Open(() => [Candidate(link)], new FakeClock());
@@ -418,7 +420,7 @@ public class BCasTests
     }
 
     [Test]
-    public async Task 長すぎるECMは送らない()
+    public async Task 長すぎる_ECM_は送らない()
     {
         var link = new FakeLink("reader");
         using var card = BCas.Open(() => [Candidate(link)]);
@@ -428,7 +430,7 @@ public class BCasTests
         await Assert.That(EcmsSent(link)).IsEqualTo(0);
     }
 
-    /// <summary>起動したときに開いておけば、最初の選局はカードを開かずに鍵の素を貰える (LocalCard.Warm)</summary>
+    /// <summary>起動したときに開いておけば、最初の選局はカードを開かずにカードの定数を受け取れる (LocalCard.Warm)</summary>
     [Test]
     public async Task 起動したときに開いたカードを最初の選局で使う()
     {
@@ -452,8 +454,8 @@ public class BCasTests
     }
 
     /// <summary>
-    /// **起動したときに開けなくても、最初の選局は探し直す。** px4d がまだ起きていないだけかもしれないので、
-    /// 断った印を残して <see cref="BCas.RetryAfter"/> のあいだ断り続けてはいけない
+    /// **起動したときに開けなくても、最初の選局は探し直す。** 起動の直後に開けなかっただけで、
+    /// <see cref="BCas.RetryAfter"/> のあいだ断り続けない
     /// </summary>
     [Test]
     public async Task 起動したときに開けなくても最初の選局で探し直す()
@@ -473,5 +475,108 @@ public class BCasTests
         ready = true;
         await Assert.That(local.Init().CaSystemId).IsEqualTo(5);
         await Assert.That(opened).IsEqualTo(2);
+    }
+
+    /// <summary>開けなかったあとは <see cref="BCas.RetryAfter"/> のあいだ探さずに同じ理由で断り、過ぎたら探し直す (時計は差し替えられる)</summary>
+    [Test]
+    public async Task 開けなかったあとは間を置いてから探し直す()
+    {
+        var clock = new FakeClock();
+        var link = new FakeLink("reader");
+        var ready = false;
+        var opened = 0;
+        var local = new LocalCard(open: () =>
+        {
+            opened++;
+            return ready ? BCas.Open(() => [Candidate(link)]) : throw new IOException("カードリーダーが見つかりません");
+        }, clock: clock);
+
+        Assert.Throws<IOException>(() => local.Init());
+        ready = true;
+        clock.Now += BCas.RetryAfter - TimeSpan.FromSeconds(1);
+        Assert.Throws<IOException>(() => local.Init());
+        await Assert.That(opened).IsEqualTo(1);
+
+        clock.Now += TimeSpan.FromSeconds(1);
+        await Assert.That(local.Init().CaSystemId).IsEqualTo(5);
+        await Assert.That(opened).IsEqualTo(2);
+    }
+
+    /*
+     * EMM 受信 (90 36)。契約の更新を渡す
+     */
+    private static readonly byte[] SamplePayload = [0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0x12, .. Enumerable.Range(0, 0x12).Select(b => (byte)b)];
+
+    [Test]
+    public async Task EMM_は_90_36_で送り_返り値は_5_から_6_バイト目で読む()
+    {
+        var link = new FakeLink("reader") { Emm = _ => ConfirmResponse(0xA107) };
+        using var card = BCas.Open(() => [Candidate(link)]);
+
+        var code = card.Emm(SamplePayload);
+
+        await Assert.That(code).IsEqualTo(0xA107);
+        var apdu = link.Sent.Last();
+        await Assert.That(apdu[..5]).IsEquivalentTo(new byte[] { 0x90, 0x36, 0x00, 0x00, (byte)SamplePayload.Length });
+        await Assert.That(apdu[5..^1]).IsEquivalentTo(SamplePayload);
+        await Assert.That(apdu[^1]).IsEqualTo((byte)0x00);
+        await Assert.That(apdu.Length).IsEqualTo(SamplePayload.Length + 6);
+    }
+
+    [Test]
+    public async Task EMM_の短い応答は_2_回まで送り直す()
+    {
+        var link = new FakeLink("reader");
+        var attempts = 0;
+        link.Emm = _ => ++attempts < 3 ? [0x90, 0x00] : ConfirmResponse(0x2100);
+        using var card = BCas.Open(() => [Candidate(link)]);
+
+        await Assert.That(card.Emm(SamplePayload)).IsEqualTo(0x2100);
+        await Assert.That(attempts).IsEqualTo(3);
+
+        // 3 回とも短ければ、繋ぎ直さずに断る
+        attempts = 0;
+        link.Emm = _ =>
+        {
+            attempts++;
+            return [0x90, 0x00];
+        };
+        Assert.Throws<CardRefusedException>(() => card.Emm(SamplePayload));
+        await Assert.That(attempts).IsEqualTo(3);
+        await Assert.That(link.Resets).IsEqualTo(1);
+    }
+
+    [Test]
+    [Arguments(12)]
+    [Arguments(256)]
+    public async Task 長さのおかしい_EMM_は送らない(int length)
+    {
+        var link = new FakeLink("reader");
+        using var card = BCas.Open(() => [Candidate(link)]);
+
+        Assert.Throws<IOException>(() => card.Emm(new byte[length]));
+        await Assert.That(link.Sent.Count(apdu => apdu[1] == 0x36)).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task EMM_を受け入れたらキャッシュした_ECM_の応答を捨てる()
+    {
+        var link = new FakeLink("reader");
+        using var card = BCas.Open(() => [Candidate(link)]);
+
+        card.Ecm(SampleEcm);
+        card.Ecm(SampleEcm);
+        await Assert.That(EcmsSent(link)).IsEqualTo(1);
+
+        // 受け入れなかったときはキャッシュを残す
+        link.Emm = _ => ConfirmResponse(0xA102);
+        card.Emm(SamplePayload);
+        card.Ecm(SampleEcm);
+        await Assert.That(EcmsSent(link)).IsEqualTo(1);
+
+        link.Emm = _ => ConfirmResponse(0x2100);
+        card.Emm(SamplePayload);
+        card.Ecm(SampleEcm);
+        await Assert.That(EcmsSent(link)).IsEqualTo(2);
     }
 }

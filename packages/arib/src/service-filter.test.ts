@@ -25,7 +25,7 @@ function payload(pid: number, counter = 0): Uint8Array {
   return out;
 }
 
-/** 実機の TSID。PAT の頭に書いてある */
+/** 実機の TSID。PAT の先頭に書いてある */
 const TSID = 0x7fe1;
 
 const pat = () =>
@@ -126,7 +126,7 @@ describe("局の選り分け", () => {
    * **ここが目的。** 丸ごと通すと ffmpeg には 2 つのプログラムが見えて、
    * 1 つ目のつもりで読んだ値が 2 つ目のものだったりする
    */
-  test("PAT はその局1つだけに書き直す", () => {
+  test("PAT はその局 1 つだけに書き直す", () => {
     const filter = new ServiceFilter(MX1);
     const out = filter.filter(Uint8Array.from([...pat(), ...pmt1()]));
     // PAT は 1 パケットに収まる。先頭に出てくるはず
@@ -148,6 +148,25 @@ describe("局の選り分け", () => {
    * テレ朝の TVer リンクはこれを TVer のサーバへ送り、無いと `DT-RE` で止まる
    * ([server/live.ts](https://github.com/danything/denpa/blob/main/src/lib/server/live.ts) の `programInfo`)
    */
+  test("PMT の PID が同じまま TSID が変わった PAT も、書き直す PAT に写す", () => {
+    const filter = new ServiceFilter(MX1);
+    filter.filter(Uint8Array.from([...pat(), ...pmt1()]));
+    const next = packetize(
+      0x0000,
+      patSection(
+        [
+          [MX1, PMT1],
+          [MX2, PMT2],
+        ],
+        0x7fe2,
+      ),
+    );
+    const out = filter.filter(Uint8Array.from(next));
+    expect(pids(out)[0]).toBe(0x0000);
+    // section の 3〜4 バイト目が TSID
+    expect((out[5 + 3]! << 8) | out[5 + 4]!).toBe(0x7fe2);
+  });
+
   test("中継の番号 (TSID) を PAT から覚える", () => {
     const filter = new ServiceFilter(MX1);
     // 読む前は分からない。**分からないことを 0 と言わない**
@@ -166,7 +185,7 @@ describe("局の選り分け", () => {
   });
 
   /*
-   * **選局したての頭を捨てない。** 捨てると PMT より前に始まった I フレームを失い、次の GOP (0.5 秒) まで
+   * **選局したての先頭を捨てない。** 捨てると PMT より前に始まった I フレームを失い、次の GOP (0.5 秒) まで
    * 映像が出ない。音も PMT のあとから貯め始めることになる (MPEG-2 のまま観る経路の、押してから映るまで)
    */
   test("PMT を読む前に届いた自局の ES は取っておき、PMT の後ろに届いた順で出す", () => {
@@ -210,6 +229,77 @@ describe("局の選り分け", () => {
     // 残っているのは新しいほう (いちばん最後に届いたもので終わる)
     expect(out[out.length - PACKET + 3]! & 0x0f).toBe((many - 1) & 0x0f);
   });
+
+  /*
+   * エージェントは、覚えた PAT・PMT で流し始めたとき、その 1 組を先頭に差し込む (docs/agent.md「素の TS を流す」)。
+   * 差し込んだぶんのあとに本物の PAT・PMT が続き、連続性カウンタは本物とつながらない
+   */
+  test("先頭に差し込んだ PAT・PMT で通し始め、あとから来た本物の PAT・PMT (連続性カウンタが飛ぶ) も読む", () => {
+    const filter = new ServiceFilter(MX1);
+    const head = filter.filter(
+      Uint8Array.from([...pat(), ...pmt1(), ...payload(0x100, 5)]),
+    );
+    expect(pids(head)).toEqual([0x0000, PMT1, 0x100]);
+
+    // 同じ本物の PAT・PMT。カウンタは差し込んだぶんから飛ぶ
+    const same = filter.filter(
+      Uint8Array.from([
+        ...packetize(
+          0x0000,
+          patSection(
+            [
+              [MX1, PMT1],
+              [MX2, PMT2],
+            ],
+            TSID,
+          ),
+          9,
+        ),
+        ...packetize(
+          PMT1,
+          programMap(
+            MX1,
+            0x100,
+            [
+              [0x02, 0x100],
+              [0x0f, 0x110],
+            ],
+            0x900,
+          ),
+          12,
+        ),
+        ...payload(0x100, 6),
+        ...payload(0x110, 6),
+      ]),
+    );
+    expect(pids(same)).toEqual([0x0000, PMT1, 0x100, 0x110]);
+    expect(filter.streams).toBe("2:256,15:272");
+  });
+
+  test("先頭に差し込んだ PMT とあとから来た本物の PMT が違えば、通す PID を本物のものに入れ替える", () => {
+    const filter = new ServiceFilter(MX1);
+    filter.filter(Uint8Array.from([...pat(), ...pmt1()]));
+    expect(filter.streams).toBe("2:256,15:272");
+
+    // 本物では音声の PID が変わっていた
+    const out = filter.filter(
+      Uint8Array.from([
+        ...packetize(
+          PMT1,
+          programMap(MX1, 0x100, [
+            [0x02, 0x100],
+            [0x0f, 0x111],
+          ]),
+          7,
+        ),
+        ...payload(0x110, 1),
+        ...payload(0x111, 1),
+        ...payload(0x100, 1),
+      ]),
+    );
+    expect(pids(out)).toEqual([PMT1, 0x111, 0x100]);
+    expect(filter.streams).toBe("2:256,15:273");
+  });
 });
 
 /*
@@ -238,7 +328,7 @@ describe("コピー禁止", () => {
     expect(filter.copyNever).toBe(false);
   });
 
-  test("番組ぜんたいの記述子で禁止なら禁止。1世代のみは禁止ではない", () => {
+  test("番組ぜんたいの記述子で禁止なら禁止。1 世代のみは禁止ではない", () => {
     const filter = new ServiceFilter(MX1);
     filter.filter(
       Uint8Array.from([...pat(), ...pmt(copyControlDescriptor(0b11))]),
@@ -337,7 +427,7 @@ describe("並びが変わったか", () => {
   const map = (streams: [number, number][]) =>
     packetize(PMT1, programMap(MX1, 0x100, streams));
 
-  test("最初の PMT では変わったことにしない。変わったら1回だけ true、データ放送の増減では false", () => {
+  test("最初の PMT では変わったことにしない。変わったら 1 回だけ true、データ放送の増減では false", () => {
     const filter = new ServiceFilter(MX1);
     const watch = new StreamsWatch();
     filter.filter(pat());

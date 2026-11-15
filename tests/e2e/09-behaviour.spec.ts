@@ -26,7 +26,7 @@ test.describe("操作したときの反応", () => {
   });
 
   /**
-   * **番組の詳細は番組名を名前にし、開いたら焦点が中へ移り、閉じたら押したマスへ戻る** (読み上げとキーボードで迷わない)
+   * **番組の詳細は番組名を名前にし、開いたら焦点が中へ移り、Tab でも外へ出ず、閉じたら押したマスへ戻る** (読み上げとキーボードで迷わない)
    */
   test("番組の詳細は番組名で読まれ、焦点が中へ移って閉じると戻る", async ({
     page,
@@ -44,6 +44,19 @@ test.describe("操作したときの反応", () => {
     expect(
       await detail.evaluate((node) => node.contains(document.activeElement)),
     ).toBe(true);
+
+    // Tab を押し続けても、焦点は後ろのページ (番組表のマス) へ出ない。末尾から先はブラウザの外 (body) を挟んで中へ戻る
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      expect(
+        await detail.evaluate(
+          (node) =>
+            document.activeElement === null ||
+            document.activeElement === document.body ||
+            node.contains(document.activeElement),
+        ),
+      ).toBe(true);
+    }
 
     await page.keyboard.press("Escape");
     await expect(detail).toBeHidden();
@@ -104,7 +117,7 @@ test.describe("操作したときの反応", () => {
    *
    * 1 件ぶんの取得を待ってから出していた頃は、遠い回線 (車のタブレット) で押してから一拍以上
    * 何も起きなかった。取得を 3 秒遅らせて、押してから 2 コマ以内に箱が見えることと、
-   * 届いたら音声・映像の札が足されることを見る。
+   * 届いたら音声・映像のラベルが足されることを見る。
    * サービスワーカーは止める (動いていると取得があちら経由になり、`page.route` で遅らせられない)
    */
   test.describe("詳細の開き方", () => {
@@ -180,7 +193,7 @@ test.describe("操作したときの反応", () => {
      */
     const hours = grid.locator("div.hour > span.hour-label");
     /*
-     * 見えている表の上端は左上の角 (局名の行の頭)。広い画面では箱がヘッダーの裏まで伸びていて、
+     * 見えている表の上端は左上の角 (局名の行の先頭)。広い画面では箱がヘッダーの裏まで伸びていて、
      * 箱の上端はヘッダーと操作の 1 行に隠れている (docs/design.md の「浮かせ方」)
      */
     const frame = (await grid.locator(".corner").boundingBox())!;
@@ -272,7 +285,7 @@ test.describe("操作したときの反応", () => {
       box.y + box.height,
       "下が画面からはみ出している",
     ).toBeLessThanOrEqual(view.height);
-    // タイトルは箱の中にある。中身が長くても、頭から読める
+    // タイトルは箱の中にある。中身が長くても、先頭から読める
     const title = (await detail.locator("h3").boundingBox())!;
     expect(title.y).toBeGreaterThanOrEqual(box.y);
   });
@@ -323,7 +336,7 @@ test.describe("操作したときの反応", () => {
     await expect(detail).toBeHidden();
   });
 
-  test("スマホの幅でも番組表の操作は1行で、表の上・下のタブのすぐ上に浮く", async ({
+  test("スマホの幅でも番組表の操作は 1 行で、表の上・下のタブのすぐ上に浮く", async ({
     page,
   }) => {
     // 操作を 2 段に積んだり表の下を空けたりすると、1 画面に入る時間が減る。親指が届くよう下に置く
@@ -408,7 +421,7 @@ test.describe("操作したときの反応", () => {
     await expect(page.getByTestId("guide-more")).toBeHidden();
     const toolbar = page.getByTestId("guide-toolbar");
     const bar = (await toolbar.boundingBox())!;
-    // 上の余白 (画面の頭の余白 `--dp-page-top`。浮いたヘッダーのぶん) を除いて、1 行なら 70px ほど。2 行に折れると 110px を超える
+    // 上の余白 (画面の先頭の余白 `--dp-page-top`。浮いたヘッダーのぶん) を除いて、1 行なら 70px ほど。2 行に折れると 110px を超える
     const top = await toolbar.evaluate((el) =>
       Number.parseFloat(getComputedStyle(el).paddingTop),
     );
@@ -445,7 +458,7 @@ test.describe("操作したときの反応", () => {
       Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
     );
     const room = await grid.evaluate((el) => el.scrollHeight - el.clientHeight);
-    // 表の頭は 4:00、5 分で 0.75rem
+    // 表の先頭は 4:00、5 分で 0.75rem
     const at = (hour: number) => Math.min(room, (hour - 4) * 12 * 0.75 * rem);
     await page.getByTestId("guide-jump-6").click();
     await expect
@@ -458,7 +471,7 @@ test.describe("操作したときの反応", () => {
     // 操作の 1 行は動かない (畳まない)
     const top = (await page.getByTestId("guide-toolbar").boundingBox())!.y;
     await page.getByTestId("guide-jump-now").click();
-    const line = page.getByTestId("now-line");
+    const line = page.getByTestId("now-mark");
     await expect(line).toBeInViewport();
     expect((await page.getByTestId("guide-toolbar").boundingBox())!.y).toBe(
       top,
@@ -474,7 +487,7 @@ test.describe("操作したときの反応", () => {
   }) => {
     await page.setViewportSize({ width: 1366, height: 768 });
     const grid = page.getByTestId("guide-grid");
-    // 表の頭は 4:00、5 分で 0.75rem
+    // 表の先頭は 4:00、5 分で 0.75rem
     const at = (hour: number) =>
       grid.evaluate(
         (el, hour) =>
@@ -538,7 +551,7 @@ test.describe("操作したときの反応", () => {
     page,
   }) => {
     await page.setViewportSize({ width: 900, height: 800 });
-    // ライブの種別のタブ (並びの印) と、ホームの頭の 1 行のチップ (自分の `::after`)
+    // ライブの種別のタブ (並びの印) と、ホームの先頭の 1 行のチップ (自分の `::after`)
     for (const [url, selector] of [
       ["/live", '[data-testid^="live-type-"][aria-pressed="true"]'],
       ["/", '[data-testid="filter-chip"][aria-pressed="true"]'],
@@ -557,20 +570,21 @@ test.describe("操作したときの反応", () => {
   }) => {
     await goto(page, "/guide?type=GR");
     /*
-     * 番組表のデータに左右されないよう、1 つのマスに放送の時刻 (`--s` / `--e`) を置き直して比べる
+     * 番組表のデータに左右されないよう、1 つのマスにマスの上端・下端 (`--s` / `--e`) と実際の終わり (`--end`) を置き直して比べる
      * (表のいま `--now` の前後に掛かれば放送中、前で終われば終わった番組)。ほかのスペックが番組表を
      * 入れ替えると、いま放送中の番組が無いことがある
      */
-    const shade = (offset: { s: number; e: number }) =>
+    const shade = (offset: { s: number; e: number; end?: number }) =>
       page
         .getByTestId("program-button")
         .first()
-        .evaluate((el, { s, e }) => {
+        .evaluate((el, { s, e, end = e }) => {
           const now = parseFloat(
             getComputedStyle(el).getPropertyValue("--now"),
           );
           el.style.setProperty("--s", String(now + s));
           el.style.setProperty("--e", String(now + e));
+          el.style.setProperty("--end", String(now + end));
           // 覆いはマスの背景の 1 枚目 (`linear-gradient` の色)
           return getComputedStyle(el).backgroundImage;
         }, offset);
@@ -579,6 +593,9 @@ test.describe("操作したときの反応", () => {
     const airing = await shade({ s: -1, e: 1 });
     const done = await shade({ s: -2, e: -1 });
     expect(alpha(airing)).toBeLessThan(alpha(done));
+    // 終わったかどうかは実際の終わりで決める。マスの下端がまだ先でも、終わっていれば終わった番組の濃さ (#2387)
+    const ended = await shade({ s: -2, e: 1, end: -0.2 });
+    expect(alpha(ended)).toBe(alpha(done));
   });
 
   test("ジャンルの見本はマスと同じ色で、押すとそのジャンルだけ目立つ", async ({

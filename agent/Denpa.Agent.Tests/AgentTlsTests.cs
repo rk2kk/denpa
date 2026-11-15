@@ -17,21 +17,21 @@ public class AgentTlsTests
     private static string Fresh() => Directory.CreateTempSubdirectory("denpa-tls-").FullName;
 
     [Test]
-    public async Task 指紋はDERのSHA256を小文字の16進で()
+    public async Task 指紋は_DER_の_SHA256_を小文字の_16_進で()
     {
         await Assert.That(AgentTls.FingerprintOf(Encoding.UTF8.GetBytes("hello")))
             .IsEqualTo("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
     }
 
     [Test]
-    public async Task proofは役ごとにHMACをbase64urlで()
+    public async Task proof_は役ごとに_HMAC_を_base64url_で()
     {
         await Assert.That(AgentTls.Proof("token-for-test", "client", A, D)).IsEqualTo("z6PeESb_y_HVNx-B8hOdDACN033EGYtjnwWMZtIUKqQ");
         await Assert.That(AgentTls.Proof("token-for-test", "agent", A, D)).IsEqualTo("-fURODg1aztS2s1UNSJlvtKUoC-LYhgLeScEBWtY-mk");
     }
 
     [Test]
-    public async Task 合言葉は32バイトをbase64urlで43字()
+    public async Task 合言葉は_32_バイトを_base64url_で_43_字()
     {
         var token = AgentTls.NewToken();
         await Assert.That(token.Length).IsEqualTo(43);
@@ -94,7 +94,7 @@ public class AgentTlsTests
     }
 
     [Test]
-    public async Task 組んだ相手だけ通し組んでいなければ組むAPIだけ受ける()
+    public async Task 組んだ相手だけ通し組んでいなければ組む_API_だけ受ける()
     {
         var tls = AgentTls.Load(Fresh(), "t");
         tls.Clients.Add(D);
@@ -111,7 +111,7 @@ public class AgentTlsTests
     }
 
     [Test]
-    public async Task 合言葉から作ったproofなら組めてこちらのproofを返す()
+    public async Task 合言葉から作った_proof_なら組めてこちらの_proof_を返す()
     {
         var tls = AgentTls.Load(Fresh(), "token-for-test");
         var proof = AgentTls.Proof("token-for-test", "client", tls.Fingerprint, D);
@@ -146,12 +146,33 @@ public class AgentTlsTests
         await Assert.That(tls.Clients.Count).IsEqualTo(0);
     }
 
+
+    [Test]
+    public async Task 組んだ_denpa_が呼べば登録を消し_ほかの登録は残す()
+    {
+        var tls = AgentTls.Load(Fresh(), "t");
+        tls.Clients.Add(D);
+        tls.Clients.Add(A);
+
+        // 組んだ相手からの DELETE は普通の API と同じく通す (組んでいなければ 403)
+        await Assert.That(tls.Decide(D, "DELETE", "/denpa/pair")).IsEqualTo(AgentTls.Gate.Pass);
+        await Assert.That(tls.Decide("ff", "DELETE", "/denpa/pair")).IsEqualTo(AgentTls.Gate.Refuse);
+
+        await Assert.That(tls.Unpair(D)).IsTrue();
+        await Assert.That(tls.Clients.Contains(D)).IsFalse();
+        await Assert.That(File.ReadAllText(Path.Combine(tls.Dir, "clients"))).IsEqualTo(A + "\n");
+        // 2 度目と名乗りの無い相手は何もしない
+        await Assert.That(tls.Unpair(D)).IsFalse();
+        await Assert.That(tls.Unpair(null)).IsFalse();
+        await Assert.That(tls.Clients.Count).IsEqualTo(1);
+    }
+
     /*
      * 組む API は組む前の相手からも受けるので、本文は要る大きさ (130 バイトほど) に余裕を足したところで切る。
      * 越えた本文は上限の 1 バイト先までしか読まない
      */
     [Test]
-    public async Task 組むAPIの本文は上限までしか読まない()
+    public async Task 組む_API_の本文は上限までしか読まない()
     {
         var proof = AgentTls.Proof("token-for-test", "client", A, D);
         var real = Encoding.UTF8.GetBytes(new JsonObject { ["client"] = D, ["proof"] = proof }.ToJsonString());

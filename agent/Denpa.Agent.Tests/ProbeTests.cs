@@ -6,14 +6,14 @@ namespace Denpa.Agent.Tests;
 /*
  * 実機で確かめる小道具 (--tune・--dt295-probe) のうち、偽物で確かめられるところ。
  *
- * **固まったら失敗にする** (Px4TunerTests と同じ)。各テストは最初に `await Task.Yield()` する
+ * **戻らなくなったら時間切れで失敗にする。** 各テストは最初に `await Task.Yield()` する
  */
 [Timeout(30_000)]
 public class ProbeTests
 {
     /*
      * `--tune` は TS が来なくても `--seconds` で戻る。読み出し側 (DeviceStream) は TS が来ない間は戻らないので、
-     * 決めた時間で降りる合図を渡している (Probe.Measure)
+     * 決めた時間で読み出しを抜ける合図を渡している (Probe.Measure)
      */
     [Test]
     public async Task tune_は_TS_が来なくても決めた時間で戻る()
@@ -27,22 +27,22 @@ public class ProbeTests
         clock.Stop();
 
         await Assert.That(decodedMs).IsNull();
-        // 読み出し側は 200ms ごとに起きて合図を見る
+        // 読み出し側は 200 ms ごとに合図を確かめる
         await Assert.That(clock.ElapsedMilliseconds >= 1000 && clock.ElapsedMilliseconds < 2000).IsTrue()
-            .Because($"{clock.ElapsedMilliseconds}ms 掛かった");
+            .Because($"{clock.ElapsedMilliseconds} ms かかった");
     }
 
     /*
-     * `--tune` の Mbps は、`--dt295-probe` と同じく最初の読みから最後の読みまでで割る。
+     * `--tune` の Mbps は、`--dt295-probe` と同じく最初の読み出しから最後の読み出しまでで割る。
      * 最初の TS が遅れても、決めた秒数で割ったときのように少なく出ない
      */
     [Test]
-    public async Task tune_の_Mbps_は最初の読みから最後の読みまでで割る()
+    public async Task tune_の_Mbps_は最初の読み出しから最後の読み出しまでで割る()
     {
         await Task.Yield();
-        // 最初の読み 1 MB のあと、2 秒で 5 MB 読んだ (20 Mbps)。決めた秒数 (たとえば 10 秒) には左右されない
+        // 最初の読み出し 1 MB のあと、2 秒で 5 MB 読んだ (20 Mbps)。決めた秒数 (たとえば 10 秒) には左右されない
         await Assert.That(Probe.Rate(6_000_000, 1_000_000, TimeSpan.FromSeconds(2))).IsEqualTo(20.0);
-        // 読みが 1 回だけなら測れない
+        // 読み出しが 1 回だけなら測れない
         await Assert.That(Probe.Rate(1_000_000, 1_000_000, TimeSpan.Zero)).IsNull();
     }
 
@@ -51,7 +51,7 @@ public class ProbeTests
      * 開くときの読み書き (窓の切り替え・レジスタの読み書き) が届けばよい
      */
     [Test]
-    public async Task dt295_probe_の_trace_は機材を開くときの読み書きを1行ずつ渡す()
+    public async Task dt295_probe_の_trace_は機材を開くときの読み書きを_1_行ずつ渡す()
     {
         await Task.Yield();
         var fake = new Dt295Fake();

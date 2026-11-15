@@ -1,7 +1,7 @@
 # 立てる
 
-README の手順の細かいところ。用意するもの、入れ方 (1 行・Compose・1 コンテナ・Helm・Talos Linux)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
-Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [install-windows.md](install-windows.md) に。使う前に [使ってよい範囲](../README.md#使ってよい範囲) を読んでください。
+README の手順の細かいところ。用意するもの、入れ方 (1 行・Compose・1 コンテナ・Helm・Talos Linux・Android)、誰を通すか、前段 (リバースプロキシ) の後ろに置くとき。
+Mac と Windows の入れ方の中身は [install-mac.md](install-mac.md) と [install-windows.md](install-windows.md) に、Android の端末で動かすなら [install-android.md](install-android.md) に。使う前に [使ってよい範囲](../README.md#使ってよい範囲) を読んでください。
 
 ## 用意するもの
 
@@ -32,7 +32,7 @@ irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1 | iex   #
 - **Linux** (amd64 / arm64): 全部 Docker Compose。`~/denpa` に compose.prod.yml を `compose.yml` として置いて起動します
 - **Mac** (Apple Silicon): denpa 本体もエージェントも Mac の上で直接 (root の LaunchDaemon)。Docker は要りません。sudo で流します ([install-mac.md](install-mac.md))
 - **Windows** (x64): denpa 本体もエージェントも Windows の上で直接 (タスク スケジューラの SYSTEM のタスク)。WSL・Docker Desktop は要りません。管理者の PowerShell で流します。
-  チューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J と PIXELA PIX-DT295 (試験的)。ドライバは Zadig で WinUSB に ([install-windows.md](install-windows.md))
+  チューナーは IT930x の機材 (PX-MLT5 系・PX-Q3U4 など) と PX-S1UD と Sony CECH-ZD1 J と PIXELA PIX-DT295。ドライバは `install.ps1 -WinUsb` で WinUSB に替える ([install-windows.md](install-windows.md#チューナーのドライバを-winusb-に替える))
 - **Docker は入れません** (Linux)。無ければ入れ方 (<https://get.docker.com>) を示して止まります
 - **入口は [genkan](https://github.com/danything/genkan)** (ホスト名で振り分けるリバースプロキシ。Linux)。
   動いていればそれを使い、無ければ 80 と 443 が空いているときだけ `~/genkan` に入れて <http://denpa.localhost> で開きます。
@@ -68,8 +68,7 @@ docker compose up -d
 (NAS や、ほかの仕組みに載せるとき) 向け。中身は 2 つのイメージと同じです。
 
 ```sh
-docker run -d --name denpa --restart unless-stopped --stop-timeout 21900 \
-  --cap-add SYS_RESOURCE \
+docker run -d --name denpa --hostname "$(hostname)" --restart unless-stopped --stop-timeout 21900 \
   --device-cgroup-rule 'c 189:* rmw' --device-cgroup-rule 'c 212:* rmw' \
   -v /dev/bus/usb:/dev/bus/usb -v /dev/dvb:/dev/dvb \
   -e TRUSTED_NETWORKS=192.168.0.0/16,10.0.0.0/8 \
@@ -80,10 +79,10 @@ docker run -d --name denpa --restart unless-stopped --stop-timeout 21900 \
 - エージェントの設定 (`tuners.json` / `channels.json`) は `/config`、DB は `/data`、録画は `/media` の下
   (元の TS は `raw`、エンコードしたものは `encoded`)。前のバージョンから上げるときは [config.md](config.md#置き場を変えた-前のバージョンから上げるとき)
 - 本体とエージェントが組むときの合言葉 ([agent.md](agent.md)) は、入口が `/config/tls/pair-token` に無いときだけ作って両方に渡します
-- `--privileged` は要りません。USB (189) と DVB (212) のデバイスを開く許可と、pipe を広げる
-  `SYS_RESOURCE` だけ渡します。デバイスはディレクトリごと見せるので、挿し直しても再起動は要りません
+- `--hostname` は、設定の「受信」の「エージェント」に出す名前の元です。無いとコンテナの ID になり、コンテナを作り直すたびに変わります
+- `--privileged` は要りません。USB (189) と DVB (212) のデバイスを開く許可だけ渡します。デバイスはディレクトリごと見せるので、挿し直しても再起動は要りません
 - 止めるときは録画の終わりを待つので、`--stop-timeout` を長くしておきます (compose の `stop_grace_period` と同じ)。
-  どちらかのプロセスが落ちたらコンテナごと終わり、起こし直しは `--restart` に任せます
+  どちらかのプロセスが落ちたらコンテナごと終わり、起動し直すのは `--restart` の役目です
 
 ### Helm (Kubernetes)
 
@@ -99,9 +98,10 @@ helm install denpa oci://ghcr.io/danything/charts/denpa \
 ```
 
 チューナーを挿した機械にエージェントだけ置き、本体を別の所で動かすなら
-`oci://ghcr.io/danything/charts/denpa-agent` を使い、本体側は `TUNER_AGENT_URL` でそこを指します
-([agent.md](agent.md#エージェントは別イメージ別プロセス))。`TUNER_AGENT_URL` には `#pair=<合言葉>` を付けます。
+`oci://ghcr.io/danything/charts/denpa-agent` を使い、本体の設定の「受信」の「エージェントを追加」で登録するか、`TUNER_AGENT_URL` でそこを指します
+([agent.md](agent.md#エージェントは別イメージ別プロセス))。`TUNER_AGENT_URL` には `#pair=<合言葉>` を付けます。組んだあとも `#pair=` は消しません ([上げるときの注意](config.md#エージェントを-db-に持つようにした-前のバージョンから上げるとき))。
 合言葉は chart が Secret `tuner-agent-pair` に作り、読み方は `helm install` のあとに出ます。
+Pod のネットワークには LAN のマルチキャストが届かない (推定) ので、「エージェントを追加」の候補には出ません ([agent.md](agent.md#lan-で見つける))。
 本体の chart はエージェントと組む合言葉を自分で作って両方に渡すので、何も書かなくて構いません
 (ArgoCD などの GitOps で入れるときは、合言葉を SOPS などで別の Secret に持ち、その名前を `agent.pairSecret` に書きます。
 ArgoCD はクラスタを見ずに描くので chart に作らせると値が変わり続け、Secret を同期しない設定ならそもそも作られません。
@@ -134,6 +134,13 @@ PT3 を挿した機械を Talos Linux の 1 台のクラスタにして、OS の
 curl -fsSL https://raw.githubusercontent.com/danything/denpa/main/talos/install.sh | sh -s -- --node <IP>
 ```
 
+### Android の端末で動かす
+
+チューナーを挿した Android の端末 (Android 10 以上、arm64) の 1 台で、denpa 本体とチューナーエージェントを動かせます
+(実機では確かめていない)。別の機械で動かす denpa のチューナーエージェントにもできます。リリースの `denpa-<バージョン>-android-arm64.apk` を入れ、
+通知の「URL をコピー」で取った `http://<端末のアドレス>:3000` を同じ LAN のブラウザで開きます。エージェントとして足すなら、通知の「QR を表示」で出る QR を denpa の設定の「エージェントを追加」で読ませます (登録用の URL を貼っても、`TUNER_AGENT_URL` に書いても足せる)。
+手順は [install-android.md](install-android.md)。
+
 ### イメージのタグ
 
 `latest` はリリースのたびに新しくなります。バージョンを固定するなら `2.7.0` のように書きます
@@ -141,8 +148,8 @@ curl -fsSL https://raw.githubusercontent.com/danything/denpa/main/talos/install.
 
 ### 配布物を確かめる
 
-リリースのイメージ (`denpa`・`denpa-agent`・`denpa-aio`) と、Mac・Windows 用のエージェントと denpa 本体
-(リリースに添えた `denpa-agent-…-darwin-arm64.tar.gz`・`denpa-agent-…-windows-x64.zip`・`denpa-…-darwin-arm64.tar.gz`・`denpa-…-windows-x64.zip`) には、
+リリースのイメージ (`denpa`・`denpa-agent`・`denpa-aio`) と、Mac・Windows 用のエージェントと denpa 本体と、Android のアプリ
+(リリースに添えた `denpa-agent-…-darwin-arm64.tar.gz`・`denpa-agent-…-windows-x64.zip`・`denpa-…-darwin-arm64.tar.gz`・`denpa-…-windows-x64.zip`・`denpa-…-android-arm64.apk`) には、
 **出所の証明 (attestation)** を付けています (2.13.0 から)。このリポジトリのリリースの
 workflow が作ったものかを、[GitHub CLI](https://cli.github.com/) で確かめられます。
 

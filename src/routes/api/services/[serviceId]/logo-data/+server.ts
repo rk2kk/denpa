@@ -1,5 +1,6 @@
 import { error } from "@sveltejs/kit";
 
+import { parseId } from "#lib/id.js";
 import { readLearnedLogo } from "#lib/server/logo-data.js";
 
 /**
@@ -13,7 +14,9 @@ import { readLearnedLogo } from "#lib/server/logo-data.js";
  * 線の向きの揃い方を明るさにした白黒 (縁が白)。原寸は小さいので、出す側で拡大する。
  */
 export function GET({ params }) {
-  const logo = readLearnedLogo(Number(params.serviceId));
+  const serviceId = parseId(params.serviceId);
+  if (serviceId === null) error(400, "局 ID が不正です");
+  const logo = readLearnedLogo(serviceId);
   if (logo === null) error(404, "まだロゴを覚えていません");
 
   return new Response(new Uint8Array(logo.png), {
@@ -21,7 +24,6 @@ export function GET({ params }) {
       "Content-Type": "image/png",
       // エンコードするたびに書き直す。画面は書いた時刻を URL に付けて取り直す
       "Cache-Control": "no-cache",
-      "X-Logo-Learned-At": String(logo.learnedAt),
     },
   });
 }

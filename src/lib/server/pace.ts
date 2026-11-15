@@ -5,7 +5,7 @@
  *
  * | 経路 | `backlog` | `dropped` | `speed` |
  * | --- | --- | --- | --- |
- * | WebSocket (ライブ・追っかけ) | 接続の送れずに溜まっている量 (`ws.ts`) | 溜まりすぎて捨てた映像の塊の数 | 出した映像の時刻の進み ÷ 実時間 |
+ * | WebSocket (ライブ・追っかけ) | 接続の送れずに溜まっている量 (`ws.ts`) | 溜まりすぎて捨てた塊 (映像と、変換せずに送る TS) の数 | 出した映像の時刻の進み ÷ 実時間 |
  * | HTTP の変換 (`/api/recordings/<id>/stream`) | 0 (送る速さは TCP が決める) | 0 (捨てない) | 出した映像の時刻の進み ÷ ffmpeg が出すのを待った時間 |
  *
  * WebSocket は `pace` の通知で 2 秒ごとか変わったときに送る (`PaceMeter`)。HTTP は応答の途中で何かを足せないので、
@@ -22,7 +22,7 @@ import {
 
 /** エンコードの速さを測る窓 (ms)。これより古い点は捨てる */
 const SPEED_WINDOW = 5_000;
-/** 測った幅がこれより短いうちは測れていない (null)。出だしの 1 秒は ffmpeg が入口の解析で読んだぶんを一度に出す */
+/** 測った幅がこれより短いうちは測れていない (null)。出だしの 1 秒は ffmpeg が入力の解析で読んだぶんを一度に出す */
 const SPEED_LEAST = 1_000;
 /**
  * 出す速さの上限。HTTP の変換は、ffmpeg を待たずに済んでいる (回線のほうが遅い) と待った時間が 0 に近づき、割った値が
@@ -80,12 +80,12 @@ export class VideoLength {
 export const PACE_CHECK = 500;
 /** 何も変わらなくても送る間隔 (ms) */
 export const PACE_EVERY = 2_000;
-/** 溜まりがこれだけ動いたら、`PACE_EVERY` を待たずに送る (バイト) */
+/** バッファの量がこれだけ動いたら、`PACE_EVERY` を待たずに送る (バイト) */
 export const PACE_STEP = 512 * 1024;
 
 /**
  * **WebSocket の `pace` をいつ送るか。** `PACE_CHECK` ごとに呼び、送るものがあれば返す。
- * 送るのは `PACE_EVERY` ごとか、前に送ってから塊を捨てた・溜まりが `PACE_STEP` 以上動いたとき。
+ * 送るのは `PACE_EVERY` ごとか、前に送ってから塊を捨てた・バッファの量が `PACE_STEP` 以上動いたとき。
  * `dropped` は前に送ってからの数にして返す
  */
 export class PaceMeter {
@@ -153,7 +153,7 @@ const open = new Map<string, () => Pace>();
 /**
  * 具合を読めるようにする。id を応答のヘッダ (`#lib/ts/playback.ts` の `PACE_HEADER`) で返し、閉じたら `close` を呼ぶ。
  * id はランダムな UUID (v4。122 ビット) で、連番のように推測できない。読む `GET /api/playback/pace` はほかの API と同じく
- * 認証を通る (`hooks.server.ts`。素通しの `OPEN_PATHS` に入れていない)。返すのは数だけで、録画の中身や名前は出さない
+ * 認証を通る (`hooks.server.ts`。`auth.ts` の素通しの `OPEN_PATHS` に入れていない)。返すのは数だけで、録画の中身や名前は出さない
  */
 export function openPace(read: () => Pace): { id: string; close: () => void } {
   const id = crypto.randomUUID();

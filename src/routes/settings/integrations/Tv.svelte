@@ -40,10 +40,11 @@
             <div class="grow">
               <div><strong>{device.name}</strong></div>
               <div class="small muted">
-                ペアリング {dateTime(device.created_at)}・最後に使った
-                {device.last_used_at === null
-                  ? "まだ"
-                  : dateTime(device.last_used_at)}
+                ペアリング {dateTime(
+                  device.created_at,
+                )}・{device.last_used_at === null
+                  ? "まだ使っていません"
+                  : `最後に使った ${dateTime(device.last_used_at)}`}
               </div>
             </div>
             <div class="row-actions">
@@ -72,6 +73,6 @@
     align-items: center;
     gap: var(--dp-space-3);
     min-height: var(--dp-item-h);
-    padding: 0.5rem 0.75rem;
+    padding: var(--dp-space-2) var(--dp-space-3);
   }
 </style>

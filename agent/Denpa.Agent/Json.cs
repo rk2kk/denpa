@@ -66,16 +66,15 @@ public sealed class LogRing(int capacity)
 /// JSON の書き方。**組み立ては <c>JsonNode</c> だけでやる。**
 ///
 /// <para>
-/// Native AOT では、型からリフレクションで書き出す方式が使えない。読むもの (設定・denpa から来るもの・
-/// <c>px4d --list-json</c>) も木のまま読む (Px4.cs の <c>JsonShape</c>)。
+/// Native AOT では、型からリフレクションで書き出す方式が使えない。読むもの (設定・denpa から来るもの) も木のまま読む。
 /// </para>
 /// </summary>
 public static class Json
 {
     /*
-     * **日本語をそのまま書く。** 既定では非 ASCII を `\u3042` に逃がすので、
+     * **日本語をそのまま書く。** 既定では非 ASCII を `\u3042` にエスケープするので、
      * `channels.json` が人の目で読めなくなる (局名は全部日本語)。
-     * ここは HTML に埋めるものではないので、逃がす理由が無い
+     * ここは HTML に埋めるものではないので、エスケープする理由が無い
      */
     private static readonly JavaScriptEncoder Relaxed = JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
 

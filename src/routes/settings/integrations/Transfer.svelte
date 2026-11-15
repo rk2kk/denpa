@@ -33,8 +33,11 @@
   >("idle");
   let result = $state<CheckResult | null>(null);
   let error = $state<string | null>(null);
-  /** 置き場に無い録画があるときの「承知で取り込む」の 1 回目を押したか */
-  let armed = $state(false);
+  /**
+   * 置き場に無い録画があるときの「このまま取り込む」も 2 回押させる (`arming`。取消・削除と同じ)。
+   * 5 秒たつか、ほかの所を押したら 1 回目に戻る。押す場所は 1 つなので、`armKey` は 0 で足りる
+   */
+  const forcing = arming('[data-testid^="transfer-force"]');
   /** 再起動を待ちきれなかった (自動で再起動しない環境) */
   let restartLate = $state(false);
 
@@ -61,7 +64,7 @@
     if (file === null) return;
     error = null;
     result = null;
-    armed = false;
+    forcing.fire();
     phase = "sending";
     total = file.size;
     try {
@@ -113,10 +116,10 @@
     }
   }
 
-  /** 確かめる (送り終えたあとと「もう一度確かめる」) */
+  /** 確かめる (送り終えたあとと「再確認」) */
   async function recheck(): Promise<void> {
     error = null;
-    armed = false;
+    forcing.fire();
     phase = "checking";
     try {
       result = await call<CheckResult>("check");
@@ -141,7 +144,7 @@
     } catch (failure) {
       error = (failure as Error).message;
       phase = "checked";
-      armed = false;
+      forcing.fire();
       return;
     }
     phase = "restarting";
@@ -195,7 +198,7 @@
     sent = 0;
     total = 0;
     result = null;
-    armed = false;
+    forcing.fire();
     phase = "idle";
     // 送りかけの表示 (load の `upload`) を消す
     location.reload();
@@ -222,7 +225,12 @@
   );
 </script>
 
-<svelte:window onclick={canceling.stand} />
+<svelte:window
+  onclick={(event) => {
+    canceling.stand(event);
+    forcing.stand(event);
+  }}
+/>
 
 {#snippet cancelButton(disabled: boolean)}
   {#if canceling.armed === 0}
@@ -262,13 +270,20 @@
           >録画のフォルダは、フォルダの形を変えずに新しい機械へ写してください。取り込む前に写し終えておくと、置き場に無い録画を数えて止まらずに済みます。
         </p>
         <p>
-          ログインの控えとペアリングの途中は入りません
-          (移したらログインし直します)。テレビのアプリはペアリングし直さずに使えます。
+          ログインの控え・ペアリングの途中・ニコニコとの連携は入りません
+          (移したらログインと連携をし直します)。テレビのアプリはペアリングし直さずに使えます。
         </p>
       {/snippet}
     </Lead>
 
     <h3>書き出す</h3>
+    {#if status.working > 0}
+      <!-- 再エンコードは置いてあるファイルを消してから書き直す。その間に写すと、移した先で「置き場に無い」になる -->
+      <div class="notice warning" data-testid="transfer-working">
+        録画中か、エンコード・CM
+        検出・スクランブル復号を待っているか処理している録画が {status.working} 件あります。この録画のファイルは書き出したあとも作り直されることがあるので、終わってから書き出し、録画のフォルダを写してください
+      </div>
+    {/if}
     <!-- ダウンロードとして返すので、素のフォームで送る (`use:enhance` を付けない) -->
     <form method="POST" action={endpoint("export")} class="fields">
       <div class="cluster">
@@ -278,7 +293,7 @@
           disabled={busy || status.upload !== null}
           data-testid="transfer-export"
         >
-          書き出す
+          書き出し
         </button>
       </div>
       <span class="hint">
@@ -380,7 +395,7 @@
               type="button"
               class="small outline"
               onclick={recheck}
-              data-testid="transfer-recheck">もう一度確かめる</button
+              data-testid="transfer-recheck">再確認</button
             >
           </div>
         {/if}
@@ -443,7 +458,7 @@
 
           {#if result.blocked}
             <div class="notice warning" data-testid="transfer-blocked">
-              置き場に無い録画があります。録画のフォルダを写してから「もう一度確かめる」を押してください。このまま取り込むと、無いものは起動のすぐあとに削除済みになります
+              置き場に無い録画があります。録画のフォルダを写してから「再確認」を押してください。このまま取り込むと、無いものは起動のすぐあとに削除済みになります
             </div>
             {#if result.files.list.length > 0}
               <details class="log">
@@ -467,23 +482,25 @@
                 class="small"
                 disabled={busy}
                 onclick={recheck}
-                data-testid="transfer-recheck">もう一度確かめる</button
+                data-testid="transfer-recheck">再確認</button
               >
-              {#if armed}
+              {#if forcing.armed === 0}
                 <button
                   type="button"
                   class="small danger"
                   disabled={busy}
-                  onclick={() => apply(true)}
-                  data-testid="transfer-force-confirm"
-                  >無いものは削除済みになるのを承知で取り込む</button
+                  onclick={() => {
+                    forcing.fire();
+                    void apply(true);
+                  }}
+                  data-testid="transfer-force-confirm">取り込みを確定</button
                 >
               {:else}
                 <button
                   type="button"
                   class="small outline danger"
                   disabled={busy}
-                  onclick={() => (armed = true)}
+                  onclick={() => forcing.arm(0)}
                   data-testid="transfer-force">このまま取り込む</button
                 >
               {/if}
@@ -497,7 +514,7 @@
                 onclick={() => apply(false)}
                 data-testid="transfer-apply"
               >
-                {phase === "applying" ? "取り込んでいます…" : "取り込む"}
+                {phase === "applying" ? "取り込んでいます…" : "取り込み"}
               </button>
               <span class="hint">
                 この denpa の今の DB
@@ -513,6 +530,6 @@
 
 <style>
   h3 {
-    margin: 1rem 0 0.25rem;
+    margin: var(--dp-space-4) 0 var(--dp-space-1);
   }
 </style>

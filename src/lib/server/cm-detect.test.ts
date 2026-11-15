@@ -6,7 +6,7 @@ import { join } from "node:path";
 /**
  * CM 検出の流れ (`cm.openCm` → 読む → `decide`) を、偽 ffmpeg (`tests/fake/ffmpeg.sh`) で通す。
  * 偽 ffmpeg は 300 秒と 360 秒に 1 秒の無音を返し、尺 (`Duration:`) は 600 秒。ffprobe は無い。
- * ふだんはエンコードと一緒に読むが、ここでは同じ出口を `cm-scan.scan` で読む
+ * ふだんはエンコードと一緒に読むが、ここでは同じ出力を `cm-scan.scan` で読む
  */
 const root = mkdtempSync(join(tmpdir(), "denpa-cm-"));
 const { config } = await import("./config");
@@ -52,7 +52,7 @@ describe("CM 検出の流れ", () => {
     expect(logoUnusable(found.note)).toBe(true);
   });
 
-  test("頭を捨ててエンコードしたなら、尺もそのぶん短い (時刻はエンコードしたものの物差し)", async () => {
+  test("先頭を捨ててエンコードしたなら、尺もそのぶん短い (時刻はエンコードしたものの物差し)", async () => {
     expect((await detect({ skip: 0.5 })).duration).toBe(599.5);
   });
 });

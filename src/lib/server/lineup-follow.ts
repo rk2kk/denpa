@@ -10,13 +10,14 @@
  * - 書き換えるのはそのネットワークのチャンネルだけ (CS はネットワークが 2 つある)
  * - 予約とルールは局の ID (ネットワーク ID とサービス ID) で持っているので、チャンネルの名前が変わっても外れない。
  *   書き換えたあとの新しいチャンネルは「確認中」で、受信できるかは番組表の取得が確かめる (`reception.ts`)
- * - 書き換えたら、お知らせの 1 行 (録画・番組表・ライブの上) と通知 (`channels.changed`) で知らせる
+ * - 書き換えたら、ヘッダーの印 (`ChannelAlert.svelte`) と通知 (`channels.changed`) で知らせる
  * - **録画が衛星のチャンネルを選局できなかったら、すぐに読み直す** (`refreshLineup`)。再編の切り替えの直後に録画が
  *   始まると、番組表の取得が次に中継器を開くまで待てない
  */
 import { NitReader, SdtReader } from "@danything/arib/psi";
 import { and, desc, gte, isNull, lt } from "drizzle-orm";
 
+import { type Agent, listAgents } from "./agents";
 import { config } from "./config";
 import { now, orm } from "./db";
 import { emit } from "./events";
@@ -159,23 +160,47 @@ async function compare(
   const key = `${type}:${network.networkId}`;
   if (checked.get(key) === network.version) return false;
 
-  const all = await getChannels();
-  const mine = all.filter((channel) => channel.type === type);
-  const next = lineupFrom(
-    type,
-    [network],
-    sdt.tables(),
-    knownNames(all),
-  ).channels;
-  // 読めた TS が 1 つも無い表は使わない (読み違えで全部消さない)
-  if (next.length === 0) return false;
-  const current = mine.filter(
-    (channel) => channel.networkId === network.networkId,
-  );
-  const diff = lineupDiff(current, next);
-  if (!diff.changed) {
-    checked.set(key, network.version);
-    sighted.delete(key);
+  /*
+   * **控えはエージェントごとに読み、変わっていたエージェントの控えだけ書き換える。** 放送の一覧はどのエージェントで読んでも同じなので、
+   * 読んだ表を全部のエージェントの控えと比べる。その種別のチャンネルを控えに持たないエージェント (衛星を受けないもの) には足さない
+   */
+  const plans: { agent: Agent; keep: AgentChannel[]; diff: LineupDiff }[] = [];
+  let next: AgentChannel[] | null = null;
+  /** 控えを読めなかったエージェントがある。この version を比べ終えたことにしない (戻ってから比べる) */
+  let missed = false;
+  for (const agent of listAgents()) {
+    const all = await getChannels(agent).catch(() => null);
+    if (all === null) {
+      missed = true;
+      continue;
+    }
+    const mine = all.filter((channel) => channel.type === type);
+    if (mine.length === 0) continue;
+    next ??= lineupFrom(
+      type,
+      [network],
+      sdt.tables(),
+      knownNames(all),
+    ).channels;
+    // 読めた TS が 1 つも無い表は使わない (読み違えで全部消さない)
+    if (next.length === 0) return false;
+    const current = mine.filter(
+      (channel) => channel.networkId === network.networkId,
+    );
+    const diff = lineupDiff(current, next);
+    if (diff.changed)
+      plans.push({
+        agent,
+        keep: mine.filter((channel) => channel.networkId !== network.networkId),
+        diff,
+      });
+  }
+  if (next === null) return false;
+  if (plans.length === 0) {
+    if (!missed) {
+      checked.set(key, network.version);
+      sighted.delete(key);
+    }
     return false;
   }
   const first = sighted.get(key);
@@ -188,16 +213,12 @@ async function compare(
   }
   if (at - first.at < CONFIRM_AFTER) return false;
 
-  await putChannels(
-    [
-      ...mine.filter((channel) => channel.networkId !== network.networkId),
-      ...next,
-    ],
-    [type],
-  );
-  checked.set(key, network.version);
+  for (const plan of plans)
+    await putChannels([...plan.keep, ...next], [type], plan.agent);
+  if (!missed) checked.set(key, network.version);
   sighted.delete(key);
-  record(type, changeText(type, diff));
+  // 知らせる文は最初に書き換えたエージェントの差分から (放送の一覧は同じなので、どのエージェントもふつうは同じ差分)
+  record(type, changeText(type, plans[0]!.diff));
   return true;
 }
 
@@ -241,6 +262,8 @@ const READ_TIMEOUT = 30_000;
 export async function readFromAir(
   type: SatelliteType,
   options: Omit<Parameters<typeof readLineup>[2], "timeout">,
+  /** このエージェントで読む。渡さなければ、全部のエージェントから振り分ける (放送の一覧はどのエージェントで読んでも同じ) */
+  agent?: Agent,
 ): Promise<{ lineup: Lineup; busy: boolean }> {
   let busy = false;
   const lineup = await readLineup(
@@ -248,7 +271,10 @@ export async function readFromAir(
     (channel) =>
       openChannelStream(
         type,
-        channel,
+        (agent === undefined ? listAgents() : [agent]).map((a) => ({
+          agent: a.id,
+          channel,
+        })),
         AbortSignal.timeout(READ_TIMEOUT * 4),
         `scan ${channel}`,
         config.priority.scan,
@@ -261,7 +287,7 @@ export async function readFromAir(
   return { lineup, busy };
 }
 
-/** お知らせの 1 行。書き換えてから `NOTICE_FOR` の間で、設定の「受信」をまだ開いていないもの */
+/** ヘッダーの印に出す文。書き換えてから `NOTICE_FOR` の間で、設定の「受信」をまだ開いていないもの */
 export function lineupNotice(at = now()): string | null {
   const row = orm()
     .select({ text: channelChanges.text })

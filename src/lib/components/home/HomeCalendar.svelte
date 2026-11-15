@@ -3,7 +3,7 @@
    * **サイドバーの月のカレンダー** (広い形だけ。日ごとに並べているときだけ出す。まとめて表示には日付の見出しが無い)。
    *
    * - 行のある日 (一覧に出ている行。絞り込みが効く) は本文の字。押すとその日の見出しへ送る
-   * - 行の無い日は控えた字で押せない。今日は赤い点 (行が無くても押せる。今日の見出しは「いま」の線と一緒にいつもある)
+   * - 行の無い日は控えた字で押せない。今日は赤い点 (行が無くても押せる。今日の見出しは「いま」の行と一緒にいつもある)
    * - いま一覧の先頭に貼り付いている日は主の色の下線と太字。送ると付いて動き、月もその日の月に替わる
    * - ‹ › は行のある月だけを行き来する (間の空の月は飛ばす)
    *
@@ -172,8 +172,8 @@
   .cal-head {
     display: flex;
     align-items: center;
-    /* ほかのグループの見出し (`app.css` の `.side-label`) と同じく上に 20px。サイドバーのいちばん上に来たときは空けない */
-    margin-top: 1.25rem;
+    /* ほかのグループの見出し (`app.css` の `.side-label`) と同じく上に 16px。サイドバーのいちばん上に来たときは空けない */
+    margin-top: var(--dp-space-4);
   }
   .cal:first-child > .cal-head {
     margin-top: 0;
@@ -206,8 +206,8 @@
     color: var(--dp-muted);
   }
   .cal-grid {
-    width: calc(100% - 0.75rem);
-    margin: 0.25rem 0 0 0.75rem;
+    width: calc(100% - var(--dp-space-3));
+    margin: var(--dp-space-1) 0 0 var(--dp-space-3);
     border-collapse: collapse;
     table-layout: fixed;
   }
@@ -224,9 +224,9 @@
     font-weight: var(--dp-weight);
   }
   /*
-   * 日のマス。**印は 1 つの意味に 1 つ** (docs/design.md):
+   * 日のマス。**印は 1 つの意味に 1 つ** (docs/design.md)。
    * - 行のある日は本文の字。行の無い日 (今日を除く) は押せず (読み上げには aria-disabled)、控えた字にして指を乗せても塗らない
-   * - 今日は赤い点 (「いま」の線と同じ赤)
+   * - 今日は赤い点 (「いま」の行と同じ赤)
    * - 選んでいる日は主の色の下線と主の色の太字 (ほかの選んでいるものと同じ。塗らない)。下線が点の代わり
    */
   .cal-day {
@@ -237,7 +237,7 @@
     width: 100%;
     height: 2rem;
     margin: 0;
-    padding: 0 0 0.25rem;
+    padding: 0 0 var(--dp-space-1);
     border: 0;
     border-radius: var(--dp-radius);
     background: transparent;

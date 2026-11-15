@@ -1,20 +1,32 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   closeSync,
   mkdtempSync,
   openSync,
   readSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { concatBytes } from "@danything/arib/bytes";
+import { MmtServiceFilter } from "@danything/arib/mmt-service-filter";
+import {
+  packetize,
+  patSection,
+  programMap,
+  stream,
+} from "@danything/arib/synth";
+import { SynthMmtAv } from "@danything/arib/synth-mmt-av";
 
 import { config } from "./config";
 import {
   buildArgs,
   combineProgress,
   encodeAttempts,
+  encodeInput,
   encodeOrder,
   encodeProgress,
   expectedFrames,
@@ -22,9 +34,14 @@ import {
   findInputFd,
   headSkip,
   inputSkip,
+  programSpan,
   readInputPos,
+  rereadArgs,
 } from "./encoder";
 import { hwBitrate, type HwWay } from "./hwenc";
+import { remuxMmts } from "./mmts";
+import { tsProbe } from "./ts-probe";
+import { HLG_PARAMS } from "./uhd";
 
 function argValue(args: string[], key: string): string | undefined {
   const i = args.indexOf(key);
@@ -287,19 +304,14 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・先�
     );
   });
 
-  test("CM を切っても字幕は落とさない", () => {
-    // 字幕も CM ごと写して、エンコードしたものと一緒に切る (cm-cut.ts)
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
-      keyframes: "scene",
-    });
+  test("字幕は落とさずに写す", () => {
+    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1");
     expect(args).not.toContain("-sn");
     expect(argValue(args, "-c:s")).toBe("copy");
   });
 
   test("チャプターはエンコードするときには入れない (エンコードしたあとに書き足す)", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
-      keyframes: "scene",
-    });
+    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1");
     expect(args).not.toContain("-map_chapters");
     // 入力は録画の TS だけ
     expect(args.filter((a) => a === "-i")).toHaveLength(1);
@@ -404,6 +416,124 @@ describe("エンコードの引数 (入れ物・コーデック・字幕・先�
   });
 });
 
+describe("4K の局の録画 (詰め替えた MP4 が入力)", () => {
+  const uhd = (codec: "av1" | "h264" | "hevc", hardware?: HwWay) =>
+    buildArgs("/raw/a.mmts.remux.mp4", "/out.mkv", 1, null, codec, {
+      uhd: true,
+      smoothMotion: true,
+      hardware,
+    });
+
+  test("AV1 は 2160p・10 ビット・HLG のまま。インタレ解除も縮めもしない", () => {
+    const args = uhd("av1");
+    // 色はコマに書き込む (映像に VUI が無くても、出したものに HLG の印が付く)
+    expect(argValue(args, "-vf")).toBe(`${HLG_PARAMS},format=yuv420p10le`);
+    expect(args).toContain("libsvtav1");
+  });
+
+  test("H.264 は今の録画と同じ 1080p・8 ビットの SDR に縮めて直す (ライブの 4K の局と同じ)", () => {
+    const vf = argValue(uhd("h264"), "-vf")!;
+    expect(vf.startsWith("scale=-2:1080,setparams=")).toBe(true);
+    expect(vf).toContain("tonemap=tonemap=hable");
+    expect(vf.endsWith("format=yuv420p")).toBe(true);
+    expect(vf).not.toContain("bwdif");
+  });
+
+  test("H.265 は GPU で、縮めて SDR に直してから GPU へ上げる。ビットレートは 1080p の値", () => {
+    const args = uhd("hevc", { device: "/dev/dri/renderD128", kind: "vaapi" });
+    const vf = argValue(args, "-vf")!;
+    expect(vf.startsWith("scale=-2:1080,")).toBe(true);
+    expect(vf.endsWith("format=nv12,hwupload")).toBe(true);
+    expect(args).toContain("hevc_vaapi");
+  });
+});
+
+describe("TS で送る 4K の局の録画 (元の TS が入力)", () => {
+  const SERVICE = 0x0400;
+  const PMT_PID = 0x1f0;
+  const VIDEO_PID = 0x100;
+  const dir = mkdtempSync(join(tmpdir(), "denpa-ts-uhd-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  let files = 0;
+  /** PAT と、映像の stream_type が `video` の PMT だけの録画を書いてパスを返す */
+  const recording = (video: number | null, ext = ".m2ts") => {
+    const path = join(dir, `rec-${files++}${ext}`);
+    writeFileSync(
+      path,
+      video === null
+        ? new Uint8Array(0)
+        : stream(
+            packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+            packetize(
+              PMT_PID,
+              programMap(SERVICE, VIDEO_PID, [
+                [video, VIDEO_PID],
+                [0x11, 0x110],
+              ]),
+            ),
+          ),
+    );
+    return path;
+  };
+
+  test("PMT の映像が HEVC の TS は 4K の局の録画。詰め替えはしない", () => {
+    expect(encodeInput(recording(0x24), SERVICE)).toEqual({
+      tlv: false,
+      uhd: true,
+    });
+    expect(encodeInput(recording(0x02), SERVICE)).toEqual({
+      tlv: false,
+      uhd: false,
+    });
+    // 4K の局の録画 (.mmts) は中身を読まずに、詰め替えて 4K の局の録画として扱う
+    expect(encodeInput(join(dir, "missing.mmts"), SERVICE)).toEqual({
+      tlv: true,
+      uhd: true,
+    });
+    // PMT を読めない TS は MPEG-2 の局の録画
+    expect(encodeInput(recording(null), SERVICE)).toEqual({
+      tlv: false,
+      uhd: false,
+    });
+  });
+
+  const uhd = (codec: "av1" | "h264" | "hevc", hardware?: HwWay) =>
+    buildArgs("/raw/a.m2ts", "/out.mkv", 1, null, codec, {
+      uhd: true,
+      smoothMotion: true,
+      hardware,
+    });
+
+  test("AV1 は 2160p・10 ビット・HLG のまま。インタレ解除も縮めもしない", () => {
+    const args = uhd("av1");
+    expect(argValue(args, "-i")).toBe("/raw/a.m2ts");
+    expect(argValue(args, "-vf")).toBe(`${HLG_PARAMS},format=yuv420p10le`);
+    expect(args).toContain("libsvtav1");
+  });
+
+  test("H.264・H.265 は 1080p・8 ビットの SDR に縮めて直す。インタレ解除はしない", () => {
+    const vf = argValue(uhd("h264"), "-vf")!;
+    expect(vf.startsWith("scale=-2:1080,setparams=")).toBe(true);
+    expect(vf).not.toContain("bwdif");
+    const hevc = uhd("hevc", { device: "/dev/dri/renderD128", kind: "vaapi" });
+    expect(argValue(hevc, "-vf")!.startsWith("scale=-2:1080,")).toBe(true);
+    // 映像のデコードは CPU のまま (GPU でデコードしてインタレ解除する経路は使わない)
+    expect(hevc).not.toContain("-hwaccel");
+  });
+
+  test("字幕は TS の ARIB 字幕を写し、映像と音声は TS の局と同じく名指しする", () => {
+    const args = uhd("av1");
+    const ts = buildArgs("/raw/a.m2ts", "/out.mkv", 1, null, "av1");
+    const maps = (list: string[]) =>
+      list.flatMap((arg, i) => (arg === "-map" ? [list[i + 1]] : []));
+    expect(maps(args)).toEqual(maps(ts));
+    expect(maps(args)).toContain("0:s:0?");
+    expect(argValue(args, "-c:s")).toBe("copy");
+    // 音声 (AAC LATM) は TS の局と同じく Opus にエンコードする
+    expect(argValue(args, "-c:a")).toBe("libopus");
+  });
+});
+
 describe("inputSkip", () => {
   /*
    * **エンコードするほう (`-ss`) と進み具合の分母で同じ値を使う。** 片方だけ変わると、
@@ -436,13 +566,13 @@ describe("expectedFrames", () => {
   });
 
   /*
-   * **出力の毎秒コマ数を決め打ちにしない。** 720p で送っている局は入力が
-   * 59.94 で、60 コマ決め打ちだと分母が半分になり 50% で頭打ちになる
+   * **720p で送っている局は入力が 59.94 のプログレッシブで、インタレ解除は倍にしない** (`deint=interlaced`)。
+   * 倍にして数えると分母が 2 倍になり、50% で頭打ちになる
    */
-  test("入力が 59.94 の素材でも当たる (出力を決め打ちにしない)", () => {
+  test("入力が 59.94 の素材は、60 コマで出しても倍にしない", () => {
     expect(
       expectedFrames({ duration: 100, fps: 60000 / 1001 }, 0, true),
-    ).toBeCloseTo(11988, 0);
+    ).toBeCloseTo(5994, 0);
   });
 
   test("先頭から捨てるぶんはエンコードしないので引く", () => {
@@ -590,111 +720,47 @@ describe("failureReason", () => {
 });
 
 describe("CM を探しながらエンコードする", () => {
-  const outputs = ["-an", "-vf", "scdet@cm=threshold=0", "-f", "null", "-"];
+  const outputs = ["-an", "-vf", "scdet=threshold=0", "-f", "null", "-"];
 
-  test("CM 検出の出口はエンコードする出口のあとに足す", () => {
+  test("CM 検出の出力はエンコードする出力のあとに足す", () => {
     const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
       analysis: outputs,
     });
-    // -map は出口ごとなので、エンコードする出口の指定が検出の出口に効かないよう後ろに置く
+    // -map は出力ごとなので、エンコードする出力の指定が検出の出力に効かないよう後ろに置く
     expect(args.indexOf("/out.mkv")).toBeLessThan(
-      args.indexOf("scdet@cm=threshold=0"),
+      args.indexOf("scdet=threshold=0"),
     );
     expect(args.slice(-outputs.length)).toEqual(outputs);
   });
 
-  test("進み具合は fd 3 へ (標準出力はロゴの枠、標準エラーは検出の行が使う)", () => {
+  test("進み具合は fd 3 へ (標準出力はロゴの枠が使い、標準エラーはログで混み合う)", () => {
     const args = buildArgs("/in.m2ts", "/out.mkv", 1, null);
     expect(argValue(args, "-progress")).toBe("pipe:3");
     expect(args).toContain("-nostats");
   });
 });
 
-describe("CM を切るときのキーフレーム", () => {
-  test("境目が決まる前は場面の切れ目ごと。CM 検出と同じコマで測って印を付ける", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
-      keyframes: "scene",
-      displaySize: { width: 1920, height: 1080 },
-    });
-    const filter = argValue(args, "-vf") ?? "";
-    // CM 検出と同じコマ (インタレ解除の前) で測る
-    expect(filter.indexOf("scdet@key")).toBeLessThan(filter.indexOf("bwdif"));
-    expect(argValue(args, "-force_key_frames:v")).toBe("scd_metadata");
-  });
-
-  test("境目が決まっていれば、その時刻を 1ms 手前で指す", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
-      keyframes: [120.5, 300],
-    });
-    expect(argValue(args, "-force_key_frames:v")).toBe("120.499,299.999");
-    expect(argValue(args, "-vf")).not.toContain("scdet");
-  });
-
-  test("VA-API は印だけで IDR になるので、IDR の指定を足さない", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
-      keyframes: "scene",
-      hardware: { kind: "vaapi", device: "/dev/dri/renderD128" },
-    });
-    expect(args).not.toContain("-forced_idr");
-    expect(args).not.toContain("-forced-idr");
-    /*
-     * B フレームのピラミッド (`-b_depth 2`) と一緒でも印は渡す。FFmpeg は印の付いたコマを IDR にし、
-     * その前で B の並びを閉じる (hwenc.hwArgs の説明)
-     */
-    expect(argValue(args, "-b_depth")).toBe("2");
-    expect(argValue(args, "-force_key_frames:v")).toBe("scd_metadata");
-    // 印は GPU へ上げる前に付ける
-    const filter = argValue(args, "-vf") ?? "";
-    expect(filter.indexOf("scdet@key")).toBeLessThan(
-      filter.indexOf("format=nv12"),
-    );
-  });
-
-  test("NVENC は指定しないと IDR にならない", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
-      keyframes: [120.5],
-      hardware: { kind: "nvenc", device: "/dev/nvidia0", gpu: 0 },
-    });
-    expect(argValue(args, "-forced-idr")).toBe("1");
-  });
-
-  test("QSV・AMF は -forced_idr で IDR にする (Windows)", () => {
-    for (const kind of ["qsv", "amf"] as const) {
-      const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "av1", {
-        keyframes: [120.5],
-        hardware: { kind, device: `${kind}0`, gpu: 0 },
+describe("キーフレーム", () => {
+  test("置く所を指さない (CM はチャプターにするだけで、切らない)", () => {
+    const ways: (HwWay | undefined)[] = [
+      undefined,
+      { kind: "vaapi", device: "/dev/dri/renderD128" },
+      { kind: "nvenc", device: "/dev/nvidia0", gpu: 0 },
+    ];
+    for (const hardware of ways) {
+      const args = buildArgs("/in.m2ts", "/out.mkv", 1, null, "h264", {
+        hardware,
       });
-      expect(args).toContain(`av1_${kind}`);
-      expect(argValue(args, "-forced_idr")).toBe("1");
+      expect(args).not.toContain("-force_key_frames:v");
       expect(args).not.toContain("-forced-idr");
+      expect(argValue(args, "-vf")).not.toContain("scdet");
     }
-  });
-
-  test("H.265 も同じ指定で境目にキーフレームを置く (NVENC は IDR の指定、VA-API は印だけ)", () => {
-    const nvenc = buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {
-      keyframes: "scene",
-      hardware: { kind: "nvenc", device: "/dev/nvidia0", gpu: 0 },
-    });
-    expect(nvenc).toContain("hevc_nvenc");
-    expect(argValue(nvenc, "-forced-idr")).toBe("1");
-    const vaapi = buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {
-      keyframes: [120.5],
-      hardware: { kind: "vaapi", device: "/dev/dri/renderD128" },
-    });
-    expect(vaapi).toContain("hevc_vaapi");
-    expect(argValue(vaapi, "-force_key_frames:v")).toBe("120.499");
   });
 
   test("H.265 はソフトウェアでエンコードしない (呼ぶ側の誤りなので投げる)", () => {
     expect(() =>
       buildArgs("/in.m2ts", "/out.mkv", 1, null, "hevc", {}),
     ).toThrow();
-  });
-
-  test("切らないなら何も足さない", () => {
-    const args = buildArgs("/in.m2ts", "/out.mkv", 1, null);
-    expect(args).not.toContain("-force_key_frames:v");
-    expect(argValue(args, "-vf")).not.toContain("scdet");
   });
 });
 
@@ -716,10 +782,10 @@ describe("先頭から捨てる長さ", () => {
 });
 
 describe("encodeOrder", () => {
-  test("H.265 を選んでいれば 1 本目 (CM を探し、切れるかを決める)", () => {
+  test("並びは変えない", () => {
     expect(encodeOrder(["av1", "hevc", "h264"], true)).toEqual([
-      "hevc",
       "av1",
+      "hevc",
       "h264",
     ]);
   });
@@ -727,10 +793,6 @@ describe("encodeOrder", () => {
   test("H.265 をエンコードできる GPU が無ければ外す", () => {
     expect(encodeOrder(["av1", "hevc"], false)).toEqual(["av1"]);
     expect(encodeOrder(["hevc"], false)).toEqual([]);
-  });
-
-  test("H.265 が無ければ選んだ順", () => {
-    expect(encodeOrder(["av1", "h264"], true)).toEqual(["av1", "h264"]);
   });
 });
 
@@ -804,30 +866,126 @@ describe("encodeAttempts (1 回の実行の中で ffmpeg を起こす順)", () =
   };
 
   test("どの方式も「素のまま → 先頭を少し捨てて」の 2 回だけ。最後にソフトウェア", () => {
-    for (const pointed of [false, true]) {
-      for (const codec of ["av1", "h264", "hevc"] as const) {
-        const attempts = encodeAttempts(codec, [A, B, R], pointed);
-        for (const seeks of perWay(attempts).values())
-          expect(seeks).toEqual([null, config.encodeRetrySeek]);
-      }
+    for (const codec of ["av1", "h264", "hevc"] as const) {
+      const attempts = encodeAttempts(codec, [A, B, R]);
+      for (const seeks of perWay(attempts).values())
+        expect(seeks).toEqual([null, config.encodeRetrySeek]);
     }
-    expect([...perWay(encodeAttempts("av1", [A, B, R], false)).keys()]).toEqual(
-      [A.device, B.device, R.device, "software"],
-    );
-  });
-
-  test("H.265 はソフトウェアに倒さない。GPU が無ければ 1 回も起こさない", () => {
-    expect([...perWay(encodeAttempts("hevc", [A], false)).keys()]).toEqual([
+    expect([...perWay(encodeAttempts("av1", [A, B, R])).keys()]).toEqual([
       A.device,
-    ]);
-    expect(encodeAttempts("hevc", [], false)).toEqual([]);
-    expect(encodeAttempts("h264", [], false)).toHaveLength(2);
-  });
-
-  test("境目を指すときは、指定を聞かない Rockchip MPP を外す", () => {
-    expect([...perWay(encodeAttempts("h264", [R, A], true)).keys()]).toEqual([
-      A.device,
+      B.device,
+      R.device,
       "software",
     ]);
   });
+
+  test("H.265 はソフトウェアに倒さない。GPU が無ければ 1 回も起こさない", () => {
+    expect([...perWay(encodeAttempts("hevc", [A])).keys()]).toEqual([A.device]);
+    expect(encodeAttempts("hevc", [])).toEqual([]);
+    expect(encodeAttempts("h264", [])).toHaveLength(2);
+  });
 });
+
+/*
+ * 番組の始まり (`programSpan`) は CM 検出が前後の番組を見分けるのに使い、探る長さ (`tsProbe`) にもなる。
+ * 録画の先頭は測った放送時刻 (`ts_head`) で、測れていなければ録り始める予定の時刻
+ */
+describe("番組の始まりと、CM 検出をやり直すときの探り", () => {
+  const START = 1_800_000_000_000;
+  const row = {
+    start_at: START,
+    end_at: START + 1_800_000,
+    ts_head: null,
+    record_from: null,
+  };
+
+  test("録画の先頭は測った時刻。無ければ録り始める予定の時刻 (譲ったぶんがあればそこ)", () => {
+    expect(programSpan({ ...row, ts_head: START - 7_000 })).toEqual({
+      programLength: 1800,
+      programStart: 7,
+    });
+    expect(programSpan(row).programStart).toBe(config.startMargin / 1000);
+    expect(
+      programSpan({ ...row, record_from: START + 60_000 }).programStart,
+    ).toBe(-60);
+  });
+
+  test("元の TS から読み直すときは、エンコードしたときと同じ長さまで探り、先頭は捨てない", () => {
+    const measured = { ...row, ts_head: START - 90_000 };
+    expect(rereadArgs(measured, true)).toEqual([...tsProbe(90)]);
+    expect(rereadArgs(measured, true)).not.toContain("-ss");
+    expect(rereadArgs(measured, false)).toEqual([]);
+  });
+});
+
+/**
+ * 本物の ffmpeg で、4K の局の録画をエンコードする。偽の放送と同じ素材 (HEVC Main10 と AAC。`synth-mmt-av`) を録画と同じく
+ * 1 局に絞って書き、詰め替えた MP4 (`mmts.remuxMmts`) を `buildArgs` の引数でエンコードする。入っていない所 (CI の単体) では飛ばす
+ */
+const ffmpeg = Bun.which("ffmpeg");
+const ffprobeBin = Bun.which("ffprobe");
+test.skipIf(ffmpeg === null || ffprobeBin === null)(
+  "本物の ffmpeg: 4K の局の録画を、AV1 は 10 ビットの HLG のまま、H.264 は 1080p の SDR にする",
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "denpa-uhd-"));
+    const av = new SynthMmtAv({
+      serviceId: 301,
+      mptPacketId: 0x9000,
+      startMs: Date.UTC(2026, 10, 11, 12),
+    });
+    const filter = new MmtServiceFilter(301);
+    const source = join(dir, "a.mmts");
+    writeFileSync(
+      source,
+      concatBytes(Array.from({ length: 30 }, () => filter.filter(av.next()))),
+    );
+    const remuxed = join(dir, "a.mmts.remux.mp4");
+    expect((await remuxMmts(source, 301, remuxed)).wrote).toBe(true);
+
+    const encode = (codec: "av1" | "h264") => {
+      const output = join(dir, `${codec}.mkv`);
+      const done = Bun.spawnSync([
+        ffmpeg!,
+        "-v",
+        "error",
+        ...buildArgs(remuxed, output, 1, null, codec, {
+          uhd: true,
+          smoothMotion: true,
+          progress: "/dev/null",
+        }),
+      ]);
+      if (done.exitCode !== 0) console.error(done.stderr.toString());
+      expect(done.exitCode).toBe(0);
+      const probed = Bun.spawnSync([
+        ffprobeBin!,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,pix_fmt,height,color_transfer,color_primaries",
+        "-of",
+        "json",
+        output,
+      ]);
+      return (
+        JSON.parse(probed.stdout.toString()) as {
+          streams: Record<string, string | number>[];
+        }
+      ).streams[0]!;
+    };
+    expect(encode("av1")).toMatchObject({
+      codec_name: "av1",
+      pix_fmt: "yuv420p10le",
+      height: 64,
+      color_transfer: "arib-std-b67",
+      color_primaries: "bt2020",
+    });
+    expect(encode("h264")).toMatchObject({
+      codec_name: "h264",
+      pix_fmt: "yuv420p",
+      height: 1080,
+    });
+  },
+  120_000,
+);

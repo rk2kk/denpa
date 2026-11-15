@@ -8,16 +8,19 @@
  * エージェント自身のふるまい (取り合い・止め方・スキャンの総当たり) は
  * ここでは試せない。それは `agent/conformance.test.ts` が本物に当てている。
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { answerPairing, fakeAgentTls } from "../../src/lib/server/fake-agent";
 import {
   broadcast,
+  broadcastTlv,
   channels,
   DEFAULT_KNOBS,
   type Knobs,
   on,
+  tsmfStreams,
 } from "./broadcast";
 import type { FakeService } from "./services";
 
@@ -38,7 +41,7 @@ const knobs: Knobs = {
 /** チューナーが塞がっている状態。取り合いの見え方を確かめる */
 let busyTuners = false;
 /**
- * 塞がっているチューナーの受信の状態と C/N (`GET /denpa/tuners` の `signal`。`POST /__control/signal` で変える)。
+ * 塞がっているチューナーの受信の状態と C/N と強度 (`GET /denpa/tuners` の `signal`。`POST /__control/signal` で変える)。
  * 本物は C/N が変わっても通知 (`tuners`) を出さないので、変えても出さない。画面は 5 秒ごとに読み直して追う
  */
 type FakeSignal = {
@@ -46,13 +49,45 @@ type FakeSignal = {
   cn: number | null;
   unit: "dB" | "raw";
   atTune: boolean;
+  strengthDbm: number | null;
 } | null;
 const SIGNALS: Record<string, FakeSignal> = {
   // PIX-DT295 の地上波で実機に出た値のあたり
-  raw: { locked: true, cn: 2748, unit: "raw", atTune: false },
-  db: { locked: true, cn: 25.3, unit: "dB", atTune: false },
-  tune: { locked: true, cn: 18.2, unit: "dB", atTune: true },
-  unlocked: { locked: false, cn: null, unit: "dB", atTune: false },
+  raw: {
+    locked: true,
+    cn: 2748,
+    unit: "raw",
+    atTune: false,
+    strengthDbm: null,
+  },
+  db: {
+    locked: true,
+    cn: 25.3,
+    unit: "dB",
+    atTune: false,
+    strengthDbm: null,
+  },
+  strength: {
+    locked: true,
+    cn: 25.3,
+    unit: "dB",
+    atTune: false,
+    strengthDbm: -35,
+  },
+  tune: {
+    locked: true,
+    cn: 18.2,
+    unit: "dB",
+    atTune: true,
+    strengthDbm: null,
+  },
+  unlocked: {
+    locked: false,
+    cn: null,
+    unit: "dB",
+    atTune: false,
+    strengthDbm: null,
+  },
 };
 let busySignal: FakeSignal = SIGNALS["raw"] ?? null;
 /** 挿さっているカードリーダー。どちらにもカードが入っている */
@@ -113,10 +148,13 @@ function agentLogLines(): { at: number; text: string }[] {
  * `off` は答えを返せないエージェント (500)、`mac` は macOS のエージェントで、バージョンが denpa と違う
  */
 let aboutMode: "normal" | "off" | "mac" = "normal";
+/** 画面に出す名前の元 (本物の `AGENT_NAME` と同じ)。無ければ `fake-agent` */
+const AGENT_NAME = process.env["AGENT_NAME"] ?? "fake-agent";
 
 function agentAbout() {
   if (aboutMode === "mac") {
     return {
+      name: AGENT_NAME,
       version: "v0.9.0",
       os: "macos",
       arch: "arm64",
@@ -125,6 +163,7 @@ function agentAbout() {
     };
   }
   return {
+    name: AGENT_NAME,
     version: process.env["DENPA_VERSION"] ?? "dev",
     os: "linux",
     arch: "x64",
@@ -160,13 +199,37 @@ function unscramble(
   return { ok: true, error: "" };
 }
 
+/** `POST /denpa/raw/probe`。本物 (RawProbe.cs) と同じく、置き場の `.denpa/` の下のファイルの中身の SHA-256 を返す */
+function probeRaw(path: unknown): Response {
+  const full = resolve(RECORDED, typeof path === "string" ? path : "");
+  if (!full.startsWith(`${RECORDED}/.denpa/`))
+    return Response.json(
+      { error: "読めるのは元の TS の保存先の .denpa/ の下だけです" },
+      { status: 400 },
+    );
+  if (!existsSync(full))
+    return Response.json(
+      { error: `${full} が見つかりません` },
+      { status: 404 },
+    );
+  return Response.json({
+    sha256: createHash("sha256").update(readFileSync(full)).digest("hex"),
+  });
+}
+
+/** 4K の局 (TLV) の搬送波か */
+const isTlv = (services: FakeService[]) =>
+  services.some((service) => service.transport === "tlv");
+
 function fakeStream(
   signal: AbortSignal,
   services: FakeService[],
 ): ReadableStream<Uint8Array> {
+  // 4K の局 (TLV) は TLV のバイト列を流す (本物は分割 TLV を組み立てたもの)。1 つの搬送波に TS と TLV は混ざらない
+  const play = isTlv(services) ? broadcastTlv : broadcast;
   return new ReadableStream({
     start(controller) {
-      const stop = broadcast(
+      const stop = play(
         services,
         () => knobs,
         (data) => {
@@ -195,7 +258,13 @@ interface FakeChannel {
 }
 
 /** 種別の並び。知らない種別は後ろ (本物の `Config.TypeOrder`) */
-const TYPE_ORDER: Record<string, number> = { GR: 0, BS: 1, CS: 2 };
+const TYPE_ORDER: Record<string, number> = {
+  GR: 0,
+  BS: 1,
+  CS: 2,
+  CATV: 3,
+  SKY: 4,
+};
 
 /** 本物が channels.json に書く順 (種別ごと、その中はチャンネルの文字の順。`Config.SaveChannels`) */
 function sortChannels<T extends FakeChannel>(list: T[]): T[] {
@@ -208,8 +277,9 @@ function sortChannels<T extends FakeChannel>(list: T[]): T[] {
   });
 }
 
-/** 預かっているチャンネル。本物では channels.json */
-let saved = sortChannels(channels());
+/** 預かっているチャンネル。本物では channels.json (CATV と SKY はスキャンしたときだけ入る。`broadcast.channels`) */
+const initialChannels = () => sortChannels(channels());
+let saved = initialChannels();
 
 /** チューナー。既定は全部空きにしておく */
 interface FakeTuner {
@@ -221,7 +291,7 @@ interface FakeTuner {
   lnb: string | null;
 }
 
-/** 刺さっている機材 (本物の自動検出 `DeviceProbe.Detect` に当たるもの)。偶数が衛星、奇数が地上波 */
+/** 挿してある機材 (本物の自動検出 `DeviceProbe.Detect` に当たるもの)。偶数が衛星、奇数が地上波 */
 const plugged = (): FakeTuner[] =>
   [0, 1, 2, 3].map((index) => ({
     index,
@@ -232,7 +302,7 @@ const plugged = (): FakeTuner[] =>
     lnb: null,
   }));
 
-/** 始めは定義を書いてある状態にしておく (中身は刺さっているものと同じ) */
+/** 始めは定義を書いてある状態にしておく (中身は挿してあるものと同じ) */
 let TUNERS: FakeTuner[] = plugged();
 /** 定義が無いので自分で見つけた機材を使っているか (`GET /denpa/tuners` の `detected`) */
 let detected = false;
@@ -251,13 +321,15 @@ const leases = new Map<number, Lease>();
  *
  * 使っている最中の見た目は一瞬で消える (偽エージェントは本物より速い) ので、
  * 「その優先度で取得した」ことを試験から確かめるには記録が要る
- * (`16-scan.spec.ts`)。溜め続けないよう直近だけ持つ
+ * (`16-scan.spec.ts`)。観る局 (`service`) を渡したかも残す (`65-catv.spec.ts`)。溜め続けないよう直近だけ持つ
  */
 const opens: {
   use: string;
   priority: number;
   type: string;
   channel: string;
+  /** 観る局 (`/denpa/stream` の `service`)。渡さなければ null */
+  service: number | null;
 }[] = [];
 const OPENS_KEEP = 200;
 
@@ -269,6 +341,13 @@ function tunerStatus() {
       ...plain,
       rank: plain.disabled ? null : plain.index,
       pin: plain.device ?? plain.name,
+      /*
+       * 機材が受けられる種別は、挿してある機材の種別。挿していないデバイスは分からない (本物の `DeviceProbe.Receivable`)。
+       * `it930x:` の受信機は、挿していなくても地上波・衛星・ケーブル・SKY を受けられると返す (本物の `It930x.Types`)
+       */
+      receivable: plain.device?.startsWith("it930x:")
+        ? ["GR", "BS", "CS", "CATV", "SKY"]
+        : (plugged().find((one) => one.device === plain.device)?.types ?? null),
     };
     /*
      * 塞がっているのは**衛星のチューナー**にしてある。地上波を塞ぐと、
@@ -283,7 +362,6 @@ function tunerStatus() {
           { use: "rec 1", priority: 10 },
           { use: "epg BS11:18000", priority: 3 },
         ],
-        pid: 1234,
         error: null,
         signal: busySignal,
       };
@@ -296,7 +374,6 @@ function tunerStatus() {
           ? null
           : { type: lease.type, channel: lease.channel },
       users: lease?.users ?? [],
-      pid: lease === undefined ? null : 1234,
       error: null,
       // 偽の選局は機材を持たないので測れない (本物の偽の選局 `FAKE_TUNE` と同じ)
       signal: null,
@@ -422,6 +499,17 @@ function openStream(url: URL, signal: AbortSignal): Response {
   const after = new Set(url.searchParams.getAll("after"));
   if (type === "" || channel === "")
     return json({ error: "type と channel が必要です" }, 400);
+  /*
+   * 観る局 (program_number)。本物はこの局の PMT と鍵がそろえば流し始める (B25.cs の Descrambler)。偽の放送は
+   * スクランブルしないので待たない。断り方だけ本物とそろえ、渡されたかを記録に残す
+   */
+  const numbered = url.searchParams.get("service");
+  const service = numbered === null || numbered === "" ? null : numbered;
+  if (
+    service !== null &&
+    (!/^\d+$/.test(service) || Number(service) < 1 || Number(service) > 0xffff)
+  )
+    return json({ error: "service は 1〜65535 の番組番号です" }, 400);
   const services = on(type, channel);
 
   // 優先度が自分と同じか高い利用者が同じチャンネルを読んでいれば選局を共有 (約束の 3)。無ければ選ぶ
@@ -458,7 +546,13 @@ function openStream(url: URL, signal: AbortSignal): Response {
   const kick = new AbortController();
   kicks.set(user, kick);
   lease.users.push(user);
-  opens.push({ use, priority, type, channel });
+  opens.push({
+    use,
+    priority,
+    type,
+    channel,
+    service: service === null ? null : Number(service),
+  });
   if (opens.length > OPENS_KEEP) opens.shift();
   emit("tuners");
 
@@ -472,8 +566,13 @@ function openStream(url: URL, signal: AbortSignal): Response {
     emit("tuners");
   });
 
+  // TSMF で束ねた搬送波は、束ねた TS の数をヘッダーで返す (本物の `Sink.TsmfStreamsHeader`)。TLV は Content-Type で言う (本物の `StreamFormat`)
+  const streams = tsmfStreams(type, channel);
   return new Response(fakeStream(ended, services), {
-    headers: { "Content-Type": "video/MP2T" },
+    headers: {
+      "Content-Type": isTlv(services) ? "application/x-arib-tlv" : "video/MP2T",
+      ...(streams === null ? {} : { "X-Denpa-Tsmf-Streams": String(streams) }),
+    },
   });
 }
 
@@ -499,6 +598,12 @@ const options: Bun.ServeOptions = {
       busyTuners = url.searchParams.get("busy") === "1";
       emit("tuners");
       return json({ busy: busyTuners });
+    }
+    // 預かっているチャンネルを始めの顔ぶれに戻す。スキャンで足した SKY を、後のファイルに残さないため
+    if (url.pathname === "/__control/channels" && request.method === "POST") {
+      saved = initialChannels();
+      emit("channels");
+      return json(saved);
     }
     if (url.pathname === "/__control/signal" && request.method === "POST") {
       busySignal = SIGNALS[url.searchParams.get("value") ?? ""] ?? null;
@@ -547,6 +652,11 @@ const options: Bun.ServeOptions = {
     if (url.pathname === "/__control/scrambled" && request.method === "POST") {
       knobs.scrambled = url.searchParams.get("on") === "1";
       return json({ scrambled: knobs.scrambled });
+    }
+    // カードは読めているが局の契約が無い (`Knobs.unentitled`)
+    if (url.pathname === "/__control/unentitled" && request.method === "POST") {
+      knobs.unentitled = url.searchParams.get("on") === "1";
+      return json({ unentitled: knobs.unentitled });
     }
     // 選局した直後に表を流さない (`Knobs.tablesLate`)
     if (
@@ -632,6 +742,14 @@ const options: Bun.ServeOptions = {
           return json(saved);
         });
     }
+    if (url.pathname === "/denpa/channels" && request.method === "DELETE") {
+      // 1 つの種別を全部消す (本物は agent/Denpa.Agent/Program.cs。設定の画面の「局を削除」から)
+      const type = url.searchParams.get("type") ?? "";
+      if (type === "") return json({ error: "type が必要です" }, 400);
+      saved = saved.filter((c) => c.type !== type);
+      emit("channels");
+      return json(saved);
+    }
 
     // 使わないカードリーダーを入れ替える (本物は agent/Denpa.Agent/CardChoice.cs)
     if (url.pathname === "/denpa/card/readers" && request.method === "PUT") {
@@ -699,6 +817,11 @@ const options: Bun.ServeOptions = {
     if (url.pathname === "/denpa/about" && request.method === "GET") {
       if (aboutMode === "off") return new Response("failed", { status: 500 });
       return json(agentAbout());
+    }
+    if (url.pathname === "/denpa/raw/probe" && request.method === "POST") {
+      return request
+        .json()
+        .then((body: { path?: unknown }) => probeRaw(body.path));
     }
     if (url.pathname === "/denpa/decode" && request.method === "POST") {
       return request

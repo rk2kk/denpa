@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { RECORDING, scenes } from "../../../tests/fake/tuner-scenes";
+import {
+  agentScenes,
+  RECORDING,
+  scenes,
+} from "../../../tests/fake/tuner-scenes";
+import { placesKey } from "./agent-order";
 import {
   type Accepted,
   assign,
@@ -87,7 +92,7 @@ describe("assign", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reservation.id).toBe(3);
     expect(rejected[0]!.reason).toContain(
-      "GR を受けられるチューナーが足りません",
+      "地上波を受けられるチューナーが足りません",
     );
   });
 
@@ -212,7 +217,7 @@ describe("assign (前後マージン)", () => {
     const second = accepted.find((a) => a.reservation.id === 2);
     // 前は番組の終わりで離す (マージン +15 を諦める)
     expect(first?.to).toBe(100);
-    // 後ろは番組を丸ごと録れる (頭のマージンだけ諦める)
+    // 後ろは番組を丸ごと録れる (開始マージンだけ諦める)
     expect(second?.from).toBe(100);
     expect(whole(first!)).toBe(true);
     expect(whole(second!)).toBe(true);
@@ -280,7 +285,7 @@ describe("assign (前後マージン)", () => {
       tuners("GR", "GR+BS+CS"),
       MARGINS,
     );
-    // T21 の尻のマージンは衛星の番組に負けるので、T21 の番組が終わる 400 から
+    // T21 の終了マージンは衛星の番組に負けるので、T21 の番組が終わる 400 から
     expect(accepted.find((a) => a.reservation.id === 4)?.from).toBe(400);
   });
 
@@ -572,11 +577,93 @@ describe("エージェントと同じ場面", () => {
           to: closed < 0 ? scene.steps.length : closed,
         };
       });
+      expect(
+        placements(holds, capacity).map((placed) => placed?.rank ?? null),
+      ).toEqual(opens.map(({ step }) => step.rank));
+    });
+  }
+});
+
+/**
+ * **エージェントが 2 台のときの場面** (`tests/fake/tuner-scenes.ts` の `agentScenes`)。
+ * 偽のエージェント 2 台への振り分け (`agent-routing.test.ts`) と同じ場面で、割り振りも同じエージェントの同じ組に入れる
+ */
+describe("エージェントが 2 台のときの場面", () => {
+  for (const scene of agentScenes) {
+    test(scene.name, () => {
+      // エージェントの行の ID は並びの順に 1 から
+      const idOf = (name: string) =>
+        scene.agents.findIndex((agent) => agent.name === name) + 1;
+      const capacity = capacityOf(
+        scene.agents.flatMap((agent, i) =>
+          agent.tuners.map((tuner) => ({ ...tuner, agent: i + 1 })),
+        ),
+      );
+      const opens = scene.steps.flatMap((step, at) =>
+        "open" in step && step.priority >= RECORDING ? [{ step, at }] : [],
+      );
+      const holds = opens.map(({ step, at }) => {
+        const closed = scene.steps.findIndex(
+          (s, i) => i > at && "close" in s && s.close === step.open,
+        );
+        return {
+          type: step.type,
+          channel: placesKey(
+            scene.agents.flatMap((agent, i) => {
+              const channel = agent.channels[step.ts];
+              return channel === undefined ? [] : [{ agent: i + 1, channel }];
+            }),
+          ),
+          from: at,
+          to: closed < 0 ? scene.steps.length : closed,
+        };
+      });
       expect(placements(holds, capacity)).toEqual(
-        opens.map(({ step }) => step.rank),
+        opens.map(({ step }) =>
+          step.at === null
+            ? null
+            : { agent: idOf(step.at.agent), rank: step.at.rank },
+        ),
       );
     });
   }
+});
+
+describe("受けられる所が局ごとに違うとき (カードで絞った局)", () => {
+  test("離すのは自分が入った選局。同じ TS のほかの局が入った選局は離さない", () => {
+    const capacity = capacityOf([
+      { types: ["BS"], rank: 0, agent: 1 },
+      { types: ["BS"], rank: 0, agent: 2 },
+    ]);
+    const hold = (channel: string, from: number, to: number) => ({
+      type: "BS",
+      channel,
+      from,
+      to,
+    });
+    expect(
+      placements(
+        [
+          hold("1\tBS03", 0, 2),
+          // 1 が塞がっているので 2 に入る
+          hold("1\tBS01\n2\tBS01", 1, 5),
+          // カードで 1 に絞った同じ TS の局。1 が空いたので 1 に入る
+          hold("1\tBS01", 3, 10),
+          // 上の 2 つめが 5 で離れたので 2 が空いている
+          hold("2\tBS05", 6, 8),
+          // 1 は 3 つめが使い続けている
+          hold("1\tBS07", 6, 8),
+        ],
+        capacity,
+      ),
+    ).toEqual([
+      { agent: 1, rank: 0 },
+      { agent: 2, rank: 0 },
+      { agent: 1, rank: 0 },
+      { agent: 2, rank: 0 },
+      null,
+    ]);
+  });
 });
 
 const MIN = 60_000;
@@ -613,7 +700,7 @@ describe("兼用のチューナーがあるとき (#668)", () => {
         .map((a) => a.reservation.id)
         .sort(),
     ).toEqual([1, 2]);
-    // 衛星は T21 が兼用を離す 24:00 から (T21 の尻のマージンは番組に負ける)
+    // 衛星は T21 が兼用を離す 24:00 から (T21 の終了マージンは番組に負ける)
     const bs = accepted.find((a) => a.reservation.id === 3);
     expect(bs?.from).toBe(at(24));
     expect(bs?.to).toBe(at(24, 30) + MARGINS.end);
@@ -659,7 +746,7 @@ describe("兼用のチューナーがあるとき (#668)", () => {
     ).toEqual([1, 2, 3]);
     expect(rejected.map((r) => r.reservation.id)).toEqual([4]);
     expect(rejected[0]?.reason).toContain(
-      "BS/CS を受けられるチューナーが足りません",
+      "BS・CS を受けられるチューナーが足りません",
     );
   });
 
@@ -699,7 +786,7 @@ describe("兼用のチューナーがあるとき (#668)", () => {
         .map((a) => a.reservation.id)
         .sort(),
     ).toEqual([1, 2, 4]);
-    // T21 は専用が空く 22:00 から (T16 の尻のマージンは番組に負ける)
+    // T21 は専用が空く 22:00 から (T16 の終了マージンは番組に負ける)
     expect(accepted.find((a) => a.reservation.id === 3)?.from).toBe(at(22));
   });
 
@@ -752,10 +839,10 @@ describe("兼用のチューナーがあるとき (#668)", () => {
   });
 
   /*
-   * 割り振りは変わるところだけなぞり直して速くしてある (`Timeline`)。通したものを頭から素直に
+   * 割り振りは変わるところだけなぞり直して速くしてある (`Timeline`)。通したものを先頭から素直に
    * なぞり直して (`placements`)、全員が最後まで 1 台のチューナーを使えることを確かめる
    */
-  test("通したものは、約束どおりに頭からなぞっても全員使える", () => {
+  test("通したものは、約束どおりに先頭からなぞっても全員使える", () => {
     const next = random(3);
     const channels = {
       GR: ["T16", "T21", "T22"],
@@ -804,7 +891,7 @@ describe("兼用のチューナーがあるとき (#668)", () => {
         { types: ["GR"], rank: 0 },
         { types: ["GR"], rank: null },
       ]),
-    ).toEqual([{ rank: 0, types: new Set(["GR"]), count: 1 }]);
+    ).toEqual([{ agent: 0, rank: 0, types: new Set(["GR"]), count: 1 }]);
   });
 });
 
@@ -968,7 +1055,7 @@ describe("チューナーの取り合い (プレビュー、兼用のチュー�
       end_at: at(22),
     });
     const busy = [{ type: "GR", channel: "T21", rank: 1, until: at(21, 30) }];
-    // 名指しする相手 (番組) はいないが、入れないことは分かる。予約の側 (`assign`) で頭が欠ける
+    // 名指しする相手 (番組) はいないが、入れないことは分かる。予約の側 (`assign`) で先頭が欠ける
     expect(contentions([bs], MIXED, NO_MARGIN, busy).get(1)).toBeUndefined();
     const other = occ({
       programId: 2,
@@ -985,7 +1072,7 @@ describe("チューナーの取り合い (プレビュー、兼用のチュー�
     );
   });
 
-  test("時間帯の頭は、誰も使っていない瞬間までさかのぼる", () => {
+  test("時間帯の始まりは、誰も使っていない瞬間までさかのぼる", () => {
     const list = [
       occ({ programId: 1, channel: "T16", start_at: at(21), end_at: at(23) }),
       occ({ programId: 2, channel: "T21", start_at: at(22), end_at: at(24) }),

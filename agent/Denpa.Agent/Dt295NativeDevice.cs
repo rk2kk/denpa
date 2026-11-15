@@ -5,12 +5,12 @@ namespace Denpa.Agent;
 /// <summary>
 /// PIX-DT295 1 台ぶんの持ち主。**USB のハンドルと機材の設定は 1 台に 1 つだけ**で、チューナー (<see cref="Dt295NativeTuner"/>) と
 /// カード (<see cref="Dt295NativeCard"/>) が取って使う。ホストが 0xBC のメモリ要求でレジスタを書いて機材を設定し (<see cref="Dt295NativeBoard"/>)、
-/// I2C で復調・チューナーを動かし (<see cref="Dt295NativeFrontend"/>)、機材の中では TS を送る小さなプログラムだけを動かす (<see cref="Dt295NativePrograms"/>)。
+/// I2C で復調・チューナーを動かし (<see cref="Dt295NativeFrontend"/>)、機材の中では TS の送り出し・I2C の順次実行・カードの送受信を実行する小さなプログラムだけを動かす (<see cref="Dt295NativePrograms"/>)。
 ///
 /// <para>
-/// 開くときは起動直後の機材に設定を書く。起動直後でなければ (途中で止まった自前の hook が残っている、ほかのファームウェアが動いたあと)、
+/// 開くときは起動直後の機材に設定を書く。起動直後でなければ (途中で止まった前の実行が書いた hook が残っている、ほかのファームウェアが動いたあと)、
 /// Linux はポートの電源を 1 回入れ直してからやり直し、ほかの OS は挿し直しを求めて断る。
-/// 閉じるときは書いたものを逆順に戻すので、続けて開き直せる (実機で確かめた)。エージェントが動いている間は開いたまま (Zd1jBoard と同じ)
+/// 閉じるときは書いたものを逆順に戻すので、続けて開き直せる (実機で確かめた)。外部メモリーの有効化 (仕様書 3.3) と USB のレジスタ (仕様書 8.4) は戻さない。エージェントが動いている間は開いたまま (Zd1jBoard と同じ)
 /// </para>
 /// </summary>
 public sealed class Dt295NativeDevice
@@ -50,11 +50,11 @@ public sealed class Dt295NativeDevice
     /// <summary>カードの準備が済むまでの時間 (ms。機材を開き始めてから)。済んでいなければ -1</summary>
     public long CardReadyMs { get; private set; } = -1;
 
-    /// <summary>カードの準備を進めている仕事 (まだ始めていなければ null)</summary>
+    /// <summary>カードの準備を進めているタスク (まだ始めていなければ null)</summary>
     public Task? CardWarmTask => _cardWarm;
 
     /// <summary>
-    /// カードの電源投入から ATR・T=1 の話し方の取り決めまでを、別のスレッドで始める (1 台に 1 回)。選局の待ち (仕様書の固定の待ち) と
+    /// カードの電源投入から ATR・T=1 の IFSD の取り決めまでを、別のスレッドで始める (1 台に 1 回)。選局の待ち (仕様書の固定の待ち) と
     /// 受信の確認の周回の間に進むので、TS が届くころにはカードが使える。制御転送と機材のプログラムへの要求は 1 つずつ通る (<c>Dt295NativeLink</c>) ので、
     /// 選局の I2C の手順と交互に入る。カードが無ければ記録に残して終わる (使うときの <see cref="Dt295NativeCard.Reset"/> がもう一度試す)
     /// </summary>
@@ -105,7 +105,7 @@ public sealed class Dt295NativeDevice
     /// <paramref name="timeline"/> と <paramref name="trace"/> は --dt295-probe だけが渡す (開くときだけ効く)
     /// </summary>
     public static Dt295NativeDevice Acquire(string port, Dt295Timeline? timeline = null, Action<string>? trace = null) =>
-        Acquire(port, () => Dt295.OpenUsb(port), OperatingSystem.IsLinux() ? () => UsbSysfs.PowerCycle(UsbSysfs.Devices, port, TimeSpan.FromSeconds(10)) : null,
+        Acquire(port, () => Dt295.OpenUsb(port), UsbHost.Current.PowerCycle is { } cycle ? () => cycle(port, TimeSpan.FromSeconds(10)) : null,
             timeline: timeline, trace: trace);
 
     /// <param name="open">USB を開く</param>
@@ -148,7 +148,8 @@ public sealed class Dt295NativeDevice
             }
             device._users = 1;
             lock (Registry) Devices[port] = device;
-            Log.Write($"[{Dt295.Model} {port}] 開きました (設定 {device.SetUp.Time.TotalMilliseconds:F0}ms、制御転送 {device.SetUp.Controls} 回)");
+            var card = device.Link.CardProgram ? "機材のプログラム" : "ホストが 1 バイトずつ";
+            Log.Write($"[{Dt295.Model} {port}] 開きました (設定 {device.SetUp.Time.TotalMilliseconds:F0}ms、制御転送 {device.SetUp.Controls} 回、カードの送受信: {card})");
             return device;
         }
     }
@@ -204,13 +205,19 @@ public sealed class Dt295NativeDevice
             using (timeline.Step("I2C の準備", "仕様書 6.4。書いて読み戻す")) i2cSaved = i2c.Prepare();
             undo.Push(("I2C の設定を戻す", () => i2c.Restore(i2cSaved)));
             if (!i2c.Alive) throw new Dt295NativeException("I2C のレジスタが書いた値で読めません");
-            // 機材の中の I2C の順次実行が使えれば使う。使えなければ、ホストが 1 つずつ行う
+            // 機材の中の I2C の順次実行が使えれば使う。使えなければ、ホストが 1 つずつ実行する
             using (timeline.Step("I2C の順次実行の確認", "転送 0 個の要求と、操作列の置き場の読み書き"))
             {
                 i2c.UseSequencer = link.ProbeI2cSequencer();
             }
+            // カードの送受信も、機材のプログラムが使えれば使う。長いブロックの置き場 (SDRAM) は I2C の確認で読み書きを確かめたものを使う。
+            // 使えなければ、ホストがカードの UART を 1 バイトずつ読み書きする
+            using (timeline.Step("カードの送受信の確認", "長さ 0 の送りと上限 0 の受けの要求"))
+            {
+                link.CardProgram = i2c.UseSequencer && link.ProbeCardProgram();
+            }
             using (timeline.Step("復調とチューナーの初期化 (INITIALIZE の I2C)", "仕様書 7.1")) frontend.Initialize();
-            undo.Push(("地上波側を休ませる", frontend.RestTerrestrial));
+            undo.Push(("地上波側を待機させる", frontend.RestTerrestrial));
             return new Dt295NativeDevice(port, usb, link, board, frontend, undo, (clock.Elapsed, link.Controls), idlePolls, timeline, opened, sleep);
         }
         catch
@@ -303,7 +310,7 @@ public sealed class Dt295NativeDevice
         {
             if (_closed) return;
             _closed = true;
-            // カードの電源を切る (準備の仕事が進んでいれば、終わるのを少し待つ)
+            // カードの電源を切る (準備のタスクが進んでいれば、終わるのを少し待つ)
             try
             {
                 _cardWarm?.Wait(TimeSpan.FromSeconds(3));

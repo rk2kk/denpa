@@ -25,6 +25,7 @@ import { Outlet, playbackSession } from "#lib/sound.js";
 
 import type { FromWorker, GrabSize, RawInput, ToWorker } from "./messages";
 import { type Chunk, Playout, type Scheduled } from "./playout";
+import { audioContext, Seam } from "./seam";
 
 /** 刻み (ms)。音の予約と時計の配り直しをここで回す */
 const TICK = 20;
@@ -53,10 +54,13 @@ interface AudioChunk extends Chunk {
 interface RawEvents {
   /** 選局し直してから最初のフレームが出た */
   shown(): void;
-  /** 貯めを使い切って止まった (エンコードする経路の `waiting` にあたる) */
+  /** バッファを使い切って止まった (エンコードする経路の `waiting` にあたる) */
   stalled(): void;
-  /** **使えなくなった。** 次の方式に移るか止まるかは画面が決める (理由は画面に出す) */
-  gaveUp(reason: string): void;
+  /**
+   * **使えなくなった。** 次の方式に移るか止まるかは画面が決める (理由は画面に出す)。`slow` は間に合わずに打ち切ったときだけ付く、
+   * 掛かった条件 (`DecodeBudget.why`)
+   */
+  gaveUp(reason: string, slow?: string): void;
   /**
    * 外から止められた・再開された (`paused`)。**`<audio>` を通している間だけ**。
    * ロック画面・車のハンドルの再生ボタン・ブラウザの再生中の通知は `<audio>` を直に
@@ -82,6 +86,8 @@ export class RawEngine {
   private readonly outlet: Outlet;
   private readonly playout: Playout<AudioChunk>;
   private readonly nodes = new Set<AudioBufferSourceNode>();
+  /** 予約したコマを継ぎ目なく並べる (`seam.ts`)。止めたら保持していた終わりを破棄する (`stopAll`) */
+  private readonly seam: Seam;
   private readonly timer: ReturnType<typeof setInterval>;
   /** 画面の切り替わりを worker へ知らせる requestAnimationFrame (`cadence.ts`) */
   private frame = 0;
@@ -168,7 +174,8 @@ export class RawEngine {
        * (`background`)。切っているのに言うと、裏で鳴らす音として扱われる
        */
       playbackSession(background);
-      this.context = context = new AudioContext({ latencyHint: "playback" });
+      this.context = context = audioContext("playback");
+      this.seam = new Seam(context.sampleRate);
       this.gain = context.createGain();
       this.outlet = new Outlet(
         context,
@@ -231,7 +238,7 @@ export class RawEngine {
     this.outlet.want(background);
   }
 
-  /** 見えているかを worker へ (`visible`)。見えていない間は映像をデコードしない */
+  /** 見えているかを worker へ (`visible`)。見えていない間は映像をデコードしない (放送のままの MPEG-2 のとき) */
   private readonly onVisibility = (): void => {
     this.send({ type: "visible", on: document.visibilityState === "visible" });
   };
@@ -261,7 +268,7 @@ export class RawEngine {
     return this.context.state !== "running";
   }
 
-  /** 届いた TS を渡す。**写さずに worker へ移す** (1 局 15Mbit/s ぶんを毎秒写さない) */
+  /** 届いたものを `offset` から渡す (`messages.ts` の `data`)。**写さずに worker へ移す** (1 局 15Mbit/s ぶんを毎秒写さない) */
   feed(buffer: ArrayBuffer, offset: number): void {
     this.send({ type: "data", buffer, offset }, [buffer]);
   }
@@ -440,9 +447,9 @@ export class RawEngine {
     if (!this.gone) this.worker.postMessage(message, transfer);
   }
 
-  private giveUp(reason: string): void {
+  private giveUp(reason: string, slow?: string): void {
     if (this.gone) return;
-    this.events.gaveUp(reason);
+    this.events.gaveUp(reason, slow);
   }
 
   private receive(message: FromWorker): void {
@@ -503,7 +510,7 @@ export class RawEngine {
         this.canvas.dataset["thinned"] = String(message.thinned);
         break;
       case "fail":
-        this.giveUp(message.reason);
+        this.giveUp(message.reason, message.slow);
         break;
       case "full":
         if (!this.gone) this.events.full();
@@ -625,11 +632,16 @@ export class RawEngine {
     node.buffer = buffer;
     node.connect(this.gain);
     node.onended = () => this.nodes.delete(node);
-    node.start(scheduled.when, scheduled.offset);
+    const when = this.seam.place(
+      scheduled.when,
+      frames / chunk.sampleRate - scheduled.offset,
+    );
+    node.start(when, scheduled.offset);
     this.nodes.add(node);
   }
 
   private stopAll(): void {
+    this.seam.reset();
     for (const node of this.nodes) {
       try {
         node.stop();

@@ -4,9 +4,9 @@ using System.Runtime.CompilerServices;
 namespace Denpa.Agent.Tests;
 
 /*
- * USB の層 (UsbDevice.cs・UsbFsDevice.cs)。機材なしで確かめられる所: usbfs の ioctl の番号と構造体の大きさ
- * (カーネルの uapi の linux/usbdevice_fs.h の形)、Windows と macOS のポートの名前の作り方、
- * interrupt の読みを出し続ける UsbReadPump (UsbDevice.cs)。
+ * USB の層 (UsbDevice.cs・UsbFs.cs・UsbFsDevice.cs)。機材なしで確かめられる所: usbfs の ioctl の番号と構造体の大きさ
+ * (カーネルの uapi の linux/usbdevice_fs.h の定義)、Windows と macOS のポートの名前の作り方、
+ * interrupt の転送要求を出し続ける UsbReadPump (UsbDevice.cs)。
  */
 public class UsbDeviceTests
 {
@@ -27,6 +27,19 @@ public class UsbDeviceTests
     }
 
     [Test]
+    public async Task usbfs_のノードを開けなかったときは_無いのか権限が無いのかを分けて書く()
+    {
+        await Assert.That(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Enoent))
+            .IsEqualTo("/dev/bus/usb/001/002 がありません (抜かれたか、コンテナに /dev/bus/usb が見えていません)");
+        await Assert.That(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Enodev))
+            .IsEqualTo(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Enoent));
+        await Assert.That(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Eacces))
+            .IsEqualTo("/dev/bus/usb/001/002 を開く権限がありません (コンテナに USB 機材の読み書きを許してください)");
+        await Assert.That(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Eperm))
+            .IsEqualTo(UsbFs.OpenError("/dev/bus/usb/001/002", UsbFs.Eacces));
+    }
+
+    [Test]
     public async Task Windows_のポートの名前は場所の文字列から()
     {
         string[] controllers = ["PCIROOT(0)#PCI(0800)#PCI(0003)", "PCIROOT(0)#PCI(1400)"];
@@ -44,7 +57,7 @@ public class UsbDeviceTests
         await Assert.That(UsbDevices.MacPort(0x14320000)).IsEqualTo("20-3.2");
         await Assert.That(UsbDevices.MacPort(0x01100000)).IsEqualTo("1-1");
         await Assert.That(UsbDevices.MacPort(0x14000000)).IsNull();
-        // どれも sysfs の名前と同じ形なので、zd1j: の device にそのまま書ける
+        // どれも sysfs の名前と同じ形式なので、zd1j: の device にそのまま書ける
         await Assert.That(Zd1j.Parse($"zd1j:{UsbDevices.MacPort(0x14320000)}")).IsEqualTo("20-3.2");
     }
 
@@ -55,7 +68,7 @@ public class UsbDeviceTests
         await Assert.That(line).IsEqualTo("EP 0x81 bulk 512 バイト、EP 0x02 bulk 512 バイト、EP 0x83 interrupt 64 バイト");
     }
 
-    /// <summary>時間切れの無い読みの偽物。答えを 1 つずつ返し、取り消されるまで待つ</summary>
+    /// <summary>時間切れの無い転送要求の偽物。応答を 1 つずつ返し、取り消されるまで待つ</summary>
     private sealed class FakeEndpoint
     {
         public readonly BlockingCollection<byte[]> Answers = [];
@@ -81,7 +94,7 @@ public class UsbDeviceTests
     }
 
     [Test]
-    public async Task interrupt_の読みは時間切れでも取り消さず_遅れて届いた答えを次に渡す()
+    public async Task interrupt_の読み出しは時間切れでも取り消さず_遅れて届いた応答を次に渡す()
     {
         var endpoint = new FakeEndpoint();
         var cancels = 0;
@@ -92,28 +105,28 @@ public class UsbDeviceTests
         });
         var buffer = new byte[64];
 
-        // 何も届かなければ、待った時間で 0 を返す。出している読みは取り消さない
+        // 何も届かなければ、待った時間で 0 を返す。出している転送要求は取り消さない
         await Assert.That(pump.Read(buffer, 10)).IsEqualTo(0);
         await Assert.That(cancels).IsEqualTo(0);
 
-        // 時間切れのあとに届いた答えは、次の読みで受け取れる (落とさない)
+        // 時間切れのあとに届いた応答は、次の読み出しで受け取れる (捨てない)
         endpoint.Answers.Add([0xA5, 1, 2, 3]);
         await Assert.That(pump.Read(buffer, 1000)).IsEqualTo(4);
         await Assert.That(buffer[0]).IsEqualTo((byte)0xA5);
 
-        // 1 回の転送が 1 つの答え。続けて届いても混ぜない
+        // 1 回の転送が 1 つの応答。続けて届いても混ぜない
         endpoint.Answers.Add([1, 1]);
         endpoint.Answers.Add([2, 2, 2]);
         await Assert.That(pump.Read(buffer, 1000)).IsEqualTo(2);
         await Assert.That(pump.Read(buffer, 1000)).IsEqualTo(3);
         await Assert.That(buffer[0]).IsEqualTo((byte)2);
 
-        // 読みの大きさは渡した最大パケット長
+        // 転送要求の大きさは渡した最大パケット長
         await Assert.That(endpoint.Size).IsEqualTo(64);
     }
 
     [Test]
-    public async Task interrupt_の読みはバッファに入るぶんだけ渡す()
+    public async Task interrupt_の読み出しはバッファに入るぶんだけ渡す()
     {
         var endpoint = new FakeEndpoint();
         using var pump = new UsbReadPump("test", 64, endpoint.Read, endpoint.Cancelled.Cancel);
@@ -121,12 +134,12 @@ public class UsbDeviceTests
         var small = new byte[4];
         await Assert.That(pump.Read(small, 1000)).IsEqualTo(4);
         await Assert.That(small).IsEquivalentTo(new byte[] { 1, 2, 3, 4 });
-        // 残りは捨てる (Linux・Windows の 1 回の読みと同じ)
+        // 残りは捨てる (Linux・Windows の 1 回の読み出しと同じ)
         await Assert.That(pump.Read(small, 10)).IsEqualTo(0);
     }
 
     [Test]
-    public async Task interrupt_の読みが失敗したら_届いていた答えを渡してから投げる()
+    public async Task interrupt_の読み出しが失敗したら_届いていた応答を渡してから例外を送出する()
     {
         var answers = new Queue<Func<byte[], int>>();
         answers.Enqueue(buffer =>
@@ -150,15 +163,15 @@ public class UsbDeviceTests
     }
 
     [Test]
-    public async Task 閉じると出している読みを取り消して_スレッドが戻る()
+    public async Task 閉じると出している転送要求を取り消して_スレッドが戻る()
     {
         var endpoint = new FakeEndpoint();
         var pump = new UsbReadPump("test", 64, endpoint.Read, endpoint.Cancelled.Cancel);
-        // 読みが出ているところまで待つ
+        // 転送要求が出ているところまで待つ
         for (var i = 0; i < 200 && Volatile.Read(ref endpoint.Reads) == 0; i++) Thread.Sleep(5);
         pump.Dispose();
         await Assert.That(endpoint.Cancelled.IsCancellationRequested).IsTrue();
-        // 取り消して戻った読みのあとは、もう出さない
+        // 取り消して戻った転送要求のあとは、もう出さない
         var reads = Volatile.Read(ref endpoint.Reads);
         Thread.Sleep(50);
         await Assert.That(Volatile.Read(ref endpoint.Reads)).IsEqualTo(reads);
@@ -166,12 +179,12 @@ public class UsbDeviceTests
     }
 
     [Test]
-    public async Task interrupt_の溜めは上限を越えたら古いものから捨てる()
+    public async Task interrupt_のバッファは上限を越えたら古いものから捨てる()
     {
         var endpoint = new FakeEndpoint();
         using var pump = new UsbReadPump("test", 64, endpoint.Read, endpoint.Cancelled.Cancel);
         for (var i = 0; i < UsbReadPump.Capacity + 3; i++) endpoint.Answers.Add([(byte)i]);
-        // 全部を読み終えて次の読みを出すまで待つ
+        // 全部を読み終えて次の転送要求を出すまで待つ
         for (var i = 0; i < 400 && Volatile.Read(ref endpoint.Reads) <= UsbReadPump.Capacity + 3; i++) Thread.Sleep(5);
         var buffer = new byte[64];
         await Assert.That(pump.Read(buffer, 1000)).IsEqualTo(1);
@@ -179,7 +192,7 @@ public class UsbDeviceTests
     }
 
     [Test]
-    public async Task 取り消しても戻らない読みは_戻らなかったと知らせる()
+    public async Task 取り消しても転送要求が戻らなければ_Stop_は_false_を返す()
     {
         var release = new ManualResetEventSlim();
         var reading = new ManualResetEventSlim();
@@ -189,7 +202,7 @@ public class UsbDeviceTests
             release.Wait();
             return 0;
         }, () => { });
-        // 読みが出てから止める (スレッドが読みに入る前に止めると、読まずに戻るので true になる)
+        // 転送要求が出てから止める (スレッドが読み出しに入る前に止めると、読まずに戻るので true になる)
         reading.Wait(TimeSpan.FromSeconds(5));
         // インターフェースを手放してよいかを、呼ぶ側 (IoKitDevice.Dispose) が決める
         await Assert.That(pump.Stop()).IsFalse();

@@ -2,7 +2,7 @@
   import type { Snippet } from "svelte";
 
   /**
-   * 映像と重ねものの束 (ライブ・追っかけ)。録画視聴は video の配線が
+   * 映像と重ねものの束 (ライブ・追っかけ)。観る画面は video の配線が
    * まるで違う (src 再生・続き・CM スキップ) ので、こちらは使わない。
    *
    * - `video` … 映像。**備え付けの操作 (`controls`) は出さない**。あれの
@@ -12,7 +12,7 @@
    * - `under` … 前の映像と字幕の間に重ねるもの (実況のコメント。`JikkyoLayer`)。
    *   実況と字幕は操作バーの影より上に出す (段の数は `ControlBar`)
    * - `overlay` … 放送の字幕。放送の位置・背景の箱・外字のまま描くので canvas に重ねる。
-   *   `object-fit` は描く係 (`CaptionPainter`) が `fill` / `contain` に切り替える
+   *   `object-fit` は描く処理 (`CaptionPainter`) が `fill` / `contain` に切り替える
    * - 入れ物 (`box`) … データ放送が小窓へ寄せる先 (`DataBroadcast` の `placeVideo`)。
    *   字幕も中にあるので映像と一緒に縮む
    */
@@ -91,7 +91,7 @@
     pointer-events: none;
   }
   .still {
-    transition: opacity var(--dp-duration);
+    transition: opacity var(--dp-duration) var(--dp-ease);
   }
   /* 字幕は実況より上、操作バーのボタンより下 (`app.css` の `--dp-z-stage-*`) */
   .captions {

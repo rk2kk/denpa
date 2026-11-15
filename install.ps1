@@ -5,24 +5,26 @@
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1))) -Uninstall
 #       引数を渡すときはこの書き方。-NoOpen (ブラウザを開かない) / -Uninstall (止めて外す。DB・設定・録画は残す) /
 #       -AgentOnly (エージェントだけ。denpa 本体は別の機械で動かす)
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1))) -WinUsb
+#       入れたあとで。挿さっているチューナーのドライバを WinUSB に替える (機材ごとに聞いてから。-Yes を足すと聞かずに替える。Invoke-WinUsb)
 #
 # **denpa 本体もエージェントも Windows の上でそのまま動かす** (コンテナは使わない)。本体は配布物の bun と ffmpeg で、
 # エージェントは .NET の実行ファイル。どちらもタスク スケジューラの「起動したら起こす」タスクに **SYSTEM で**載せるので、
 # 誰もログインしていなくても録画でき、外から観られる。そのために管理者で流す。
-# **Windows で使えるチューナーは px4-userland の機材 (PX-Q3U4 など) と siano-userland の機材 (PX-S1UD など) と Sony CECH-ZD1 J と PIXELA PIX-DT295 (試験的)**
-# (DVB は無い)。ドライバを WinUSB にするのは人の手で (Zadig。docs/install-windows.md)。
+# **Windows で使えるチューナーは IT930x の機材 (PX-MLT5・PX-Q3・PX-W3 系など) と Siano の機材 (PX-S1UD など) と Sony CECH-ZD1 J と PIXELA PIX-DT295 (試験的)**
+# (DVB は無い)。**入れるときにはドライバを替えない。** WinUSB にするのは、人が -WinUsb を付けて流したときだけ
+# (エージェントの zip に入っている libwdi の wdi-simple.exe で。Zadig でもよい。docs/install-windows.md)。
 #
 # もう一度流せば上げ直し。本体は**エージェントと同じリリースのバージョン**に揃える。
 # 前のバージョン (本体を wslc のコンテナで動かしていた) からは、DB を写して移る (Move-FromWslc)。
 #
 # 置き場:
-#   %ProgramFiles%\denpa\                 エージェントと通知領域のアイコン (bin\)・px4-userland・siano-userland・本体 (server\。bun・アプリ・ffmpeg・字・デコーダ)・
+#   %ProgramFiles%\denpa\                 エージェントと通知領域のアイコン (bin\)・本体 (server\。bun・アプリ・ffmpeg・字・デコーダ)・
 #                                         エージェントを起こす denpa-agent.cmd (管理者しか書けない。SYSTEM で動かすものを、ほかの人に書き換えさせない)
 #   %ProgramData%\denpa\                  DB (denpa.db) とその隣のもの (局ロゴ・鍵)・denpa.env (本体の環境変数。無いときだけ雛形を作る)・本体を起こす denpa.cmd。
 #                                         SYSTEM と管理者だけが読み書きできる
 #   ~/denpa (DENPA_HOME)                  エージェントの config/ (tls\pair-token は denpa とエージェントが組むときの合言葉。無いときだけ作る)・
 #                                         ログ (denpa.log・denpa-agent.log)
-#   C:\denpa-run                          px4d のソケットの置き場 (持ち主は SYSTEM、書けるのは SYSTEM・Administrators だけ。px4d がそう決めている)
 #   ~/Videos/denpa/{recorded,library}     元の TS と出来上がった録画
 #
 # 環境変数: DENPA_VERSION (v1.2.3 のように。既定は最新のリリース。CI はコミットを渡す)、DENPA_HOME、
@@ -31,21 +33,11 @@
 # Windows に最初から入っている PowerShell 5.1 で動くように書く (pwsh でも動く)。
 # `irm | iex` は呼んだ人のセッションでそのまま走るので、exit は使わない (窓ごと閉じる)。
 # ---------------------------------------------------------------------------
-param([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly)
+param([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly, [switch]$WinUsb, [switch]$Yes)
 
-# siano-userland のバージョン。**agent/Dockerfile・install.sh と揃える** (Renovate が一緒に上げる)。
-# 中身は配布元の SHA256SUMS で確かめるので、バージョンを上げてもここのハッシュは要らない
-# renovate: datasource=github-releases depName=Khronos31/siano-userland extractVersion=^v(?<version>.*)$
-$SianoUserlandVersion = '0.1.10'
-$IsdbtRioSha256 = '054520642d5d09cb7ab7d08dbd6fd9ba9365de56adf2e7d7d06927f9845ff818'
-# px4-userland のバージョンも同じ。**0.2.1 より下げない** (Windows 対応は 0.2.0 から、--runtime-dir を明示したときの
-# 起動の不具合が直ったのが 0.2.1)
-# renovate: datasource=github-releases depName=Khronos31/px4-userland extractVersion=^v(?<version>.*)$
-$Px4UserlandVersion = '0.2.1'
-# IT930x のファームウェアはエージェントに同梱している (agent/Denpa.Agent/Px4Firmware.cs)。ここでは置かない
-# 配布 zip から取り出すもの。**使うのは px4d.exe と px4ctl.exe だけ** (受信機もカードも px4d の制御ソケットで直に話す)。
-# px4-ts.exe と WinSCard.dll (B25 のアプリの横に置く代わりの DLL) は置かない。残りはライセンスの文書
-$Px4Keep = @('px4d.exe', 'px4ctl.exe', 'LICENSE', 'DEPENDENCY-NOTICE.txt', 'THIRD_PARTY_NOTICES.md', 'libusb/*', 'toolchain/*')
+# 入れ方の 1 行 (案内に出す)
+$Installer = 'https://raw.githubusercontent.com/danything/denpa/main/install.ps1'
+$WinUsbCommand = "& ([scriptblock]::Create((irm $Installer))) -WinUsb"
 
 $Repo = 'danything/denpa'
 $WebPort = 3000
@@ -55,8 +47,7 @@ $Prefix = Join-Path $env:ProgramFiles 'denpa'
 $Data = Join-Path $env:ProgramData 'denpa'
 # 前のバージョンの置き場 (ユーザーのフォルダの下。エージェントと wslc の本体を起こす denpa-start.ps1)。見つけたら移して消す
 $OldPrefix = Join-Path $env:LOCALAPPDATA 'denpa-agent'
-# px4d のソケットの置き場。**ユーザーのフォルダの下にしない。** ソケットのパスは UTF-8 で 108 バイトまでで、
-# 日本語のユーザー名だとすぐ溢れる。非 ASCII のパスだと px4d の ready の行も途切れる (px4-userland #52)
+# 前のバージョンが px4d のソケットを置いていた場所 (Remove-Px4Runtime)
 $Px4Runtime = 'C:\denpa-run'
 $Media = Join-Path $env:USERPROFILE 'Videos\denpa'
 $Log = Join-Path $DenpaDir 'denpa-agent.log'
@@ -68,6 +59,8 @@ $WakeTask = 'denpa-wake'
 $FirewallRule = 'denpa'
 # 通知領域のアイコン (tray/Denpa.Tray)。エージェントと同じ zip に入っていて、サインインしたら HKLM の Run から起きる
 $TrayExe = Join-Path $Prefix 'bin\denpa-tray.exe'
+# libwdi の wdi-simple.exe (Zadig のコマンドライン版)。エージェントと同じ zip に入っていて、-WinUsb が使う
+$WdiSimple = Join-Path $Prefix 'bin\libwdi\wdi-simple.exe'
 $RunKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'denpa'
 $Port = 25252
@@ -77,6 +70,8 @@ $Volume = 'denpa-data'
 $Tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 $System = 'S-1-5-18'
 $Administrators = 'S-1-5-32-544'
+# 動く Windows の下限のビルド (Windows 10 1809 / Windows Server 2019。Invoke-Main)
+$MinBuild = 17763
 
 function Say([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -171,15 +166,14 @@ function Test-Recording([string]$Exe) {
 
 # 止める。**録画中なら終わるまで待つ** (Windows にはプロセスに「止まれ」を伝える手が無く、止めればその場で落ちる。
 # Linux・Mac のように録画を待ってから畳むことができないので、ここで待つ)。
-# タスクを止めても、.cmd の下で起きたもの (bun・ffmpeg・エージェント・siano-ts・px4d) までは止まらないので、
+# タスクを止めても、.cmd の下で起きたもの (bun・ffmpeg・エージェント) までは止まらないので、
 # コマンドラインに置き場が入っているもので見つけて落とす (前のバージョンの置き場のものも)。
-# **px4d は先に落とさない。** エージェントが終われば px4d は標準入力が閉じたのを見て、後片付け
-# (LNB を 0V に戻す・ソケットを消す) をして自分で終わる。10 秒待っても残っていれば落とす。
 # 録画中かを聞く denpa-agent は $Exe (上げ直すときは取ってきた新しいほう。古いものは --status を知らない)。
 # -Server を付けなければエージェントだけ (-AgentOnly のとき)。エンコードの途中なら、次に起きたときにやり直す
 function Stop-Denpa([string]$Exe, [switch]$Server) {
     $tasks = @($TaskName)
-    # 通知領域のアイコン (denpa-tray.exe) もエージェントと同じ bin\ にあるので、入れ替える前に落とす
+    # 通知領域のアイコン (denpa-tray.exe) もエージェントと同じ bin\ にあるので、入れ替える前に落とす。
+    # siano-ts.exe と px4d.exe は前のバージョンのエージェントが起動していたもの (いまは置かない)
     $names = @('conhost.exe', 'cmd.exe', 'denpa-agent.exe', 'denpa-tray.exe', 'siano-ts.exe', 'px4d.exe', 'px4ctl.exe')
     if ($Server) {
         $tasks += $DenpaTask
@@ -202,8 +196,7 @@ function Stop-Denpa([string]$Exe, [switch]$Server) {
                 ($Server -or $_.Name -notin $shells -or $_.CommandLine.IndexOf('denpa-agent.cmd', [StringComparison]::OrdinalIgnoreCase) -ge 0)
             })
         if ($left.Count -eq 0) { return }
-        $left | Where-Object { $i -ge 10 -or $_.Name -ne 'px4d.exe' } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Start-Sleep -Seconds 1
     }
     throw "denpa が止まりません ($Prefix の下のプロセスをタスク マネージャーで止めてから、もう一度流してください)"
@@ -341,30 +334,152 @@ function Move-FromWslc {
     Say "移しました。wslc のボリューム $Volume は残してあります (要らなければ wslc volume rm $Volume)"
 }
 
-# Siano のチューナーが挿さっていれば、ドライバが WinUSB かを見る (入れ替えは人の手で。Zadig)
-function Show-Tuner {
+# 挿さっている USB の機材を USB ID (vid:pid) で探す。複合デバイスの子 (MI_xx) は入らない
+function Get-UsbPnp([string]$Usb) {
+    $id = $Usb -split ':'
     try {
-        $sticks = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-                Where-Object { $_.InstanceId -match '^USB\\VID_(3275&PID_0080|187F&PID_0600|187F&PID_0302)\\' })
+        return @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+                Where-Object { $_.InstanceId -match "^USB\\VID_$($id[0])&PID_$($id[1])\\" })
     } catch {
-        return
+        return @()
     }
-    if ($sticks.Count -eq 0) {
-        Say 'Siano のチューナー (PX-S1UD など) は見当たりません。挿したら、Zadig でドライバを WinUSB にしてください (docs/install-windows.md)'
-    }
-    foreach ($stick in $sticks) {
-        if ($stick.Service -eq 'WinUSB') {
-            Say "$($stick.FriendlyName): WinUSB で使えます"
-        } else {
-            Say "$($stick.FriendlyName): ドライバが $(if ($stick.Service) { $stick.Service } else { '入っていません' }) です。Zadig (https://zadig.akeo.ie) で WinUSB にしてください (docs/install-windows.md)"
+}
+
+# エージェントが USB を直に持つ機材の USB ID と名前 (denpa-agent --usb-ids。機種の表はエージェントが持つ)。
+# **wdi-simple.exe と同じバージョンのエージェントにだけ聞く。** それより前のエージェントは --usb-ids を読まずに
+# サーバを起動して、終わらない
+function Get-AgentUsbId {
+    Use-Continue
+    $exe = "$Prefix\bin\denpa-agent.exe"
+    if (-not (Test-Path -LiteralPath $WdiSimple) -or -not (Test-Path -LiteralPath $exe)) { return @() }
+    $json = & $exe --usb-ids 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $json.Trim()) { return @() }
+    $list = ConvertFrom-Json $json
+    return @($list | ForEach-Object { $_ })
+}
+
+# Windows でドライバが WinUSB でないと使えない機材の USB ID と名前。エージェントが USB を直に持つ機材 (Get-AgentUsbId。
+# IT930x の機材と、PX-S1UD などの Siano の機材もここに入る)
+function Get-WinUsbTarget {
+    $targets = @()
+    foreach ($entry in @(Get-AgentUsbId)) { $targets += [pscustomobject]@{ Usb = [string]$entry.usb; Name = [string]$entry.name } }
+    return $targets
+}
+
+# $Targets のうち挿さっている機材と、いまのドライバ (Driver。入っていなければ空)
+function Get-WinUsbDevice([object[]]$Targets) {
+    foreach ($target in $Targets) {
+        foreach ($pnp in @(Get-UsbPnp $target.Usb)) {
+            [pscustomobject]@{ Usb = $target.Usb; Name = $target.Name; Driver = [string]$pnp.Service }
         }
     }
 }
 
-# zip を開く (PowerShell 5.1 でも。中身を 1 つずつ取り出すのに使う)
-function Open-Zip([string]$Path) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    return [IO.Compression.ZipFile]::OpenRead($Path)
+# エージェントが USB を直に持つ機材が挿さっていれば、ドライバが WinUSB かを見る。
+# **ここでは替えない** (ほかのソフトで使っていた機材を、聞かずに使えなくしない)。替える 1 行を案内する (Invoke-WinUsb)
+function Show-Tuner {
+    $devices = @(Get-WinUsbDevice (Get-WinUsbTarget))
+    foreach ($device in $devices) {
+        if ($device.Driver -eq 'WinUSB') {
+            Say "$($device.Name): WinUSB で使えます"
+        } else {
+            Say "$($device.Name): $(if ($device.Driver) { "ドライバが $($device.Driver) です" } else { 'ドライバが入っていません' })。WinUSB に替えると使えます"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $WdiSimple)) {
+        Say 'チューナーのドライバは Zadig (https://zadig.akeo.ie) で WinUSB に替えます (docs/install-windows.md)'
+        return
+    }
+    if ($devices.Count -eq 0) {
+        Say 'IT930x の機材・Siano・CECH-ZD1 J・PIX-DT295 のチューナーは見当たりません'
+    }
+    Say 'チューナーを挿したあと、次の 1 行でドライバを WinUSB に替えられます (機材ごとに聞いてから替えます。docs/install-windows.md)'
+    Say "  $WinUsbCommand"
+}
+
+# wdi-simple.exe で $Usb の機材のドライバを WinUSB に替え、終了コードを返す (0 が成功。ほかは libwdi のエラーの番号)。
+# wdi-simple は INF と署名を $Work に作ってから入れる。INF に書く機材の名前は ASCII にする
+function Invoke-WdiSimple([string]$Usb, [string]$Name, [string]$Work) {
+    Use-Continue
+    $id = $Usb -split ':'
+    $label = if ($Name -match '^[\x20-\x7E]+$') { $Name } else { 'USB tuner' }
+    & $WdiSimple --vid "0x$($id[0])" --pid "0x$($id[1])" --type 0 --name $label --dest $Work | ForEach-Object { Write-Host "    $_" }
+    return $LASTEXITCODE
+}
+
+function Read-Answer([string]$Prompt) { return Read-Host $Prompt }
+
+# ドライバを替えた機材をエージェントに見つけ直させる。録画中なら終わるまで待つ (Stop-Denpa)
+function Restart-Agent {
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { return }
+    Say 'エージェントを起動し直します'
+    Stop-Denpa "$Prefix\bin\denpa-agent.exe"
+    Start-ScheduledTask -TaskName $TaskName
+}
+
+# **挿さっているチューナーのドライバを WinUSB に替える** (-WinUsb)。対象は Get-WinUsbTarget の機材のうち、挿さっていて
+# WinUSB になっていないものだけ。**機材ごとに、いまのドライバを見せて聞いてから替える** (TVTest などが使っているドライバを
+# 置き換えるため)。-Yes を付けたときだけ聞かずに替える。同じ USB ID の機材が 2 台以上あれば、wdi-simple がまとめて替える。
+# 替えるのは libwdi の wdi-simple.exe で、していることは Zadig と同じ (docs/install-windows.md)
+function Invoke-WinUsb([switch]$Yes) {
+    if (-not (Test-Path -LiteralPath "$Prefix\bin\denpa-agent.exe")) {
+        throw "denpa が入っていません。入れてから、もう一度流してください (irm $Installer | iex)"
+    }
+    if (-not (Test-Path -LiteralPath $WdiSimple)) {
+        throw ("入っている denpa に wdi-simple.exe がありません。新しいバージョンに上げてから (irm $Installer | iex)、もう一度流してください。" +
+            '上げずに替えるときは Zadig (https://zadig.akeo.ie) を使います (docs/install-windows.md)')
+    }
+    $devices = @(Get-WinUsbDevice (Get-WinUsbTarget))
+    if ($devices.Count -eq 0) {
+        throw '対応しているチューナーが挿さっていません。挿してから、もう一度流してください (対応している機材は docs/install-windows.md)'
+    }
+    foreach ($device in $devices | Where-Object { $_.Driver -eq 'WinUSB' }) {
+        Say "$($device.Name) ($($device.Usb)): WinUSB になっています"
+    }
+    $groups = @($devices | Where-Object { $_.Driver -ne 'WinUSB' } | Group-Object Usb)
+    if ($groups.Count -eq 0) {
+        Say 'ドライバを替える機材はありません'
+        return
+    }
+    Say 'チューナーのドライバを WinUSB に替えます (libwdi の wdi-simple.exe。Zadig と同じ方法です)'
+    Say '  - 替えた機材は、いまのドライバを使うソフト (TVTest など) からは使えなくなります'
+    Say '  - libwdi がこの PC で自己署名の証明書を作り、Windows の証明書ストア (信頼されたルート証明機関と信頼された発行元) に入れます。秘密鍵は署名したあとで消します'
+    Say '  - 元に戻すときは、デバイス マネージャーでその機材の「デバイスのアンインストール」を選び、ドライバーを削除するチェックボックスをオンにして外してから、機材を挿し直します'
+    $work = Join-Path ([IO.Path]::GetTempPath()) "denpa-winusb-$([Guid]::NewGuid().ToString('N'))"
+    $failed = @()
+    $replaced = 0
+    try {
+        foreach ($group in $groups) {
+            $device = $group.Group[0]
+            $title = "$($device.Name) ($($device.Usb))"
+            foreach ($one in $group.Group) {
+                Say "${title}: $(if ($one.Driver) { "いまのドライバは $($one.Driver) です" } else { 'いまはドライバが入っていません' })"
+            }
+            if ($group.Count -gt 1) { Say "  同じ USB ID の機材が $($group.Count) 台挿さっています。まとめて替えます" }
+            if (-not $Yes) {
+                $answer = Read-Answer '    WinUSB に替えますか? [y/N]'
+                if ($answer -notmatch '^\s*(y|yes)\s*$') {
+                    Say "${title}: 替えませんでした"
+                    continue
+                }
+            }
+            $code = [int](Invoke-WdiSimple $device.Usb $device.Name (Join-Path $work $device.Usb.Replace(':', '-')))
+            if ($code -eq 0) {
+                $replaced++
+                Say "${title}: WinUSB に替えました"
+            } else {
+                $failed += "$title (wdi-simple.exe の終了コード $code)"
+                Say "${title}: 替えられませんでした (wdi-simple.exe の終了コード $code)"
+            }
+        }
+    } finally {
+        Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
+    }
+    if ($replaced -gt 0) { Restart-Agent }
+    if ($failed.Count -gt 0) {
+        throw ("ドライバを替えられなかった機材があります: $($failed -join '、')。機材を挿し直してから、もう一度流してください。" +
+            'それでも替えられないときは Zadig (https://zadig.akeo.ie) で替えます (docs/install-windows.md)')
+    }
 }
 
 # zip をまるごと $To (まだ無いフォルダ) に開く。Expand-Archive は 5.1 だとファイルの多い zip (本体は数千) で何分も掛かる
@@ -373,78 +488,7 @@ function Expand-Zip([string]$Path, [string]$To) {
     [IO.Compression.ZipFile]::ExtractToDirectory($Path, $To)
 }
 
-# px4-userland (PX-Q3U4 など) を $To に置く。**要るものだけ取り出す** ($Px4Keep)。
-# IT930x のファームウェアはエージェントに同梱しているので、ここでは置かない (docs/tuner-px4.md)
-function Get-Px4Userland([string]$Work, [string]$To) {
-    Say "px4-userland $Px4UserlandVersion"
-    $base = "https://github.com/Khronos31/px4-userland/releases/download/v$Px4UserlandVersion"
-    $name = "px4-userland-$Px4UserlandVersion-windows-x86_64.zip"
-    Get-Url "$base/$name" "$Work\$name"
-    Get-Url "$base/SHA256SUMS" "$Work\px4.sums"
-    $line = Get-Content -LiteralPath "$Work\px4.sums" | Where-Object { ($_ -split '\s+')[1] -in $name, "*$name" }
-    if (-not $line) { throw "SHA256SUMS に $name が載っていません" }
-    Assert-Hash "$Work\$name" (($line -split '\s+')[0])
-    $zip = Open-Zip "$Work\$name"
-    try {
-        foreach ($entry in $zip.Entries) {
-            $path = $entry.FullName.Replace('\', '/')
-            # 置き場の外に出る名前 (..) は取り出さない
-            if ($path.EndsWith('/') -or $path.Split('/') -contains '..' -or -not ($Px4Keep | Where-Object { $path -like $_ })) { continue }
-            $target = Join-Path $To $path.Replace('/', '\')
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
-        }
-    } finally {
-        $zip.Dispose()
-    }
-    Remove-Item -Force -LiteralPath "$Work\$name"
-    foreach ($exe in 'px4d.exe', 'px4ctl.exe') {
-        if (-not (Test-Path -LiteralPath "$To\$exe")) { throw "$name に $exe が入っていません" }
-    }
-}
-
-# px4-userland のチューナーが WinUSB で使えるかを、px4d に聞いて言う (機種の表は持たない)。
-# **エージェントを止めている間に聞く。** px4d が使っている機材は開けず、一覧に出ない
-function Show-Px4 {
-    Use-Continue
-    $px4d = "$Prefix\px4-userland\px4d.exe"
-    $json = & $px4d --list-json 2>$null | Where-Object { $_ -like '{*' } | Select-Object -First 1
-    if ($LASTEXITCODE -ne 0 -or -not $json) {
-        Say 'px4-userland のチューナーを挙げられませんでした (px4d --list-json)'
-        return
-    }
-    $list = ConvertFrom-Json $json
-    $enclosures = @($list.enclosures)
-    $devices = @($list.ungrouped_usb_devices)
-    foreach ($enclosure in $enclosures) {
-        if ($enclosure.status -eq 'ready') {
-            Say "$($enclosure.model) ($($enclosure.serial)): WinUSB で使えます"
-        } else {
-            Say "$($enclosure.model) ($($enclosure.serial)): 使えません ($($enclosure.status))"
-        }
-    }
-    foreach ($device in $devices) {
-        if ($device.status -ne 'open_failed') {
-            Say "$($device.model) ($($device.usb)): 使えません ($($device.status))"
-            continue
-        }
-        $id = $device.usb -split ':'
-        $pnp = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-                Where-Object { $_.InstanceId -match "^USB\\VID_$($id[0])&PID_$($id[1])\\" }) | Select-Object -First 1
-        if ($pnp -and $pnp.Service -eq 'WinUSB') {
-            Say "$($device.model) (USB $($device.port)): WinUSB ですが開けません。ほかのソフト (TVTest など) が使っていないか見てください"
-            continue
-        }
-        $why = if ($pnp -and $pnp.Service) { "ドライバが $($pnp.Service) なので" } else { 'ドライバが入っていないので' }
-        Say ("$($device.model) (USB $($device.port)): ${why}開けません。Zadig (https://zadig.akeo.ie) で WinUSB にしてください " +
-            '(PX-Q3U4 / PX-W3U4 は USB の機材が 2 つ並ぶので両方。PLEX のドライバで TVTest などから使っていたなら、そちらからは見えなくなります。docs/install-windows.md)')
-    }
-    if ($enclosures.Count -eq 0 -and $devices.Count -eq 0) {
-        Say 'px4-userland のチューナー (PX-Q3U4 など) は見当たりません。挿したら、Zadig でドライバを WinUSB にしてください (docs/install-windows.md)'
-    }
-}
-
-# 置くものを $Work\new に揃える。エージェント (bin)・px4-userland・siano-userland と、-AgentOnly でなければ本体 (server)。
+# 置くものを $Work\new に揃える。エージェント (bin) と、-AgentOnly でなければ本体 (server)。
 # $Ref が空なら手元の zip (DENPA_AGENT_ZIP・DENPA_SERVER_ZIP)
 function Get-Payload([string]$Ref, [string]$Work, [switch]$Server) {
     # --- エージェント本体 (GitHub のリリース。$Ref が空なら手元の zip) ---
@@ -460,21 +504,6 @@ function Get-Payload([string]$Ref, [string]$Work, [switch]$Server) {
         }
     }
     Expand-Zip $agent "$Work\new\bin"
-
-    # --- siano-userland (PX-S1UD など) ---
-    Say "siano-userland $SianoUserlandVersion"
-    $base = "https://github.com/Khronos31/siano-userland/releases/download/v$SianoUserlandVersion"
-    $siano = "siano-ts-$SianoUserlandVersion-windows-x64.zip"
-    Get-Url "$base/$siano" "$Work\$siano"
-    Get-Url "$base/SHA256SUMS" "$Work\siano.sums"
-    $line = Get-Content -LiteralPath "$Work\siano.sums" | Where-Object { ($_ -split '\s+')[1] -in $siano, "*$siano" }
-    if (-not $line) { throw "SHA256SUMS に $siano が載っていません" }
-    Assert-Hash "$Work\$siano" (($line -split '\s+')[0])
-    Expand-Zip "$Work\$siano" "$Work\new\siano-userland"
-    Assert-Hash "$Work\new\siano-userland\firmware\isdbt_rio.inp" $IsdbtRioSha256
-
-    # --- px4-userland (PX-Q3U4 など) ---
-    Get-Px4Userland $Work "$Work\new\px4-userland"
 
     # --- denpa 本体 (bun・アプリ・ffmpeg・字・デコーダ)。エージェントと同じバージョン ---
     if ($Server) {
@@ -501,15 +530,12 @@ function Get-Payload([string]$Ref, [string]$Work, [switch]$Server) {
 
 # エージェントを起こす .cmd とタスク。環境変数はコンテナで既定にしている置き場を Windows の置き場に向け直すものだけ
 # (Mac の plist と同じ。合言葉は環境変数で渡さず、エージェントが tls\pair-token から読む。Get-PairToken)。
-# **優先度は普通 (4) に。** 既定の 7 だと、本体のエンコードが CPU を食っている間に siano-ts が USB を読みに行けず
+# **優先度は普通 (4) に。** 既定の 7 だと、本体のエンコードが CPU を使っている間にエージェントが USB を読みに行けず
 # TS を落としうる (Mac の ProcessType Interactive と同じ理由)
 function Register-Agent {
     $cmd = "$Prefix\denpa-agent.cmd"
     $vars = [ordered]@{
         AGENT_PORT = $Port; TUNERS_FILE = "$DenpaDir\config\tuners.json"; CHANNELS_FILE = "$DenpaDir\config\channels.json"
-        SIANO_USERLAND_DIR = "$Prefix\siano-userland"; SIANO_FIRMWARE = "$Prefix\siano-userland\firmware\isdbt_rio.inp"
-        PX4_USERLAND_DIR = "$Prefix\px4-userland"
-        PX4_RUNTIME_DIR = $Px4Runtime
         RAW_DIR = "$Media\recorded"
     }
     Write-Loop $cmd $vars '' '' "`"$Prefix\bin\denpa-agent.exe`"" $Log
@@ -586,24 +612,61 @@ function Register-Server([string]$Ref, [string]$Token) {
     throw "denpa が応答しません。ログを見てください: $ServerLog"
 }
 
+# 登録用の URL を出す。エージェントの --pair は、標準出力が端末なら URL の下に QR を描く (docs/agent.md「登録用の URL を出す」)。
+# 出力を横取りしないよう Start-Process -NoNewWindow で起こす (& で呼ぶと関数の出力として受け取り、端末ではなくなる)。
+# 起こせなければ、合言葉から URL を組んで出す
+function Show-PairUrl([string]$Token) {
+    $saved = $env:TUNERS_FILE
+    try {
+        $env:TUNERS_FILE = "$DenpaDir\config\tuners.json"
+        $pair = Start-Process -FilePath "$Prefix\bin\denpa-agent.exe" -ArgumentList '--pair' -NoNewWindow -Wait -PassThru
+        if ($pair.ExitCode -eq 0) { return }
+    } catch {
+        Say "denpa-agent --pair を起こせませんでした: $_"
+    } finally {
+        $env:TUNERS_FILE = $saved
+    }
+    Say "  https://$($env:COMPUTERNAME):$Port#pair=$Token"
+}
+
 # 通知領域のアイコン (denpa-tray.exe)。**サインインしたら起きる**ように HKLM の Run に載せる (誰がサインインしても出る)。
 # 出すのは本体の様子と新しいバージョンで、更新はメニューから人が選んだときにこの install.ps1 を流す (docs/install-windows.md)。
+# -AgentOnly では引数 --agent-only とエージェントの TUNERS_FILE を渡す。出すのはエージェントが応答するかと、
+# 登録用の URL と QR (メニューから人が選んだときに管理者の PowerShell で denpa-agent --pair を流す)。
 # いまサインインしている人にはここで起こす。管理者の窓から起こすと管理者で動いてしまうので、エクスプローラーに起こさせる
-# (ブラウザを開くのと同じ)。この窓のセッションにエクスプローラーがいなければ (CI など) 起こさず、次のサインインを待つ。
+# (ブラウザを開くのと同じ)。エクスプローラーは引数を渡せないので、引数を書いたショートカットを開かせる。
+# この窓のセッションにエクスプローラーがいなければ (CI など) 起こさず、次のサインインを待つ。
 # zip に入っていなければ (手元で組んだ DENPA_AGENT_ZIP など) 載せない
-function Register-Tray {
+function Register-Tray([switch]$AgentOnly) {
     if (-not (Test-Path -LiteralPath $TrayExe)) { return }
-    New-ItemProperty -Path $RunKey -Name $RunName -Value "`"$TrayExe`"" -PropertyType String -Force | Out-Null
+    $arguments = if ($AgentOnly) { "--agent-only `"$DenpaDir\config\tuners.json`"" } else { '' }
+    New-ItemProperty -Path $RunKey -Name $RunName -Value ("`"$TrayExe`" $arguments".TrimEnd()) -PropertyType String -Force | Out-Null
     $session = (Get-Process -Id $PID).SessionId
     if (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session }) {
-        Start-Process "$env:WINDIR\explorer.exe" "`"$TrayExe`""
+        $target = $TrayExe
+        if ($arguments) {
+            $target = Join-Path ([IO.Path]::GetTempPath()) 'denpa-tray.lnk'
+            $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($target)
+            $shortcut.TargetPath = $TrayExe
+            $shortcut.Arguments = $arguments
+            $shortcut.Save()
+        }
+        Start-Process "$env:WINDIR\explorer.exe" "`"$target`""
     }
+}
+
+# 前のバージョンが作った px4d のソケットの置き場を消す。リンクならリンクだけを消す (中までたどって、リンク先を消さない)
+function Remove-Px4Runtime {
+    if (-not (Test-Path -LiteralPath $Px4Runtime)) { return }
+    $runtime = Get-Item -LiteralPath $Px4Runtime -Force
+    if ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint) { $runtime.Delete() }
+    else { Remove-Item -Recurse -Force -LiteralPath $Px4Runtime }
 }
 
 function Install-Denpa([string]$Ref, [string]$Token, [switch]$AgentOnly) {
     $work = Join-Path ([IO.Path]::GetTempPath()) "denpa-install-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path "$work\new" | Out-Null
-    $parts = @('bin', 'px4-userland', 'siano-userland')
+    $parts = @('bin')
     if (-not $AgentOnly) { $parts += 'server' }
     try {
         Get-Payload $Ref $work -Server:(-not $AgentOnly)
@@ -619,6 +682,11 @@ function Install-Denpa([string]$Ref, [string]$Token, [switch]$AgentOnly) {
             if (Test-Path -LiteralPath "$Prefix\$part") { Remove-Item -Recurse -Force -LiteralPath "$Prefix\$part" }
             Move-Item -LiteralPath "$work\new\$part" -Destination "$Prefix\$part"
         }
+        # 前のバージョンが置いていた siano-userland と px4-userland (いまは Siano と IT930x の機材をエージェントが USB で直に動かすので要らない)
+        foreach ($part in 'siano-userland', 'px4-userland') {
+            if (Test-Path -LiteralPath "$Prefix\$part") { Remove-Item -Recurse -Force -LiteralPath "$Prefix\$part" }
+        }
+        Remove-Px4Runtime
     } finally {
         Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
     }
@@ -634,23 +702,36 @@ function Install-Denpa([string]$Ref, [string]$Token, [switch]$AgentOnly) {
         }
     }
 
-    # px4d のソケットの置き場 (エージェントが止まっている間に。持ち主と権限を整える。
-    # エージェントは SYSTEM で動くので、持ち主も SYSTEM にする)
-    Set-Owned $Px4Runtime @($System, $Administrators) $System
-    Show-Px4
     Register-Agent
     if (-not $AgentOnly) {
         Register-Server $(if ($Ref) { $Ref } elseif ($env:DENPA_SERVER_ZIP) { '' } else { Get-Version }) $Token
-        Register-Tray
     }
+    Register-Tray -AgentOnly:$AgentOnly
 }
 
-function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
+function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly, [switch]$WinUsb, [switch]$Yes) {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
 
+    # チューナーのドライバを WinUSB に替えるだけ (入れてあるものには触らない。Invoke-WinUsb)
+    if ($WinUsb) {
+        if (-not (Test-Admin)) {
+            throw '管理者の PowerShell で流してください (スタートボタンを右クリックして「ターミナル (管理者)」)。ドライバを替えるには管理者の権限が必要です'
+        }
+        Invoke-WinUsb -Yes:$Yes
+        return
+    }
+
     if (-not (Test-Admin)) {
         throw '管理者の PowerShell で流してください (スタートボタンを右クリックして「ターミナル (管理者)」)。denpa とエージェントを、ログインしなくても動くタスク (SYSTEM) に載せるためです'
+    }
+
+    # **Windows 10 1809 / Windows Server 2019 (ビルド 17763) より前では動かない。** 本体の bun がそれより前の Windows を受けず、
+    # ダウンロードと展開に使う curl.exe と tar.exe も 1803 / Server 2019 から。Server 2016 (14393) では curl.exe が無く、
+    # 「最新のリリースが分かりません」で止まっていた。外すだけ (-Uninstall) なら使わないので止めない
+    $build = [int](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+    if (-not $Uninstall -and $build -lt $MinBuild) {
+        throw "この Windows (ビルド $build) では動きません。Windows 10 1809 / Windows Server 2019 (ビルド $MinBuild) 以降が必要です"
     }
 
     if ($Uninstall) {
@@ -676,18 +757,13 @@ function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
         foreach ($file in 'denpa.cmd', 'wake-task.xml') {
             if (Test-Path -LiteralPath "$Data\$file") { Remove-Item -Force -LiteralPath "$Data\$file" }
         }
-        if (Test-Path -LiteralPath $Px4Runtime) {
-            $runtime = Get-Item -LiteralPath $Px4Runtime -Force
-            # リンクならリンクだけを消す (中までたどって、リンク先を消さない)
-            if ($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint) { $runtime.Delete() }
-            else { Remove-Item -Recurse -Force -LiteralPath $Px4Runtime }
-        }
+        Remove-Px4Runtime
         Say '外しました。残してあるもの (要らなければ手で消してください):'
         Say "  DB と denpa.env $Data / エージェントの設定とログ $DenpaDir / 録画 $Media"
         return
     }
 
-    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw '対応しているのは x64 の Windows だけです (px4-userland / siano-userland に ARM 用がありません)' }
+    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw '対応しているのは x64 の Windows だけです (エージェントの配布物が x64 用だけです)' }
 
     $ref = if ($env:DENPA_AGENT_ZIP) { '' } else { Get-Version }
     # エージェントを起こす前に置いておく (無ければエージェントが自分で作り、そちらと食い違わないように)
@@ -695,8 +771,9 @@ function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
     Install-Denpa $ref $token -AgentOnly:$AgentOnly
     Show-Tuner
     if ($AgentOnly) {
-        Say 'エージェントだけ入れました。denpa の TUNER_AGENT_URL に次を書いてください (#pair= の後ろは合言葉。人に見せない):'
-        Say "  https://$($env:COMPUTERNAME):$Port#pair=$token"
+        Say 'エージェントだけ入れました。denpa の設定の「受信」にある「エージェントを追加」に、次の URL を貼るか QR を読ませてください (#pair= の後ろは合言葉。人に見せない)。'
+        Say '後から出すときは、通知領域のアイコンの「登録用の URL を表示…」を選んでください'
+        Show-PairUrl $token
         Say "(LAN から繋ぐなら、Windows ファイアウォールでポート $Port への受信を許してください)"
         return
     }
@@ -704,4 +781,4 @@ function Invoke-Main([switch]$NoOpen, [switch]$Uninstall, [switch]$AgentOnly) {
     if (-not $NoOpen) { Start-Process "$env:WINDIR\explorer.exe" $Url }
 }
 
-Invoke-Main -NoOpen:$NoOpen -Uninstall:$Uninstall -AgentOnly:$AgentOnly
+Invoke-Main -NoOpen:$NoOpen -Uninstall:$Uninstall -AgentOnly:$AgentOnly -WinUsb:$WinUsb -Yes:$Yes

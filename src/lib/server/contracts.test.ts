@@ -11,6 +11,8 @@ import {
   stream,
 } from "@danything/arib/synth";
 
+import type { ContractStatus } from "./contract-status";
+
 const { config } = await import("./config");
 const realAgent = config.agentUrl;
 const realData = config.dataDir;
@@ -20,17 +22,24 @@ const testDir = mkdtempSync(join(tmpdir(), "denpa-contracts-"));
 config.dataDir = testDir;
 config.dbPath = join(testDir, "denpa.db");
 
+const { contractStatus, DECODE_VALID_MS } = await import("./contract-status");
+const { listAgents } = await import("./agents");
 const { orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { cardContracts, programs, services } = await import("./schema");
 const {
   checkContracts,
   confirmCardContract,
+  groupByChannel,
+  testDecodeUnverified,
   fromMjd,
   getContractRows,
-  DECODE_VALID_MS,
   isCodeSubscribed,
+  noteDecoded,
   noteStillScrambled,
   paidAllowed,
+  reserveWarning,
+  scrambledLiveMessage,
   testDecode,
   toMjd,
 } = await import("./contracts");
@@ -141,7 +150,11 @@ describe("confirmCardContract", () => {
 
     try {
       config.agentUrl = fakeAgentUrl(server.port ?? 0);
-      const res = await confirmCardContract("dGVzdA==", 60000);
+      const res = await confirmCardContract(
+        "dGVzdA==",
+        60000,
+        listAgents()[0]!,
+      );
       expect(res.ok).toBe(true);
       expect(res.code).toBe(0x0800);
     } finally {
@@ -156,7 +169,11 @@ describe("confirmCardContract", () => {
 
     try {
       config.agentUrl = fakeAgentUrl(server.port ?? 0);
-      const res = await confirmCardContract("dGVzdA==", 60000);
+      const res = await confirmCardContract(
+        "dGVzdA==",
+        60000,
+        listAgents()[0]!,
+      );
       expect(res.ok).toBe(false);
       expect(res.code).toBe(0);
       expect(res.error).toContain("500");
@@ -212,7 +229,6 @@ describe("checkContracts", () => {
         network_id: 4,
         name: "有料シネマ",
         type: "BS",
-        channel: "BS01",
         updated_at: Date.now(),
       })
       .run();
@@ -273,7 +289,6 @@ describe("checkContracts", () => {
         network_id: 4,
         name: "まもなく期限切れ局",
         type: "BS",
-        channel: "BS03",
         updated_at: Date.now(),
       })
       .run();
@@ -307,6 +322,73 @@ describe("checkContracts", () => {
   });
 });
 
+describe("契約の更新 (EMM) のあとの確かめ直し", () => {
+  test("カードの答えが替わったら、確かめ直したあとに状態と期限が替わる", async () => {
+    const { recheckContracts } = await import("./scheduler");
+    const nowMjd = toMjd();
+    // 初めは 5 日前に切れている。カードが更新を受け入れたあとは、2 日後まで観られる
+    let lastDay = nowMjd - 5;
+    const server = serveFakeAgent(async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/denpa/card") {
+        return Response.json(ONE_CARD);
+      }
+      if (url.pathname === "/denpa/card/confirm") {
+        const body = (await req.json()) as { date: number };
+        return Response.json({
+          ok: true,
+          code: body.date <= lastDay ? 0x0800 : 0,
+        });
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    orm()
+      .insert(services)
+      .values({
+        id: 107,
+        service_id: 107,
+        network_id: 4,
+        name: "更新した局",
+        type: "BS",
+        updated_at: Date.now(),
+      })
+      .run();
+    orm()
+      .insert(programs)
+      .values({
+        id: 207,
+        service_id: 107,
+        network_id: 4,
+        event_id: 7,
+        start_at: Date.now(),
+        end_at: Date.now() + 3600_000,
+        name: "更新後の番組",
+        is_free: false,
+        contract_verification: "BwgJ",
+        updated_at: Date.now(),
+      })
+      .run();
+
+    try {
+      config.agentUrl = fakeAgentUrl(server.port ?? 0);
+      await recheckContracts();
+      const before = getContractRows("0000111122223333");
+      expect(before[0]?.state).toBe("expired");
+      expect(before[0]?.validUntil).toBe(fromMjd(nowMjd - 4));
+
+      lastDay = nowMjd + 2;
+      await recheckContracts();
+      const after = getContractRows("0000111122223333");
+      expect(after).toHaveLength(1);
+      expect(after[0]?.state).toBe("subscribed");
+      expect(after[0]?.validUntil).toBe(fromMjd(nowMjd + 3));
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe("testDecode", () => {
   test("スクランブルが解除されているストリームで decodeOk: true", async () => {
     // その局のパケットは復号できている。同じ中継器の別の局は掛かったまま (数えない)
@@ -324,6 +406,7 @@ describe("testDecode", () => {
       }
       return new Response("Not Found", { status: 404 });
     });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
 
     orm()
       .insert(services)
@@ -333,14 +416,13 @@ describe("testDecode", () => {
         network_id: 4,
         name: "テスト局",
         type: "BS",
-        channel: "BS05",
         updated_at: Date.now(),
       })
       .run();
+    placeServices([{ id: 103, channel: "BS05" }]);
     airing(103);
 
     try {
-      config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(103);
       if (!res.ok) console.log("testDecode failed:", res);
       expect(res.ok).toBe(true);
@@ -358,6 +440,7 @@ describe("testDecode", () => {
       if (url.pathname === "/denpa/stream") return new Response(buf);
       return new Response("Not Found", { status: 404 });
     });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
     orm()
       .insert(services)
       .values({
@@ -366,10 +449,10 @@ describe("testDecode", () => {
         network_id: 4,
         name: "期限切れの局",
         type: "BS",
-        channel: "BS13",
         updated_at: Date.now(),
       })
       .run();
+    placeServices([{ id: 107, channel: "BS13" }]);
     airing(107);
     orm()
       .insert(cardContracts)
@@ -382,7 +465,6 @@ describe("testDecode", () => {
       })
       .run();
     try {
-      config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(107);
       expect(res.decodeOk).toBe(true);
       const row = getContractRows("0000111122223333")[0];
@@ -410,6 +492,7 @@ describe("testDecode", () => {
       }
       return new Response("Not Found", { status: 404 });
     });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
 
     orm()
       .insert(services)
@@ -419,14 +502,13 @@ describe("testDecode", () => {
         network_id: 4,
         name: "暗号局",
         type: "BS",
-        channel: "BS07",
         updated_at: Date.now(),
       })
       .run();
+    placeServices([{ id: 104, channel: "BS07" }]);
     airing(104);
 
     try {
-      config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(104);
       expect(res.ok).toBe(true);
       expect(res.decodeOk).toBe(false);
@@ -448,7 +530,7 @@ describe("testDecode", () => {
       config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(99999);
       expect(res.ok).toBe(false);
-      expect(res.error).toContain("サービスが見つかりません");
+      expect(res.error).toContain("局が見つかりません");
     } finally {
       server.stop();
     }
@@ -470,6 +552,7 @@ describe("testDecode", () => {
       }
       return new Response("Not Found", { status: 404 });
     });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
 
     orm()
       .insert(services)
@@ -479,15 +562,50 @@ describe("testDecode", () => {
         network_id: 4,
         name: "微小パケット局",
         type: "BS",
-        channel: "BS09",
         updated_at: Date.now(),
       })
       .run();
+    placeServices([{ id: 105, channel: "BS09" }]);
     airing(105);
 
     try {
-      config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(105);
+      expect(res.ok).toBe(false);
+      expect(res.error).toContain("十分なパケットを受信できませんでした");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("映像・音声が無く、PAT・PMT だけが届く局は数えない (掛からないセクションで復号できたように見せない)", async () => {
+    const parts: Uint8Array[] = [];
+    for (let i = 0; i < 100; i++) {
+      parts.push(packetize(0x0000, patSection([[108, 0x0101]])));
+      parts.push(packetize(0x0101, programMap(108, 0x0111, [[0x02, 0x0111]])));
+    }
+    const buf = new Uint8Array(stream(...parts));
+    const server = serveFakeAgent(async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/denpa/card") return Response.json(ONE_CARD);
+      if (url.pathname === "/denpa/stream") return new Response(buf);
+      return new Response("Not Found", { status: 404 });
+    });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
+    orm()
+      .insert(services)
+      .values({
+        id: 108,
+        service_id: 108,
+        network_id: 4,
+        name: "映像の無い局",
+        type: "BS",
+        updated_at: Date.now(),
+      })
+      .run();
+    placeServices([{ id: 108, channel: "BS11" }]);
+    airing(108);
+    try {
+      const res = await testDecode(108);
       expect(res.ok).toBe(false);
       expect(res.error).toContain("十分なパケットを受信できませんでした");
     } finally {
@@ -504,22 +622,237 @@ describe("testDecode", () => {
         network_id: 4,
         name: "無料の時間帯の局",
         type: "BS",
-        channel: "BS11",
         updated_at: Date.now(),
       })
       .run();
+    placeServices([{ id: 106, channel: "BS11" }]);
     airing(106, true);
     const server = serveFakeAgent(async (req) =>
       new URL(req.url).pathname === "/denpa/card"
         ? Response.json(ONE_CARD)
         : new Response("Not Found", { status: 404 }),
     );
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
     try {
-      config.agentUrl = fakeAgentUrl(server.port ?? 0);
       const res = await testDecode(106);
       expect(res.ok).toBe(false);
       expect(res.error).toContain("無料の番組");
       expect(getContractRows("0000111122223333")).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("ダイアログに出す契約の状態", () => {
+  const now = Date.now();
+  const fresh = now - 60_000;
+  const stale = now - DECODE_VALID_MS - 60_000;
+  test("カードが答えた局はその答え、答えの無い局は新しい復号の結果で決める", () => {
+    const rows: Parameters<typeof contractStatus>[0][] = [
+      { state: "subscribed", code: 0x0800, decodeOk: null, decodedAt: null },
+      { state: "expired", code: 0, decodeOk: true, decodedAt: fresh },
+      { state: "unsubscribed", code: 0, decodeOk: null, decodedAt: null },
+      { state: "subscribed", code: null, decodeOk: true, decodedAt: fresh },
+      // 31 日を過ぎた復号の結果は、確かめていないのと同じ
+      { state: "subscribed", code: null, decodeOk: true, decodedAt: stale },
+      // 番組表に 0xCB が無く、復号も試していない (`checkContracts` が未契約で書く)
+      { state: "unsubscribed", code: null, decodeOk: null, decodedAt: null },
+      // 復号を試して掛かったままだった
+      { state: "unsubscribed", code: null, decodeOk: false, decodedAt: null },
+    ];
+    expect(rows.map((row) => contractStatus(row, now))).toEqual([
+      "subscribed",
+      "expired",
+      "unsubscribed",
+      "subscribed",
+      "unverified",
+      "unverified",
+      "unsubscribed",
+    ]);
+  });
+
+  test("行がまだ無い有料の局も、確かめていない局として一覧に出す", () => {
+    for (const id of [1, 2])
+      orm()
+        .insert(services)
+        .values({
+          id,
+          service_id: id,
+          network_id: 7,
+          name: `CS${id}`,
+          type: "CS",
+          updated_at: Date.now(),
+        })
+        .run();
+    airing(1);
+    airing(2, true);
+    const rows = getContractRows("0000111122223333");
+    expect(rows.map((row) => [row.serviceId, row.status])).toEqual([
+      [1, "unverified"],
+    ]);
+  });
+});
+
+describe("確かめていない局の復号をまとめて確かめる (testDecodeUnverified)", () => {
+  test("同じ TS (局を受けられる所が同じ) の局は 1 つの組にまとめる。組と局の並びは渡した順", () => {
+    expect(
+      groupByChannel([
+        { id: 1, type: "CS", places: "CS2" },
+        { id: 2, type: "BS", places: "BS01_0" },
+        { id: 3, type: "CS", places: "CS2" },
+        { id: 4, type: "CS", places: "CS4" },
+        { id: 5, type: "BS", places: "BS01_0" },
+      ]).map((group) => group.map((target) => target.id)),
+    ).toEqual([[1, 3], [2, 5], [4]]);
+    expect(groupByChannel([])).toEqual([]);
+  });
+
+  test("チャンネルごとに 1 回だけ選局し、その中の確かめていない局をまとめて確かめる", async () => {
+    // BS05 には局 103 (復号できる) と局 9999 (掛かったまま)、BS07 には局 104 (掛かったまま)
+    const streams: string[] = [];
+    const server = serveFakeAgent(async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/denpa/card") return Response.json(ONE_CARD);
+      if (url.pathname === "/denpa/stream") {
+        const channel = url.searchParams.get("channel") ?? "";
+        streams.push(channel);
+        return new Response(
+          channel === "BS05"
+            ? channelStream(103, 100, "clear", "scrambled")
+            : channelStream(104, 100, "scrambled"),
+        );
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
+    const service = (id: number, arib: number, channel: string) => {
+      orm()
+        .insert(services)
+        .values({
+          id,
+          service_id: arib,
+          network_id: 4,
+          name: `局${id}`,
+          type: "BS",
+          updated_at: Date.now(),
+        })
+        .run();
+      placeServices([{ id, channel }]);
+    };
+    service(1, 103, "BS05");
+    service(2, 9999, "BS05");
+    service(3, 104, "BS07");
+    service(4, 105, "BS09");
+    service(5, 106, "BS11");
+    for (const id of [1, 2, 3, 5]) airing(id);
+    // 4 はいま無料の番組を流している。5 はカードが答えた (確かめていない局ではない)
+    airing(4, true);
+    orm()
+      .insert(programs)
+      .values({
+        id: 4002,
+        service_id: 4,
+        network_id: 4,
+        event_id: 2,
+        start_at: Date.now() + 3600_000,
+        end_at: Date.now() + 7200_000,
+        name: "あとの有料の番組",
+        is_free: false,
+        updated_at: Date.now(),
+      })
+      .run();
+    orm()
+      .insert(cardContracts)
+      .values({
+        card_id: "0000111122223333",
+        service_id: 5,
+        state: "subscribed",
+        code: 0x0800,
+        checked_at: Date.now(),
+      })
+      .run();
+
+    try {
+      const res = await testDecodeUnverified();
+      if (!res.ok) throw new Error(res.error);
+      expect([...streams].sort()).toEqual(["BS05", "BS07"]);
+      expect(res.results.get(1)).toEqual({ ok: true, decodeOk: true });
+      expect(res.results.get(2)).toEqual({ ok: true, decodeOk: false });
+      expect(res.results.get(3)).toEqual({ ok: true, decodeOk: false });
+      expect(res.results.get(4)?.ok).toBe(false);
+      expect(res.results.has(5)).toBe(false);
+      const status = new Map(
+        getContractRows("0000111122223333").map((row) => [
+          row.serviceId,
+          row.status,
+        ]),
+      );
+      expect([1, 2, 3, 4, 5].map((id) => status.get(id))).toEqual([
+        "subscribed",
+        "unsubscribed",
+        "unsubscribed",
+        "unverified",
+        "subscribed",
+      ]);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("まとめて確かめるときの失敗と重なり", () => {
+  test("動いている間にもう一度呼ばれたら断る", async () => {
+    const server = serveFakeAgent(async () => Response.json(ONE_CARD));
+    try {
+      config.agentUrl = fakeAgentUrl(server.port ?? 0);
+      const first = testDecodeUnverified();
+      expect(await testDecodeUnverified()).toEqual({
+        ok: false,
+        error: "ほかの画面でまとめて確かめています",
+      });
+      expect((await first).ok).toBe(true);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("選局に失敗したチャンネルの局は、どれも確かめられなかったことにして書かない", async () => {
+    const server = serveFakeAgent(async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/denpa/card") return Response.json(ONE_CARD);
+      return new Response("busy", { status: 503 });
+    });
+    config.agentUrl = fakeAgentUrl(server.port ?? 0);
+    const aribOf = new Map([
+      [1, 103],
+      [2, 9999],
+    ]);
+    for (const [id, arib] of aribOf) {
+      orm()
+        .insert(services)
+        .values({
+          id,
+          service_id: arib,
+          network_id: 4,
+          name: `局${id}`,
+          type: "BS",
+          updated_at: Date.now(),
+        })
+        .run();
+      placeServices([{ id, channel: "BS05" }]);
+      airing(id);
+    }
+    try {
+      const res = await testDecodeUnverified();
+      if (!res.ok) throw new Error(res.error);
+      for (const id of [1, 2]) {
+        expect(res.results.get(id)?.ok).toBe(false);
+        expect(res.results.get(id)?.error).toContain("選局");
+      }
+      expect(
+        getContractRows("0000111122223333").map((row) => row.checkedAt),
+      ).toEqual([null, null]);
     } finally {
       server.stop();
     }
@@ -569,7 +902,6 @@ describe("checkContracts エッジケース・異常系", () => {
         network_id: 4,
         name: "過去失効局",
         type: "BS",
-        channel: "BS11",
         updated_at: Date.now(),
       })
       .run();
@@ -622,7 +954,6 @@ describe("checkContracts エッジケース・異常系", () => {
         network_id: 4,
         name: "エラー局",
         type: "BS",
-        channel: "BS13",
         updated_at: Date.now(),
       })
       .run();
@@ -648,9 +979,11 @@ describe("checkContracts エッジケース・異常系", () => {
       await expect(checkContracts()).rejects.toThrow(
         "問い合わせに失敗しました",
       );
-      // DB に誤って unsubsribed が保存されていないことを検証
+      // DB に誤って未契約が保存されていない (行が無いので、確かめていない局として出る)
       const rows = getContractRows("0000111122223333");
-      expect(rows).toHaveLength(0);
+      expect(rows.map((row) => [row.status, row.checkedAt])).toEqual([
+        ["unverified", null],
+      ]);
     } finally {
       server.stop();
     }
@@ -702,7 +1035,6 @@ describe("有料放送を録ってよい局 (paidAllowed)", () => {
           network_id: 7,
           name: `CS${id}`,
           type: "CS",
-          channel: `CS${id * 2}`,
           updated_at: Date.now(),
         })
         .run();
@@ -715,5 +1047,154 @@ describe("有料放送を録ってよい局 (paidAllowed)", () => {
     expect(rows.get(2)?.state).toBe("unsubscribed");
     expect(rows.get(2)?.decodeOk).toBe(false);
     expect(paidAllowed()(2)).toBe(false);
+  });
+
+  test("下げるのは復号に使ったカードの行だけ。ほかのカードで確かめた契約は残す", () => {
+    orm()
+      .insert(services)
+      .values({
+        id: 1,
+        service_id: 1,
+        network_id: 7,
+        name: "CS1",
+        type: "CS",
+        updated_at: Date.now(),
+      })
+      .run();
+    row(1, { code: null, decode_ok: true, decoded_at: Date.now() });
+    orm()
+      .insert(cardContracts)
+      .values({
+        card_id: "9999",
+        service_id: 1,
+        state: "subscribed",
+        decode_ok: true,
+        decoded_at: Date.now(),
+        checked_at: Date.now(),
+      })
+      .run();
+    noteStillScrambled(1, "9999");
+    expect(getContractRows(card)[0]?.state).toBe("subscribed");
+    expect(getContractRows("9999")[0]?.state).toBe("unsubscribed");
+    expect(paidAllowed()(1)).toBe(true);
+  });
+
+  test("手で予約した有料の番組が録ってよい局でなければ、理由を付けて知らせる", () => {
+    // 局 n の番組は n * 1000 + 1 (`airing`)。7 だけ無料の番組
+    for (const id of [1, 2, 3, 4, 5, 6, 7]) airing(id, id === 7);
+    row(1, { code: 0x0800 });
+    row(2, { state: "expired", code: 0 });
+    row(3, { state: "unsubscribed", code: 0 });
+    row(4, { state: "unsubscribed", code: null, decode_ok: false });
+    row(5, {
+      code: null,
+      decode_ok: true,
+      decoded_at: Date.now() - DECODE_VALID_MS - 60_000,
+    });
+    // 6 は行が無い
+    const warning = (id: number) => reserveWarning(id * 1000 + 1);
+    expect(warning(1)).toBeNull();
+    expect(warning(2)).toContain("契約の期限が切れている");
+    expect(warning(3)).toContain("未契約");
+    expect(warning(4)).toContain("未契約");
+    expect(warning(5)).toContain("契約を確かめていない");
+    expect(warning(6)).toContain("契約を確かめていない");
+    expect(warning(7)).toBeNull();
+    // 番組表に無い番組は知らせない
+    expect(reserveWarning(99_999)).toBeNull();
+    for (const id of [2, 3, 4, 5, 6])
+      expect(warning(id)).toContain("スクランブルのまま残ることがあります");
+  });
+
+  test("有料の番組を復号できて録れたら、復号テストと同じく契約中にする。カードが答えた行の状態は変えない", async () => {
+    for (const id of [1, 2, 3])
+      orm()
+        .insert(services)
+        .values({
+          id,
+          service_id: id,
+          network_id: 7,
+          name: `CS${id}`,
+          type: "CS",
+          updated_at: Date.now(),
+        })
+        .run();
+    // 1: まだ確かめていない (行が無い)、2: 31 日を過ぎた、3: カードが期限切れと答えた
+    row(2, {
+      code: null,
+      decode_ok: true,
+      decoded_at: Date.now() - DECODE_VALID_MS - 60_000,
+    });
+    row(3, { state: "expired", code: 0 });
+    const server = serveFakeAgent(async (req) =>
+      new URL(req.url).pathname === "/denpa/card"
+        ? Response.json(ONE_CARD)
+        : new Response("Not Found", { status: 404 }),
+    );
+    try {
+      config.agentUrl = fakeAgentUrl(server.port ?? 0);
+      for (const id of [1, 2, 3]) await noteDecoded(id);
+    } finally {
+      server.stop();
+    }
+    const rows = new Map(getContractRows(card).map((r) => [r.serviceId, r]));
+    expect(rows.get(1)?.state).toBe("subscribed");
+    expect(rows.get(1)?.decodeOk).toBe(true);
+    expect(rows.get(2)?.state).toBe("subscribed");
+    expect(rows.get(3)?.state).toBe("expired");
+    expect([1, 2, 3].map(paidAllowed())).toEqual([true, true, false]);
+  });
+
+  test("カードが読めないときは、復号できた録画があっても書かない", async () => {
+    orm()
+      .insert(services)
+      .values({
+        id: 1,
+        service_id: 1,
+        network_id: 7,
+        name: "CS1",
+        type: "CS",
+        updated_at: Date.now(),
+      })
+      .run();
+    const server = serveFakeAgent(
+      async () => new Response("Not Found", { status: 404 }),
+    );
+    try {
+      config.agentUrl = fakeAgentUrl(server.port ?? 0);
+      await noteDecoded(1);
+    } finally {
+      server.stop();
+    }
+    expect(getContractRows(card)).toHaveLength(0);
+  });
+});
+
+describe("ライブで局がスクランブルされたまま届いたときの文 (scrambledLiveMessage)", () => {
+  test("カードを読めないときは、契約より先にそう言う", () => {
+    expect(
+      scrambledLiveMessage(false, new Set<ContractStatus>(["subscribed"])),
+    ).toBe("B-CAS カードを読めないため、スクランブルを復号できませんでした");
+  });
+
+  test("カードを読めていれば、契約の状態で理由を決める", () => {
+    expect(
+      scrambledLiveMessage(true, new Set<ContractStatus>(["expired"])),
+    ).toBe(
+      "この局は契約の期限が切れているため、スクランブルを復号できませんでした",
+    );
+    // 未契約・確かめていない・行が無いは、どれも契約されていない (カードが鍵を返さなかった)
+    for (const statuses of [
+      new Set<ContractStatus>(["unsubscribed"]),
+      new Set<ContractStatus>(["unverified"]),
+      new Set<ContractStatus>(),
+    ])
+      expect(scrambledLiveMessage(true, statuses)).toBe(
+        "この局は契約されていないため、スクランブルを復号できませんでした",
+      );
+    // 契約中と確かめた局は、契約が無いとは言わない
+    expect(
+      scrambledLiveMessage(true, new Set<ContractStatus>(["subscribed"])),
+    ).toBe("カードが鍵を返さないため、スクランブルを復号できませんでした");
   });
 });

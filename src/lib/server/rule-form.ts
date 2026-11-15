@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 
 import { genreName } from "../arib";
 import { SERVICE_TYPE_LABEL } from "../format";
+import { parseId } from "../id";
 import { minutesOf, slotSummary } from "../rule-time";
 import { parseSearchFields } from "../search";
 import type { Rule } from "../types";
@@ -192,7 +193,7 @@ export function draftRule(fields: Fields): Rule | null {
     id: 0,
     name: "",
     ...columns(conditions),
-    // 無料放送の扱いは**全体設定** (ルールには持たない)
+    // 有料放送を録るかはルールに持たない。局の契約で決める (`contracts.paidAllowed`)
     enabled: true,
     /*
      * **打ち込んだ値をそのまま持ち回る。** 1 で埋めていた頃は、下見を見るたびに優先度が 1 に
@@ -243,10 +244,10 @@ function ruleName(conditions: Conditions): string {
 
 /** 条件が空だと全番組にマッチしてディスクを埋めるので作らせない */
 export const EMPTY_RULE =
-  "キーワード・局・ジャンルのいずれかを指定してください";
+  "キーワード・局・種別・ジャンルのいずれかを指定してください";
 
 /**
- * create と update で同じもの。**エンコード方式は書かない。** エンコードも CM も全体設定で、
+ * create と update で同じもの。**エンコードのしかたは書かない。** 全体の設定で、
  * エンコードするときに読む
  */
 export function ruleValues(conditions: Conditions, form: Fields) {
@@ -282,15 +283,12 @@ interface Origin {
  * 同じ番組のルールが 2 つあっても予約は 1 本だが、どちらを直せばいいか分からなくなる
  */
 export function originOf(from: string | null): Origin | null {
-  const match = (from ?? "").match(/^(recording|program):(-?\d+)$/);
+  const match = (from ?? "").match(/^(recording|program):(.*)$/);
   if (match === null) return null;
   const kind = match[1] as Origin["kind"];
-  const id = Number(match[2]);
-  const source = Number.isInteger(id)
-    ? kind === "recording"
-      ? recordingSource(id)
-      : programSource(id)
-    : undefined;
+  const id = parseId(match[2]);
+  if (id === null) return null;
+  const source = kind === "recording" ? recordingSource(id) : programSource(id);
   if (source === undefined)
     return { kind, id, name: "", found: false, prefill: null, rule: null };
   const rules = orm().select().from(ruleTable).all();

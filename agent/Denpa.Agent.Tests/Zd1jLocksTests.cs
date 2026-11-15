@@ -1,7 +1,9 @@
+using System.Text.Json.Nodes;
+
 namespace Denpa.Agent.Tests;
 
 /*
- * CECH-ZD1 J の覚えたロックの値のファイル (zd1j-locks.json。Zd1j.cs の Zd1jLocks)
+ * CECH-ZD1 J の保存したロックの値のファイル (zd1j-locks.json。Zd1j.cs の Zd1jLocks)
  */
 public class Zd1jLocksTests
 {
@@ -24,12 +26,30 @@ public class Zd1jLocksTests
         await Assert.That(File.Exists(path)).IsTrue();
         await Assert.That(File.ReadAllText(path)).Contains("\"557142\"");
 
-        // 起こし直した (ファイルから読む)
+        // 再起動した (ファイルから読む)
         var (again, _) = Tuner(new Zd1jLocks(path).For("4-12.1"));
         again.Tune(557_142_857);
-        await Assert.That(again.LastPath).IsEqualTo("覚えた値で合わせた");
+        await Assert.That(again.LastPath).IsEqualTo("保存した値で合わせた");
         // ポートが違えば別のもの
         await Assert.That(new Zd1jLocks(path).For("4-12.2").Channels.Count).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task 使わない項目は読むときに無視し_書くときは出さない()
+    {
+        var path = Temp();
+        var (dib, _) = Tuner(new Zd1jLocks(path).For("4-12.1"));
+        dib.Tune(557_142_857);
+        await Assert.That(File.ReadAllText(path)).DoesNotContain("inversion");
+
+        // 使わない項目 (以前のバージョンが書いた inversion) が入ったファイル
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["boards"]!["4-12.1"]!["557142"]!["inversion"] = 0;
+        File.WriteAllText(path, json.ToJsonString());
+
+        var (again, _) = Tuner(new Zd1jLocks(path).For("4-12.1"));
+        again.Tune(557_142_857);
+        await Assert.That(again.LastPath).IsEqualTo("保存した値で合わせた");
     }
 
     [Test]
@@ -40,14 +60,14 @@ public class Zd1jLocksTests
         memory.Changed += () => changes++;
         var (dib, _) = Tuner(memory);
         dib.Tune(557_142_857);
-        // 覚えた値で合わせた選局では書かない
+        // 保存した値で合わせた選局では書かない
         dib.Tune(557_142_857);
         dib.Tune(557_142_857);
         await Assert.That(changes).IsEqualTo(1);
     }
 
     [Test]
-    public async Task 壊れたファイルや古い形は捨てる()
+    public async Task 壊れたファイルや古い形式は捨てる()
     {
         var path = Temp();
         File.WriteAllText(path, "{ not json");
@@ -55,6 +75,9 @@ public class Zd1jLocksTests
         File.WriteAllText(path, """{ "version": 0, "boards": {} }""");
         await Assert.That(new Zd1jLocks(path).For("4-12.1").Channels.Count).IsEqualTo(0);
         File.WriteAllText(path, """{ "version": 1, "boards": { "4-12.1": { "557142": { "fft": 9 } } } }""");
+        await Assert.That(new Zd1jLocks(path).For("4-12.1").Channels.Count).IsEqualTo(0);
+        // 階層の値が null でも、起動を止めずに捨てる
+        File.WriteAllText(path, """{ "version": 1, "boards": { "4-12.1": { "557142": { "fft": 1, "guard": 0, "partial": 0, "diff": 0, "layers": [[null, 1, 0, 13], [0, 0, 0, 0], [0, 0, 0, 0]] } } } }""");
         await Assert.That(new Zd1jLocks(path).For("4-12.1").Channels.Count).IsEqualTo(0);
     }
 
@@ -67,7 +90,7 @@ public class Zd1jLocksTests
         await Assert.That(File.ReadAllText(path)).Contains("\"557142\"");
         model.Signal = false;
         dib.Tune(557_142_857);
-        await Assert.That(dib.LastPath).IsEqualTo("覚えた値で合わず探索した");
+        await Assert.That(dib.LastPath).IsEqualTo("保存した値で合わず探索した");
         await Assert.That(File.ReadAllText(path)).DoesNotContain("\"557142\"");
     }
 }

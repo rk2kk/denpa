@@ -1,5 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,8 +36,13 @@ const { config } = await import("./config");
 config.dbPath = join(mkdtempSync(join(tmpdir(), "denpa-bml-db-")), "denpa.db");
 const { orm } = await import("./db");
 const { recordings, services } = await import("./schema");
-const { loadRecordedBml, saveRecordedBml, withProgramInfo } =
-  await import("./recorded-bml");
+const {
+  AUTO_START_KEEP,
+  loadRecordedBml,
+  recordedAutoStart,
+  saveRecordedBml,
+  withProgramInfo,
+} = await import("./recorded-bml");
 
 /*
  * 録画のデータ放送。**TS から取り出してサイドカーに置き、再生時に読み直す。**
@@ -69,7 +82,7 @@ afterAll(() => {
 
 /** 番組の始まり */
 const T = Date.UTC(2026, 7, 12, 0, 0, 30);
-/** 頭の PCR (秒)。中身に意味は無い */
+/** 先頭の PCR (秒)。中身に意味は無い */
 const PCR = 500;
 
 /**
@@ -107,7 +120,6 @@ function recording(startAt: number): Recording {
       network_id: 4,
       name: "テスト局",
       type: "GR",
-      channel: "T27",
       updated_at: 0,
     })
     .run();
@@ -147,10 +159,7 @@ describe("saveRecordedBml / loadRecordedBml", () => {
     const sidecar = join(dir, "rec.bml.jsonl");
     writeFileSync(ts, recorded());
 
-    const changes = await saveRecordedBml(ts, sidecar, recording(T), {
-      kept: null,
-      skip: 0,
-    });
+    const changes = await saveRecordedBml(ts, sidecar, recording(T), 0);
     expect(changes).toBeGreaterThan(0);
 
     const loaded = loadRecordedBml(sidecar);
@@ -159,9 +168,10 @@ describe("saveRecordedBml / loadRecordedBml", () => {
     );
     if (done === undefined) throw new Error("moduleDownloaded が無い");
     expect(bmlBody(done.message)).toContain("ver1");
-    // **番組の名乗りが頭に入っている。** 描く側はこれが来るまで入口を開かない
+    // **番組の名乗りが先頭に入っている。** 描く側はこれが来るまで入口を開かない
     const info = loaded[0]!.message;
-    if (info.type !== "programInfo") throw new Error("programInfo が頭に無い");
+    if (info.type !== "programInfo")
+      throw new Error("programInfo が先頭に無い");
     expect(info.serviceId).toBe(1024);
     expect(info.eventName).toBe("録画のテスト");
     // 読む側でも足すが、既に在れば重ねない
@@ -173,38 +183,21 @@ describe("saveRecordedBml / loadRecordedBml", () => {
   });
 
   /*
-   * **時刻の基準は録画の頭で、番組の始まりではない。** 番組の始まり (`start_at`) を基準にしていた頃は、
+   * **時刻の基準は録画の先頭で、番組の始まりではない。** 番組の始まり (`start_at`) を基準にしていた頃は、
    * 前のマージン (10 秒) のぶん切り替わりが映像より早く出ていた
    */
-  test("切っていない録画は、録画の頭から数えて、頭から捨てたぶんを引いた位置で切り替わる", async () => {
+  test("録画の先頭から数えて、先頭から捨てたぶんを引いた位置で切り替わる", async () => {
     const ts = join(dir, "plain-cut.ts");
     const sidecar = join(dir, "plain-cut.bml.jsonl");
     writeFileSync(ts, recorded());
 
-    await saveRecordedBml(ts, sidecar, recording(T), { kept: null, skip: 1 });
+    await saveRecordedBml(ts, sidecar, recording(T), 1);
     // 元の TS の 10 秒・70 秒 → エンコードしたものの 9 秒・69 秒
     expect(switchesAt(sidecar)).toEqual([9_000, 69_000]);
     expect(shownAt(sidecar, 8_999)).toBeNull();
     expect(shownAt(sidecar, 9_000)).toContain("ver1");
     expect(shownAt(sidecar, 68_999)).toContain("ver1");
     expect(shownAt(sidecar, 69_000)).toContain("ver2");
-  });
-
-  test("CM を切った録画は、残した区間をつないだ位置で切り替わる", async () => {
-    const ts = join(dir, "kept.ts");
-    const sidecar = join(dir, "kept.bml.jsonl");
-    writeFileSync(ts, recorded());
-
-    // 元の TS の 1〜30 秒 と 50〜200 秒 を残した (30〜50 秒の CM を切った)
-    const kept = [
-      { start: 1, end: 30 },
-      { start: 50, end: 200 },
-    ];
-    await saveRecordedBml(ts, sidecar, recording(T), { kept, skip: 1 });
-    // ver1 は 10 − 1 = 9 秒、ver2 は 29 + (70 − 50) = 49 秒
-    expect(switchesAt(sidecar)).toEqual([9_000, 49_000]);
-    expect(shownAt(sidecar, 48_999)).toContain("ver1");
-    expect(shownAt(sidecar, 49_000)).toContain("ver2");
   });
 
   test("名乗りを書いていなかった頃のサイドカーには、読むときに足す", () => {
@@ -232,17 +225,12 @@ describe("saveRecordedBml / loadRecordedBml", () => {
       ),
     );
 
-    expect(
-      await saveRecordedBml(ts, sidecar, recording(T), {
-        kept: null,
-        skip: 0,
-      }),
-    ).toBe(0);
+    expect(await saveRecordedBml(ts, sidecar, recording(T), 0)).toBe(0);
     expect(loadRecordedBml(sidecar)).toEqual([]);
   });
 });
 
-describe("saveRecordedBml と録画の頭の放送時刻", () => {
+describe("saveRecordedBml と録画の先頭の放送時刻", () => {
   /** 録画の行を 1 つ入れる (`ts_head` を見るため) */
   function row(tsHead: number | null): void {
     orm().delete(recordings).run();
@@ -267,15 +255,12 @@ describe("saveRecordedBml と録画の頭の放送時刻", () => {
       .where(eq(recordings.id, 1))
       .get()?.ts_head;
 
-  test("空なら、TS の頭の放送時刻を書く (データ放送の有る無しに関わらず)", async () => {
+  test("空なら、TS の先頭の放送時刻を書く (データ放送の有る無しに関わらず)", async () => {
     const ts = join(dir, "head.ts");
     writeFileSync(ts, recorded());
     row(null);
-    await saveRecordedBml(ts, join(dir, "head.bml.jsonl"), recording(T), {
-      kept: null,
-      skip: 0,
-    });
-    // 最初の TDT は録画の頭 (番組の始まりの 10 秒前) と同じ PCR に来ている
+    await saveRecordedBml(ts, join(dir, "head.bml.jsonl"), recording(T), 0);
+    // 最初の TDT は録画の先頭 (番組の始まりの 10 秒前) と同じ PCR に来ている
     expect(tsHeadOf()).toBe(T - 10_000);
   });
 
@@ -283,10 +268,154 @@ describe("saveRecordedBml と録画の頭の放送時刻", () => {
     const ts = join(dir, "head2.ts");
     writeFileSync(ts, recorded());
     row(T - 9_500);
-    await saveRecordedBml(ts, join(dir, "head2.bml.jsonl"), recording(T), {
-      kept: null,
-      skip: 0,
-    });
+    await saveRecordedBml(ts, join(dir, "head2.bml.jsonl"), recording(T), 0);
     expect(tsHeadOf()).toBe(T - 9_500);
+  });
+});
+
+describe("recordedAutoStart", () => {
+  /** 変化ログの PMT から、入口の部品の自動起動の指定を外したもの (`at` は書いた位置のまま) */
+  function flagless(sidecar: string): string {
+    return loadRecordedBml(sidecar)
+      .map((item) => {
+        const { message } = item;
+        if (message.type !== "pmt") return JSON.stringify(item);
+        const components = message.components.map((component) =>
+          component.bxmlInfo?.entryPointInfo === undefined
+            ? component
+            : {
+                ...component,
+                bxmlInfo: {
+                  ...component.bxmlInfo,
+                  entryPointInfo: {
+                    ...component.bxmlInfo.entryPointInfo,
+                    autoStartFlag: false,
+                  },
+                },
+              },
+        );
+        return JSON.stringify({ ...item, message: { ...message, components } });
+      })
+      .join("\n");
+  }
+
+  test("変化ログの PMT の入口の部品に自動起動の指定があれば true", async () => {
+    const ts = join(dir, "auto.ts");
+    const sidecar = join(dir, "auto.bml.jsonl");
+    writeFileSync(ts, recorded());
+    await saveRecordedBml(ts, sidecar, recording(T), 0);
+    expect(await recordedAutoStart(sidecar)).toBe(true);
+
+    const off = join(dir, "auto-off.bml.jsonl");
+    writeFileSync(off, `${flagless(sidecar)}\n`);
+    expect(await recordedAutoStart(off)).toBe(false);
+
+    // 途中で指定が付いた録画も true (再生位置では分けない)
+    const later = join(dir, "auto-later.bml.jsonl");
+    writeFileSync(
+      later,
+      `${flagless(sidecar)}\n${readFileSync(sidecar, "utf8")}`,
+    );
+    expect(await recordedAutoStart(later)).toBe(true);
+  });
+
+  test("サイドカーが無ければ false", async () => {
+    expect(await recordedAutoStart(join(dir, "none.bml.jsonl"))).toBe(false);
+  });
+
+  test("書きかけで読めない PMT の行は飛ばす (例外にしない)", async () => {
+    const ts = join(dir, "cut.ts");
+    const sidecar = join(dir, "cut.bml.jsonl");
+    writeFileSync(ts, recorded());
+    await saveRecordedBml(ts, sidecar, recording(T), 0);
+    const pmt = readFileSync(sidecar, "utf8")
+      .split("\n")
+      .find((line) => line.includes('"type":"pmt"'))!;
+
+    // PMT の行が途中で切れていて、ほかに PMT が無い
+    const broken = join(dir, "cut-only.bml.jsonl");
+    writeFileSync(broken, pmt.slice(0, pmt.length - 5));
+    expect(await recordedAutoStart(broken)).toBe(false);
+
+    // 切れた行のあとに読める PMT があれば、そちらで決める
+    const after = join(dir, "cut-then.bml.jsonl");
+    writeFileSync(after, `${pmt.slice(0, pmt.length - 5)}\n${pmt}\n`);
+    expect(await recordedAutoStart(after)).toBe(true);
+  });
+
+  /** 指定のある PMT の行と、指定を外した PMT の行 */
+  async function pmtLines(): Promise<{ on: string; off: string }> {
+    const ts = join(dir, "memo.ts");
+    const sidecar = join(dir, "memo.bml.jsonl");
+    writeFileSync(ts, recorded());
+    await saveRecordedBml(ts, sidecar, recording(T), 0);
+    const isPmt = (line: string) => line.includes('"type":"pmt"');
+    return {
+      on: readFileSync(sidecar, "utf8").split("\n").find(isPmt)!,
+      off: flagless(sidecar).split("\n").find(isPmt)!,
+    };
+  }
+
+  /** 中身を同じ大きさの空白に替え、更新時刻を `at` (秒) に戻す。読み直せば指定は無い */
+  function blank(path: string, at: number): void {
+    writeFileSync(path, " ".repeat(statSync(path).size));
+    utimesSync(path, at, at);
+  }
+
+  test("大きさと更新時刻が同じなら読み直さない", async () => {
+    const { on } = await pmtLines();
+    const sidecar = join(dir, "memo-hit.bml.jsonl");
+    writeFileSync(sidecar, `${on}\n`);
+    utimesSync(sidecar, 1_700_000_000, 1_700_000_000);
+    expect(await recordedAutoStart(sidecar)).toBe(true);
+    blank(sidecar, 1_700_000_000);
+    expect(await recordedAutoStart(sidecar)).toBe(true);
+    // 更新時刻が変われば読み直す
+    utimesSync(sidecar, 1_700_000_100, 1_700_000_100);
+    expect(await recordedAutoStart(sidecar)).toBe(false);
+  });
+
+  test("伸びたら読み直す (あとから指定のある PMT が足された)", async () => {
+    const { on, off } = await pmtLines();
+    const sidecar = join(dir, "memo-grow.bml.jsonl");
+    writeFileSync(sidecar, `${off}\n`);
+    utimesSync(sidecar, 1_700_000_000, 1_700_000_000);
+    expect(await recordedAutoStart(sidecar)).toBe(false);
+    appendFileSync(sidecar, `${on}\n`);
+    // 更新時刻は同じでも、大きさが違えば読み直す
+    utimesSync(sidecar, 1_700_000_000, 1_700_000_000);
+    expect(await recordedAutoStart(sidecar)).toBe(true);
+  });
+
+  test("消えたサイドカーは false で、覚えていた答えを使わない", async () => {
+    const { on } = await pmtLines();
+    const sidecar = join(dir, "memo-gone.bml.jsonl");
+    writeFileSync(sidecar, `${on}\n`);
+    expect(await recordedAutoStart(sidecar)).toBe(true);
+    rmSync(sidecar);
+    expect(await recordedAutoStart(sidecar)).toBe(false);
+  });
+
+  test(`覚えるのは ${AUTO_START_KEEP} 件まで。長く開いていないものから捨てて読み直す`, async () => {
+    const { on } = await pmtLines();
+    const many = mkdtempSync(join(dir, "memo-many-"));
+    const paths = Array.from({ length: AUTO_START_KEEP + 1 }, (_, i) =>
+      join(many, `${i}.bml.jsonl`),
+    );
+    for (const path of paths) {
+      writeFileSync(path, `${on}\n`);
+      utimesSync(path, 1_700_000_000, 1_700_000_000);
+    }
+    const [first, second, ...rest] = paths as [string, string, ...string[]];
+    expect(await recordedAutoStart(first)).toBe(true);
+    expect(await recordedAutoStart(second)).toBe(true);
+    // 最初のものを開き直すと新しい側へ移り、次に捨てられるのは 2 番目になる
+    expect(await recordedAutoStart(first)).toBe(true);
+    for (const path of rest) expect(await recordedAutoStart(path)).toBe(true);
+    blank(first, 1_700_000_000);
+    blank(second, 1_700_000_000);
+    // 最初のものはまだ覚えている。2 番目は捨てられていて読み直す
+    expect(await recordedAutoStart(first)).toBe(true);
+    expect(await recordedAutoStart(second)).toBe(false);
   });
 });

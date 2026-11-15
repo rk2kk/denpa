@@ -80,7 +80,7 @@ public sealed record TunerSpec(
 /// </list>
 ///
 /// <para>
-/// **YAML ではなく JSON。** 画面から書き換えるので、コメントを守るより書き戻せて壊れにくいほうがいい。
+/// **YAML ではなく JSON。** 画面から書き換えるので、コメントを残すより書き戻せて壊れにくいほうがいい。
 /// </para>
 ///
 /// <para>
@@ -94,14 +94,11 @@ public sealed class Config(string tunersFile, string channelsFile)
     public string TunersFile { get; } = tunersFile;
     public string ChannelsFile { get; } = channelsFile;
 
-    /// <summary>CECH-ZD1 J がチャンネルごとに覚えたロックの値 (tuners.json の隣。消してよい。Zd1j.cs の <see cref="Zd1jLocks"/>)</summary>
+    /// <summary>CECH-ZD1 J がチャンネルごとに記録したロックの値 (tuners.json の隣。消してよい。Zd1j.cs の <see cref="Zd1jLocks"/>)</summary>
     public string Zd1jLocksFile => Path.Combine(Dir, "zd1j-locks.json");
 
-    /// <summary>
-    /// px4-userland の機材に流し込む IT930x のファームウェアを、書き出して置く場所 (tuners.json の隣。
-    /// 同梱のものを書き出す。<see cref="Px4Firmware"/>)
-    /// </summary>
-    public string Px4FirmwareFile => Path.Combine(Dir, Px4Firmware.FileName);
+    /// <summary>CXD2856ER の地上波のプリセットに使う、周波数ごとの TMCC の 13 バイト (tuners.json の隣。消してよい。<see cref="TmccPresets"/>)</summary>
+    public string TmccPresetsFile => Path.Combine(Dir, "tmcc-presets.json");
 
     /// <summary>使わないカードリーダーの名前 (tuners.json の隣。画面から書く。<see cref="CardChoice"/>)</summary>
     public string CardsFile => Path.Combine(Dir, "cards.json");
@@ -109,7 +106,7 @@ public sealed class Config(string tunersFile, string channelsFile)
     /// <summary>自分の鍵と証明書・合言葉・組んだ denpa の置き場 (tuners.json の隣の tls/。<see cref="AgentTls"/>)</summary>
     public string TlsDir => Path.Combine(Dir, "tls");
 
-    /// <summary>tuners.json のあるディレクトリ。機材のデータ・覚えた値・鍵はここに置く</summary>
+    /// <summary>tuners.json のあるディレクトリ。機材のデータ・記録した値・鍵はここに置く</summary>
     public string Dir => Path.GetDirectoryName(Path.GetFullPath(TunersFile))!;
 
     public static Config FromEnvironment() => new(
@@ -117,17 +114,18 @@ public sealed class Config(string tunersFile, string channelsFile)
         Given("CHANNELS_FILE") ?? Path.Combine(DefaultDir(), "channels.json"));
 
     /// <summary>環境変数。空は書いていないのと同じ (空のパスは開けず、起動ごと落ちる)</summary>
-    private static string? Given(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
+    internal static string? Given(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
 
     /// <summary>
     /// 変数が無いときの置き場。Linux はコンテナの <c>/config</c>。Mac と Windows はインストーラと同じ
     /// <c>DENPA_HOME</c> (既定 <c>~/denpa</c>) の <c>config</c>。常駐を止めて手で <c>--tune</c> などを流したときに、
-    /// 書けない <c>/config</c> を見に行かず、常駐と同じファイルを使う
+    /// 書けない <c>/config</c> は使わず、常駐と同じファイルを使う。Android (アプリから USB を受け取っている Linux) も、アプリが渡す
+    /// <c>DENPA_HOME</c> の <c>config</c> にする (手で <c>--pair</c> を流したときに、常駐と同じ鍵を使う)
     /// </summary>
-    private static string DefaultDir() => OperatingSystem.IsLinux()
+    private static string DefaultDir() => OperatingSystem.IsLinux() && !UsbHost.Brokered
         ? "/config"
         : Path.Combine(
-            Environment.GetEnvironmentVariable("DENPA_HOME")
+            Given("DENPA_HOME")
                 ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "denpa"),
             "config");
 
@@ -145,7 +143,7 @@ public sealed class Config(string tunersFile, string channelsFile)
         }
         catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
         {
-            // 起動できないよりは空として続ける。ただ黙って自動検出に戻ると気づけないので残す
+            // 起動できないよりは空として続ける。ログを残さずに自動検出に戻ると人が気づけないので、ログに書く
             Log.Write($"{path} を読めませんでした。無いものとして続けます: {error.Message}");
             return [];
         }
@@ -154,7 +152,7 @@ public sealed class Config(string tunersFile, string channelsFile)
     internal static void WriteAtomic(string path, JsonNode body)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        // 書きかけを読ませない。GET /denpa/channels や選局 (TSID を引く) は、書いている最中にもこのファイルを読みに来る
+        // 書きかけを読ませない。GET /denpa/channels などは、書いている最中にもこのファイルを読む
         var working = $"{path}.writing";
         File.WriteAllText(working, body.ToJsonString(Json.Pretty));
         File.Move(working, path, overwrite: true);
@@ -236,17 +234,19 @@ public sealed class Config(string tunersFile, string channelsFile)
         var found = DeviceProbe.Detect();
         Log.Write(found.Count == 0
             ? $"チューナーが見つかりません ({TunersFile} に書けば、そちらを使います)"
-            : $"{TunersFile} に定義が無いので、挿さっている機材を使います:");
+            : $"{TunersFile} に定義が無いので、挿さっている機材 {found.Count} 台を使います");
         foreach (var tuner in found) Log.Write($"  {tuner.Name} [{string.Join(", ", tuner.Types)}] {tuner.Device}");
         return (found, true);
     }
 
-    /// <summary>並べ替えの順。知らない種別は後ろに送る</summary>
+    /// <summary>並べ替えの順。決まっていない種別は後ろに送る</summary>
     private static int TypeOrder(JsonNode entry) => entry["type"]?.GetValue<string>() switch
     {
         "GR" => 0,
         "BS" => 1,
         "CS" => 2,
+        ChannelTable.Catv => 3,
+        ChannelTable.Sky => 4,
         _ => 9,
     };
 

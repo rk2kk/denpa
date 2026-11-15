@@ -6,7 +6,7 @@ import type { Span } from "../ts/logo-detect";
 /**
  * **CM 検出の材料の控え** (`cm_materials`)。1 回のデコードで取った無音・場面の切れ目・ロゴの点を、数だけ縮めて DB に置く。
  *
- * - CM 検出だけやり直すとき (`encoder.runCmJob`) に、バージョンが合えば読み直さずにここから決める
+ * - CM 検出だけやり直すとき (`encoder.runCmJob`) に、バージョンが合い、ロゴまで当たっていたものなら読み直さずにここから決める
  * - 決め方 (`cm-decide.ts`) を変えたときに、本番の録画で前と比べる材料にする
  *
  * 形式は docs/cm.md の「材料の控え」
@@ -38,6 +38,11 @@ export interface CmMaterial {
   cuts: Float32Array;
   /** ロゴ。使えなかったときは null で、理由が `why` */
   logo: { spans: Span[]; scores: Float32Array } | null;
+  /**
+   * 当てた型の在り処と大きさ (`logo-own` の `model`)。ロゴの結果を捨てたときの覚え書きに出す。
+   * 型は録画のたびに育つので、あとから置き場を見てもこの回に当てた型は分からない
+   */
+  logoModel?: string | undefined;
   why: string;
 }
 
@@ -52,6 +57,12 @@ type Header = Omit<CmMaterial, "silences" | "times" | "cuts" | "logo"> & {
   silences: [number, number][];
   spans: [number, number][] | null;
 };
+
+/**
+ * 控えの目盛りに切り下げる。四捨五入すると、境目のすぐ下の値 (切れ目の 7.96、ロゴの点の 0.245) が控えから読むと境目に乗り、
+ * 「CM 検出をやり直す」の結果がエンコードしたときと割れる。単精度の誤差 (4.2 が 4.1999998 で入っている) では下げない
+ */
+const down = (value: number) => Math.floor(value + 1e-3);
 
 /** 縮める (並びは docs/cm.md の「材料の控え」)。全体を zstd で */
 export function encodeMaterial(material: CmMaterial): Uint8Array {
@@ -77,14 +88,14 @@ export function encodeMaterial(material: CmMaterial): Uint8Array {
   const strength = new Uint16Array(kept.length);
   kept.forEach((frame, k) => {
     at[k] = frame - (k > 0 ? kept[k - 1]! : 0);
-    strength[k] = Math.min(65535, Math.round(cuts[frame]! * 10));
+    strength[k] = Math.min(65535, down(cuts[frame]! * 10));
   });
   const scores = new Uint8Array(logo === null ? 0 : frames);
   if (logo !== null)
     for (let i = 0; i < frames; i++)
       scores[i] = Math.min(
         255,
-        Math.max(0, Math.round((logo.scores[i] ?? 0) * SCORE_SCALE)),
+        Math.max(0, down((logo.scores[i] ?? 0) * SCORE_SCALE)),
       );
   const raw = joinBytes([
     new Uint8Array(Uint32Array.of(head.length).buffer),

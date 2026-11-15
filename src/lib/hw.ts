@@ -7,7 +7,7 @@
  * GPU でエンコードできるコーデック。**並びは小さくなる順 (AV1 → H.265 → H.264)**。主 (`library_path`) を
  * 選ぶ順、端末で観るものを選ぶ順と同じ。**H.265 (`hevc`) は GPU でだけエンコードする** (ソフトウェアの
  * エンコーダを組んでいない。`SOFTWARE_CODECS`)。ライブはライブのエンコーダが GPU のときだけ H.265 を出し、
- * 追っかけは出さない (`#lib/live.ts` の `LiveCodec`)
+ * 段 0 の追っかけは出さない (`#lib/live.ts` の `LiveCodec`)
  */
 export const HW_CODECS = ["av1", "hevc", "h264"] as const;
 export type HwCodec = (typeof HW_CODECS)[number];
@@ -17,7 +17,8 @@ export type HwCodec = (typeof HW_CODECS)[number];
  * `rkmpp` は Rockchip (RK3588 / RK3588S) のハードウェアエンコーダ、`nvenc` は NVIDIA の GPU の
  * エンコーダで、どちらもデバイスが VA-API と別 (`/dev/mpp_service`・`/dev/nvidia0`。server/hwenc.ts)。
  * `qsv` (Intel) と `amf` (AMD) は Windows だけ。Windows には VA-API が無いので、GPU の作り手ごとのエンコーダを使う。
- * `videotoolbox` は Mac だけ (Apple の VideoToolbox。H.264 と H.265)
+ * `videotoolbox` は Mac だけ (Apple の VideoToolbox。H.264 と H.265)。
+ * `mediacodec` は Android のアプリだけ (MediaCodec のハードウェアのエンコーダ。アプリが名前を渡したコーデックだけ)
  */
 export const HW_KINDS = [
   "vaapi",
@@ -26,6 +27,7 @@ export const HW_KINDS = [
   "qsv",
   "amf",
   "videotoolbox",
+  "mediacodec",
 ] as const;
 export type HwKind = (typeof HW_KINDS)[number];
 
@@ -36,6 +38,7 @@ export const HW_KIND_LABEL: Record<HwKind, string> = {
   qsv: "QSV",
   amf: "AMF",
   videotoolbox: "VideoToolbox",
+  mediacodec: "MediaCodec",
 };
 export const CODEC_LABEL: Record<HwCodec, string> = {
   av1: "AV1",

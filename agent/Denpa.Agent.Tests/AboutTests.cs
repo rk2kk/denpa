@@ -2,10 +2,18 @@ namespace Denpa.Agent.Tests;
 
 /*
  * `GET /denpa/about`。返す形は conformance.test.ts が本物に当てるので、こちらは
- * **バージョンをどこから知るか**と、macOS の CCID ドライバの見分け方を見る。
+ * **バージョンをどこから読むか**と、macOS の CCID ドライバの見分け方を見る。
  */
 public class AboutTests
 {
+    [Test]
+    public async Task 名前は_AGENT_NAME_が無ければ機械の名前()
+    {
+        await Assert.That(About.ResolveName(" 書斎 ", "host")).IsEqualTo("書斎");
+        await Assert.That(About.ResolveName("", "host")).IsEqualTo("host");
+        await Assert.That(About.ResolveName(null, "host")).IsEqualTo("host");
+    }
+
     [Test]
     public async Task 中に持っているバージョンを先に使う()
     {
@@ -13,7 +21,7 @@ public class AboutTests
     }
 
     [Test]
-    public async Task 中身が_dev_なら環境変数で知る()
+    public async Task 中身が_dev_なら環境変数から読む()
     {
         // Linux のイメージ: main で組んだ実行ファイルに、リリースで DENPA_VERSION を足す
         await Assert.That(About.ResolveVersion("dev", "v1.2.3")).IsEqualTo("v1.2.3");

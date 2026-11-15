@@ -1,9 +1,17 @@
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+
+import type { APIRequestContext } from "@playwright/test";
 
 import { setRecording, test } from "./helpers";
 
 /**
- * GPU でエンコードするスペックの部品 (`26-hwenc`・`26-hwenc-hevc`。server/hwenc.ts)。
+ * GPU でエンコードするスペックの部品 (`26-hwenc`・`26-hwenc-vendors`・`26-hwenc-hevc`。server/hwenc.ts)。
  *
  * **GPU は偽物** — `stack.hwDir` に `renderD128` のような名前でファイルを置くと
  * denpa にはデバイスとして見え、偽 ffmpeg は渡されたデバイスが在るのを見て VA-API の
@@ -17,6 +25,23 @@ export const GPUS = ["renderD128", "renderD129"];
 export function clearGpus(dir: string): void {
   for (const name of readdirSync(dir))
     rmSync(`${dir}/${name}`, { force: true });
+}
+
+/**
+ * **偽の GPU (VA-API: AV1 / H.265 / H.264) を 1 つ挿して、確かめ直す。** ライブでその場でエンコードできるものに AV1 が入り、
+ * コーデックのメニューに AV1 が並ぶ (`server/live.ts` の `liveRealtime`)。返す関数を呼ぶと抜いて確かめ直す
+ * (同じファイルの次のテストは GPU が無いところから始める)
+ */
+export async function plugGpu(
+  dir: string,
+  request: APIRequestContext,
+): Promise<() => Promise<void>> {
+  writeFileSync(`${dir}/${GPUS[0]}`, "1");
+  await request.post("/settings/recording?/probeHw", { form: {} });
+  return async () => {
+    clearGpus(dir);
+    await request.post("/settings/recording?/probeHw", { form: {} });
+  };
 }
 
 /**

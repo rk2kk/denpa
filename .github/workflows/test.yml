@@ -32,11 +32,60 @@ permissions:
 # 合わせても1分ありません。待っているのは**いちばん遅い1つ**だけでよいので、
 # 中身の関係ないものを、それぞれ別のランナーに出しています。
 #
-# E2E はさらに6つに割ります (組分けは tests/e2e/shards.json)。ランナーは4コアで
-# 1台3ワーカー (playwright.config.ts) なので、6台で18ワーカーぶん並びます
+# E2E はさらに 10 組に割ります (組分けは tests/e2e/shards.json)。ランナーは 4 コアで
+# 1 台 3 ワーカー (playwright.config.ts。9 組と 10 組は 1 ワーカー) なので、26 ワーカーぶん並びます
 # (中身は待ち時間が大半なので、割った分だけ効く。
 # docs/development.md「並べて流す」)。
+#
+# **PR では、触ったファイルに関係する重いジョブだけ中身を回します** (.github/ci-changes.sh)。
+# Windows・Mac・Android のエミュレータ・配布物 (ffmpeg) は、関係ない PR ではジョブごと飛ばします。
+# E2E も、エージェントや文書だけの PR では回しません。main への push では全部回します。
 jobs:
+  # 触ったファイルから、中身を回すジョブを決める (.github/ci-changes.sh)。
+  # 飛ばすジョブと理由は、このジョブの Summary に出す
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      e2e: ${{ steps.files.outputs.e2e }}
+      windows: ${{ steps.files.outputs.windows }}
+      macos: ${{ steps.files.outputs.macos }}
+      android: ${{ steps.files.outputs.android }}
+      bundle: ${{ steps.files.outputs.bundle }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/ci-changes.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Classify changed files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          .github/ci-changes.sh | tee -a "$GITHUB_OUTPUT" > "$RUNNER_TEMP/changes"
+          {
+            echo "| 中身を回すか | ジョブ |"
+            echo "| --- | --- |"
+            while IFS='=' read -r name value; do
+              case "$name" in
+                e2e) jobs="e2e (1)〜(10)" ;;
+                windows) jobs="agent-windows・agent-windows-install" ;;
+                macos) jobs="agent-macos・tray-macos" ;;
+                android) jobs="agent-android" ;;
+                bundle) jobs="server-windows-bundle・server-windows・server-macos-bundle・server-macos" ;;
+              esac
+              if [ "$value" = true ]; then echo "| 回す | $jobs |"; else echo "| 飛ばす (この PR は関係するファイルを触っていない) | $jobs |"; fi
+            done < "$RUNNER_TEMP/changes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/changes"
+
   # リント・型・単体。**いちばん早く赤くなるところ**なので、先に見えるように分ける
   check:
     runs-on: ubuntu-latest
@@ -101,7 +150,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
       # 設定の読み書き、選局表、チューナー自動検出の値の読み取り。
       # MTP の方式 (global.json の test.runner) ではプロジェクトは --project で渡す
@@ -120,14 +169,15 @@ jobs:
       - name: Conformance
         run: bun run test:conformance
 
-  # asicen-userland (PX-W3U3。試験的) の模擬の asicend と話す。上流はまだリリースが無いので、
-  # 決めたコミットを手元で組んで `asicend --mock` を起こす (AsicenMockTests。機材にもファームウェアにも
-  # 触らない)。**必須チェックにはしない** (上流の取得と組み立てで揺れる・必須の context を増やさない)。
-  # 0.1.0 が出たら配布物を取る方式に替える (docs/tuners.md)
+  # asicen-userland (PX-W3U3 など。試験的) の模擬のデーモンと通信する (AsicenMockTests。機材にもファームウェアにも触らない)。
+  # 模擬 (asicend-mock) は配布物に入っていないので、v1.0.0-beta のコミットをここで組む (組むだけで、ソースは変えない)。
+  # エージェントが固定しているバージョン (agent/Dockerfile の ASICEN_USERLAND_VERSION) と同じコミットにする。
+  # main の ruleset の必須チェックに入っている。上流の取得とビルドで揺れることがある
   agent-asicen-mock:
     runs-on: ubuntu-latest
     env:
-      ASICEN_USERLAND_REF: 2718916cce028055290d5561ffde2df2d0153312
+      # v1.0.0-beta
+      ASICEN_USERLAND_REF: ed215c847979634245fb6a189c582831c462cf44
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,21 +191,21 @@ jobs:
 
       - name: Build asicen-userland (mock)
         run: |
-          sudo apt-get update && sudo apt-get install -y cmake g++ pkg-config libusb-1.0-0-dev
-          cmake -S asicen-userland -B asicen-build -DCMAKE_BUILD_TYPE=Release
-          cmake --build asicen-build --parallel 4 --target asicend asicenctl
+          sudo apt-get update && sudo apt-get install --no-install-recommends -y cmake ninja-build g++ pkg-config libusb-1.0-0-dev
+          cmake -S asicen-userland -B asicen-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DASICEN_BUILD_TESTS=ON
+          cmake --build asicen-build --target asicend-mock asicenctl
 
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
-      - name: Unit tests (.NET agent, asicend --mock)
+      - name: Unit tests (.NET agent, asicend-mock)
         run: ASICEN_USERLAND_DIR="$PWD/asicen-build" dotnet test --project agent/Denpa.Agent.Tests/Denpa.Agent.Tests.csproj --treenode-filter '/*/*/AsicenMockTests/*'
 
   # 入れ方 (install.sh) を Linux で通しで。compose.prod.yml を置いて、本物のイメージを引いて起こし、
-  # denpa が答えるまで。最後に外す。**必須チェックにはしない** (イメージを引くので重く、
-  # レジストリの機嫌でも揺れる)。compose ファイルはこのコミットのものを取らせる (DENPA_VERSION)
+  # denpa が答えるまで。最後に外す。main の ruleset の必須チェックに入っている (イメージを引くので、
+  # レジストリの具合でも揺れる)。compose ファイルはこのコミットのものを取らせる (DENPA_VERSION)
   install-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -188,6 +238,12 @@ jobs:
       - name: Windows migration from wslc with a fake wslc
         shell: pwsh
         run: ./tests/install-windows-migrate.ps1
+
+      # チューナーのドライバを WinUSB に替えるところ (install.ps1 -WinUsb)。ランナーに機材は無いので、偽の機材と偽の wdi-simple で。
+      # 見るのは、聞いてから替える分岐と、止まるとき (機材が無い・wdi-simple が失敗した) のメッセージ
+      - name: Windows WinUSB step with fake tuners
+        shell: pwsh
+        run: ./tests/install-windows-winusb.ps1
 
       - name: install.sh end to end
         env:
@@ -226,7 +282,7 @@ jobs:
   # Talos Linux の入れ方 (docs/install-talos.md)。実機は無いので、確かめるのは形だけ:
   # talos/install.sh のリント、install.sh と同じバージョンの talosctl で patch.yaml を重ねた
   # machine config を作って validate、install.sh が書く値で chart が描けるか。
-  # **必須チェックにはしない** (talosctl のイメージと Image Factory に頼るので)。Renovate が Talos を
+  # main の ruleset の必須チェックに入っている (talosctl のイメージと Image Factory に頼るので、外の具合で揺れることがある)。Renovate が Talos を
   # 上げたときにここが赤くなったら、docs の ISO の URL か patch.yaml を直す
   talos:
     runs-on: ubuntu-latest
@@ -279,24 +335,57 @@ jobs:
           [ "$(grep -c 'kind: ReplicationDestination' ds.yaml)" = 1 ]
           grep -q 'name: denpa-data-dst' ds.yaml
 
+  # Android で denpa を動かすアプリとエージェント (android.yml が組み、x86_64 の APK をエミュレータで入れて起動する。リリースの APK は release.yml が組む)。
+  # **必須チェックにはしない** (エミュレータは起動や応答の時間がばらつき、コードと関係なく落ちることがある。docs/development.md「Android のアプリ」)
+  agent-android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    uses: ./.github/workflows/android.yml
+
   # Mac (Apple Silicon) で動かすエージェント (docs/install-mac.md)。
   #
   # **Native AOT は Linux から macOS 向けにビルドできない** ので、Mac のランナーでビルドして起こす。
   # 実機は無いので、確かめるのは「ビルドできる・テストが通る・起動して API が答える・入れ方が最後まで通る」まで。
   #
-  # **必須チェックにはしない** (main の ruleset に入れていない)。Mac のランナーは混むと待たされるので、
-  # ここで PR を止めない。赤くなったら Mac で壊れたということなので、見て直す
+  # **PR がエージェント・Mac のメニューバーのアプリ・install.sh を触っていなければ、ジョブごと飛ばす** (.github/ci-changes.sh の macos)。
+  # 必須チェックだが、if で飛ばしたジョブは成功として数えられ、ランナーも使わない。changes が落ちたときは回す (!cancelled())
+  #
+  # SDK と NuGet は actions/cache に置く (agent-windows と同じく、置くのは main だけ。SDK は毎回 30 秒ほどかけて落としていた)
   agent-macos:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
     runs-on: macos-26
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Put the SDK and NuGet in the runner's temp
+        id: dirs
+        run: |
+          echo "DOTNET_INSTALL_DIR=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+          echo "NUGET_PACKAGES=$RUNNER_TEMP/nuget" >> "$GITHUB_ENV"
+          echo "sdk=$(sed -nE 's/.*dotnet-version: "([^"]+)".*/\1/p' .github/workflows/test.yml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the SDK
+        id: sdk
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/dotnet
+          key: dotnet-sdk-macos-${{ steps.dirs.outputs.sdk }}
+
+      - name: Restore NuGet packages
+        id: nuget
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/nuget
+          key: nuget-macos-${{ hashFiles('agent/**/*.csproj') }}
+          restore-keys: nuget-macos-
+
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
       # Linux でしか意味の無いテスト (/proc を数える・Linux の pipe の深さに頼る偽物) は中で飛ばしてある。
       # 1 本ずつ結果を出して上限を切る。Mac でだけ止まるものがあったとき、どれなのかが残るように
@@ -310,6 +399,20 @@ jobs:
           dotnet publish agent/Denpa.Agent/Denpa.Agent.csproj -c Release -r osx-arm64 -o out
           codesign --force -s - out/denpa-agent
           codesign -v out/denpa-agent
+
+      - name: Save the SDK
+        if: github.ref == 'refs/heads/main' && steps.sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/dotnet
+          key: ${{ steps.sdk.outputs.cache-primary-key }}
+
+      - name: Save NuGet packages
+        if: github.ref == 'refs/heads/main' && steps.nuget.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/nuget
+          key: ${{ steps.nuget.outputs.cache-primary-key }}
 
       - name: Lint install.sh
         run: |
@@ -362,13 +465,13 @@ jobs:
           cat agent.log
 
       # 入れ方を通しで (エージェントだけ。denpa 本体ごとは下の server-macos)。エージェントはリリースから取らずにいまビルドしたものを入れ、
-      # px4-userland / siano-userland / ファームウェアは本物を取ってきてハッシュを確かめ、
       # root の LaunchDaemon に載せて API が答えるまで。最後に消す。
       # sudo は環境変数を落とすので -E で渡す (PATH も。ランナーの sudo は PATH を決め直しうる)
       - name: install.sh end to end
         run: |
           set -euo pipefail
-          tar -czf "$RUNNER_TEMP/denpa-agent.tar.gz" -C out denpa-agent
+          cp agent/Denpa.Agent/firmware/LICENCE.siano out/
+          tar -czf "$RUNNER_TEMP/denpa-agent.tar.gz" -C out denpa-agent LICENCE.siano
           export DENPA_AGENT_TARBALL="$RUNNER_TEMP/denpa-agent.tar.gz"
           prefix="/Library/Application Support/denpa"
           plist=/Library/LaunchDaemons/io.github.danything.denpa-agent.plist
@@ -394,18 +497,12 @@ jobs:
           # 上げ直しても合言葉は変えない
           sudo -E env PATH="$PATH" bash install.sh --agent-only
           test "$(cat "$HOME/denpa/config/tls/pair-token")" = "$token"
-          ls -l "$prefix/px4-userland" "$prefix/siano-userland"
-          # px4d のソケットの置き場は root のもので、ほかの人は入れない (px4d がそう求める)
-          test "$(stat -f '%Su %Lp' "$prefix/run")" = "root 700"
-          # libusb は中に抱えている (Homebrew のものに繋がない)。ランナーには Homebrew の libusb が
-          # 入りうるので、動いたことでは確かめられない。繋ぎ先を直に見る
-          for bin in px4-userland/px4d siano-userland/siano-ts; do
-            otool -L "$prefix/$bin"
-            if otool -L "$prefix/$bin" | grep -q libusb; then
-              echo "$bin が外の libusb に繋いでいます" >&2; exit 1
-            fi
-          done
-          "$prefix/px4-userland/px4d" --list || true
+          # Siano と IT930x のファームウェアはエージェントに埋め込んである。Siano の許諾の文面を実行ファイルの隣に置き、
+          # siano-userland・px4-userland と px4d のソケットの置き場 (run/) は置かない
+          test -f "$prefix/bin/LICENCE.siano"
+          test ! -e "$prefix/siano-userland"
+          test ! -e "$prefix/px4-userland"
+          test ! -e "$prefix/run"
           sudo -E env PATH="$PATH" bash install.sh --uninstall
           test ! -e "$plist"
           test ! -e "$prefix/bin"
@@ -424,8 +521,10 @@ jobs:
 
   # Mac のメニューバーのアプリ (tray/mac)。/api/health の読み方と文言をテストし、組んで起こし、落ちずに動き続けることを見る
   # (denpa はいないので、斜線の入ったアイコンのまま)。メニューは人が開くものなので見ない。
-  # **必須チェックにはしない** (agent-macos と同じ理由)
+  # **必須チェックにはしない** (Mac のランナーは混むと待たされる)
   tray-macos:
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
     runs-on: macos-26
     timeout-minutes: 15
     steps:
@@ -465,17 +564,24 @@ jobs:
   # agent-macos と同じく、Native AOT は Linux から Windows 向けにビルドできないので Windows のランナーでビルドして起こす。
   # 実機は無いので、確かめるのは「ビルドできる・テストが通る・起動して API が答える・入れ方が最後まで通る」まで。
   # 入れ方は denpa 本体ごと (下の server-windows-bundle が組んだ zip で)。
-  # **必須チェックにはしない** (agent-macos と同じ理由)
   #
   # **2 つのジョブに分けて同時に流す。** 1 本に並べていた頃は平均 3 分 (遅い回で 4 分半) で、
   # 中身はテスト (agent-windows) と、ビルドして起こす・入れ方を通す (agent-windows-install) の
   # 関係ない 2 つだった。install.ps1 のリントは Windows でなくてよいので install-linux へ移した。
   #
+  # **PR がエージェント・通知領域のアプリ・install.ps1 を触っていなければ、ジョブごと飛ばす** (.github/ci-changes.sh の windows)。
+  # agent-macos と同じく、if で飛ばしたジョブは必須チェックで成功として数えられる
+  #
   # **SDK と NuGet は D: に置き、actions/cache で戻す。** setup-dotnet で入れる SDK はランナーの
   # イメージに入っていないので毎回 300MB を落として展開していて、C: への展開だけで 20 秒かかっていた
   # (D: なら 8 秒。ビルドと restore も C: より速い)。キャッシュに当たれば SDK の用意は 10 秒ほどで済む。
-  # 鍵は SDK のバージョンと csproj。バージョンは下の setup-dotnet の行から読む (Renovate が書き換えるのはそこ)
+  # SDK と NuGet は別のキャッシュに置く。SDK の鍵はバージョンだけ (下の setup-dotnet の行から読む。Renovate が書き換えるのはそこ)、
+  # NuGet の鍵は csproj。**置くのは main だけ** (PR が置いたキャッシュはその PR でしか使えず、1 回で 300〜500MB あって、
+  # 10GB の上限を超えるたびに ffmpeg や Playwright のキャッシュが追い出されていた)。csproj を変えた PR は、
+  # main の前の NuGet を戻して足りないぶんだけを取る (restore-keys)
   agent-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -491,25 +597,49 @@ jobs:
           $sdk = (Select-String -Path .github/workflows/test.yml -Pattern 'dotnet-version: "([^"]+)"').Matches[0].Groups[1].Value
           "sdk=$sdk" >> $env:GITHUB_OUTPUT
 
-      - name: Restore the SDK and NuGet packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the SDK
+        id: sdk
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ runner.temp }}\dotnet
-            ${{ runner.temp }}\nuget
-          key: agent-windows-test-${{ steps.dirs.outputs.sdk }}-${{ hashFiles('agent/**/*.csproj') }}
+          path: ${{ runner.temp }}\dotnet
+          key: dotnet-sdk-windows-${{ steps.dirs.outputs.sdk }}
+
+      - name: Restore NuGet packages
+        id: nuget
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\nuget
+          key: nuget-windows-test-${{ hashFiles('agent/**/*.csproj') }}
+          restore-keys: nuget-windows-test-
 
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
       # Linux でしか意味の無いテスト (sysfs・/dev のパス・libc の pipe・/bin/sh の偽物) は中で飛ばしてある。
       - name: Unit tests (.NET agent)
         timeout-minutes: 8
         run: dotnet test --project agent/Denpa.Agent.Tests/Denpa.Agent.Tests.csproj --output detailed --timeout 5m
 
+      # SDK はこのジョブだけが置く (agent-windows-install と同じ鍵なので、両方から置くと片方は「もうある」で断られる)
+      - name: Save the SDK
+        if: github.ref == 'refs/heads/main' && steps.sdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\dotnet
+          key: ${{ steps.sdk.outputs.cache-primary-key }}
+
+      - name: Save NuGet packages
+        if: github.ref == 'refs/heads/main' && steps.nuget.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\nuget
+          key: ${{ steps.nuget.outputs.cache-primary-key }}
+
   agent-windows-install:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -524,21 +654,30 @@ jobs:
           "NUGET_PACKAGES=$env:RUNNER_TEMP\nuget" >> $env:GITHUB_ENV
           $sdk = (Select-String -Path .github/workflows/test.yml -Pattern 'dotnet-version: "([^"]+)"').Matches[0].Groups[1].Value
           "sdk=$sdk" >> $env:GITHUB_OUTPUT
+          # ランナーのイメージのバージョン (wdi-simple のキャッシュの鍵)
+          "image=$env:ImageOS-$env:ImageVersion" >> $env:GITHUB_OUTPUT
 
-      # 鍵はテストのジョブと分ける。中の NuGet が違う (こちらは ILCompiler、あちらは TUnit) ので、
-      # 同じ鍵だと先に置いたほうだけが残る
-      - name: Restore the SDK and NuGet packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # SDK は agent-windows と同じキャッシュ (置くのはあちら)
+      - name: Restore the SDK
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ runner.temp }}\dotnet
-            ${{ runner.temp }}\nuget
-          key: agent-windows-publish-${{ steps.dirs.outputs.sdk }}-${{ hashFiles('agent/**/*.csproj', 'tray/**/*.csproj') }}
+          path: ${{ runner.temp }}\dotnet
+          key: dotnet-sdk-windows-${{ steps.dirs.outputs.sdk }}
+
+      # NuGet の鍵はテストのジョブと分ける。中の NuGet が違う (こちらは ILCompiler、あちらは TUnit) ので、
+      # 同じ鍵だと先に置いたほうだけが残る
+      - name: Restore NuGet packages
+        id: nuget
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\nuget
+          key: nuget-windows-publish-${{ hashFiles('agent/**/*.csproj', 'tray/**/*.csproj') }}
+          restore-keys: nuget-windows-publish-
 
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
       - name: Publish (Native AOT, win-x64)
         run: dotnet publish agent/Denpa.Agent/Denpa.Agent.csproj -c Release -r win-x64 -o out
@@ -546,6 +685,36 @@ jobs:
       # 通知領域のアイコン (tray/Denpa.Tray)。エージェントと同じ zip に入れる
       - name: Publish the tray (Native AOT, win-x64)
         run: dotnet publish tray/Denpa.Tray/Denpa.Tray.csproj -c Release -r win-x64 -o out
+
+      - name: Save NuGet packages
+        if: github.ref == 'refs/heads/main' && steps.nuget.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\nuget
+          key: ${{ steps.nuget.outputs.cache-primary-key }}
+
+      # wdi-simple.exe (libwdi。Zadig のコマンドライン版)。リリースと同じスクリプトで、決めたタグのソースからビルドする
+      # (取ってくるものはコミットと sha256 で確かめる。scripts/build-wdi-simple.ps1)。エージェントと同じ zip に入れる。
+      # **組んだものは actions/cache に置き、スクリプトかランナーのイメージ (MSVC のバージョン) が変わるまで使い回す**
+      # (組むと 40 秒ほど。イメージは週に 1 回ほど上がるので、新しい MSVC で組めるかはそのたびに見る)。置くのは SDK と同じく main だけ
+      - name: Restore wdi-simple
+        id: wdi
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out\libwdi
+          key: wdi-simple-${{ steps.dirs.outputs.image }}-${{ hashFiles('scripts/build-wdi-simple.ps1') }}
+
+      - name: Build wdi-simple (libwdi)
+        if: steps.wdi.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/build-wdi-simple.ps1 -Out out\libwdi
+
+      - name: Save wdi-simple
+        if: github.ref == 'refs/heads/main' && steps.wdi.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out\libwdi
+          key: ${{ steps.wdi.outputs.cache-primary-key }}
 
       # 起こして、落ちずに動き続けることを見る (denpa はいないので、注意のアイコンのまま)。メニューは人が開くものなので見ない。
       # 2 つ目は二重に起こしたときで、すぐ終わる
@@ -623,15 +792,15 @@ jobs:
           exit 0
 
       # 入れ方を通しで (エージェントだけ。denpa 本体ごとは下の server-windows)。エージェントはいまビルドしたものを zip にして入れ、
-      # px4-userland・siano-userland と siano のファームウェアは本物を取ってきてハッシュを確かめ、タスク スケジューラに
-      # SYSTEM で載せて API が答えるまで。IT930x のファームウェアはエージェントに同梱しているので、install.ps1 は置かない。
+      # タスク スケジューラに SYSTEM で載せて API が答えるまで。IT930x と Siano のファームウェアはエージェントに同梱しているので、install.ps1 は置かない。
       # 1 回目は irm | iex と同じやり方 (取ってきた中身を scriptblock にして) で流す。2 回目は上げ直し
       # (動いているエージェントを止めて入れ替える)。最後に外す
       - name: install.ps1 end to end
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          Compress-Archive -Path out\denpa-agent.exe, out\denpa-tray.exe -DestinationPath "$env:RUNNER_TEMP\denpa-agent.zip"
+          Copy-Item agent\Denpa.Agent\firmware\LICENCE.siano out\
+          Compress-Archive -Path out\denpa-agent.exe, out\denpa-tray.exe, out\libwdi, out\LICENCE.siano -DestinationPath "$env:RUNNER_TEMP\denpa-agent.zip"
           $env:DENPA_AGENT_ZIP = "$env:RUNNER_TEMP\denpa-agent.zip"
           $script = [scriptblock]::Create((Get-Content install.ps1 -Raw -Encoding UTF8))
           & $script -AgentOnly -NoOpen
@@ -650,53 +819,56 @@ jobs:
           $log = "$env:USERPROFILE\denpa\denpa-agent.log"
           for ($i = 0; $i -lt 15 -and -not (Select-String -LiteralPath $log -SimpleMatch "#pair=$token" -Quiet); $i++) { Start-Sleep 1 }
           if (-not (Select-String -LiteralPath $log -SimpleMatch "#pair=$token" -Quiet)) { throw 'agent does not log the pairing URL with the token' }
-          & "$prefix\siano-userland\siano-ts.exe" --list
-          "siano-ts --list: exit $LASTEXITCODE"
+          # The Siano firmware is bundled in the agent: its licence text sits next to the executable, and siano-userland is not installed
+          if (-not (Test-Path "$prefix\bin\LICENCE.siano")) { throw 'LICENCE.siano is not next to the agent' }
+          if (Test-Path "$prefix\siano-userland") { throw 'siano-userland should not be installed' }
+          if (Test-Path "$prefix\px4-userland") { throw 'px4-userland should not be installed' }
+          if (Test-Path C:\denpa-run) { throw 'C:\denpa-run should not be created' }
           Get-Content "$prefix\denpa-agent.cmd"
-          if (Select-String -LiteralPath "$prefix\denpa-agent.cmd" -SimpleMatch 'PX4_FIRMWARE' -Quiet) { throw 'PX4_FIRMWARE should not be in the .cmd (the agent uses its bundled firmware)' }
           # -AgentOnly installs no server
           if (Get-ScheduledTask -TaskName denpa -ErrorAction SilentlyContinue) { throw 'denpa task with -AgentOnly' }
           if (Test-Path "$prefix\server") { throw 'server installed with -AgentOnly' }
-          # No tray at sign-in either (it shows the server)
-          if (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name denpa -ErrorAction SilentlyContinue) { throw 'tray registered with -AgentOnly' }
+          # The tray starts at sign-in in the agent-only mode: it shows whether the agent answers and the URL to pair with
+          $entry = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name denpa).denpa
+          "tray at sign-in: $entry"
+          if ($entry -ne "`"$prefix\bin\denpa-tray.exe`" --agent-only `"$env:USERPROFILE\denpa\config\tuners.json`"") { throw "unexpected Run entry: $entry" }
+          # Redirected, --pair prints only the URL (a terminal also gets the QR below it)
+          $env:TUNERS_FILE = "$env:USERPROFILE\denpa\config\tuners.json"
+          $pair = @(& "$prefix\bin\denpa-agent.exe" --pair)
+          Remove-Item Env:TUNERS_FILE
+          if ($pair.Count -ne 1 -or $pair[0] -ne "https://$($env:COMPUTERNAME):25252#pair=$token") { throw "unexpected --pair output: $pair" }
 
-          # px4-userland: only px4d.exe / px4ctl.exe / license files, no px4-ts.exe or WinSCard.dll, no firmware (bundled in the agent).
-          # No tuner on the runner, so check that the real binaries run and take our arguments.
-          # px4d wants a runtime dir owned by the user running it (C:\denpa-run is SYSTEM's), so make one for this user
-          $px4 = "$prefix\px4-userland"
-          foreach ($file in 'px4d.exe', 'px4ctl.exe', 'LICENSE', 'DEPENDENCY-NOTICE.txt') {
-            if (-not (Test-Path "$px4\$file")) { throw "px4-userland: $file missing" }
+          # libwdi's wdi-simple.exe comes in the agent zip (bin\libwdi) with its license files, and the agent lists
+          # the USB IDs install.ps1 -WinUsb reads
+          $wdi = "$prefix\bin\libwdi"
+          foreach ($file in 'wdi-simple.exe', 'COPYING', 'COPYING-LGPL', 'README.txt', 'WDK-License.rtf', 'WDK-redist.txt') {
+            if (-not (Test-Path "$wdi\$file")) { throw "libwdi: $file missing" }
           }
-          foreach ($file in 'px4-ts.exe', 'winscard', 'firmware\it930x-firmware.bin') {
-            if (Test-Path "$px4\$file") { throw "px4-userland: $file should not be installed" }
-          }
-          $rt = 'C:\denpa-run-test'
-          New-Item -ItemType Directory -Force $rt | Out-Null
-          $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
-          $rtAcl = New-Object Security.AccessControl.DirectorySecurity
-          $rtAcl.SetOwner($me)
-          $rtAcl.SetAccessRuleProtection($true, $false)
-          foreach ($sid in $me, (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18')) {
-            $rtAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-          }
-          (Get-Item $rt).SetAccessControl($rtAcl)
+          $ids = & "$prefix\bin\denpa-agent.exe" --usb-ids | ConvertFrom-Json
+          "usb ids: $($ids | ConvertTo-Json -Compress)"
+          if (-not ($ids | Where-Object { $_.usb -eq '054c:04b2' })) { throw '--usb-ids has no CECH-ZD1 J' }
+          # The agent opens Siano tuners itself, so their IDs come from the agent too (187f:0302 is not supported)
+          if (-not ($ids | Where-Object { $_.usb -eq '3275:0080' })) { throw '--usb-ids has no PX-S1UD' }
+          if ($ids | Where-Object { $_.usb -eq '187f:0302' }) { throw '--usb-ids lists 187f:0302' }
+          # -WinUsb without a tuner on the runner: stops before wdi-simple and changes nothing
+          $stopped = $false
+          try { & $script -WinUsb -Yes } catch { $stopped = $true }
+          if (-not $stopped) { throw '-WinUsb should stop without a tuner' }
+          if (Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object { $_.Subject -like '*libwdi autogenerated*' }) { throw '-WinUsb without a tuner left a certificate' }
+          # wdi-simple itself, with the arguments install.ps1 gives it. No such device on the runner, so it only pre-installs
+          # the WinUSB driver package it generates (self-signed certificate, driver store). This shows that the build embeds
+          # what it needs; replacing the driver of a real tuner is not covered here
           $ErrorActionPreference = 'Continue'
-          $json = & "$px4\px4d.exe" --list-json
-          "px4d --list-json: exit $LASTEXITCODE $json"
-          if ($LASTEXITCODE -ne 0 -or $json -notmatch '"enclosures"') { throw 'px4d --list-json failed' }
-          & "$px4\px4d.exe" --device 00000000000000 --firmware agent\Denpa.Agent\firmware\it930x-firmware.bin --runtime-dir $rt --allow-lnb-power --exit-on-stdin-eof
-          "px4d without a tuner: exit $LASTEXITCODE"
-          if ($LASTEXITCODE -ne 3) { throw 'px4d should say NOT_FOUND (exit 3)' }
-          & "$px4\px4ctl.exe" --device 00000000000000 --runtime-dir $rt status
-          "px4ctl status without px4d: exit $LASTEXITCODE"
-          if ($LASTEXITCODE -eq 0) { throw 'px4ctl status should fail without px4d' }
+          & "$wdi\wdi-simple.exe" --vid 0x054c --pid 0x04b2 --type 0 --name 'Sony CECH-ZD1 J' --dest "$env:RUNNER_TEMP\wdi"
+          "wdi-simple: exit $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { throw 'wdi-simple failed' }
           $ErrorActionPreference = 'Stop'
-          # C:\denpa-run: owned by SYSTEM (the agent runs as SYSTEM), protected DACL with SYSTEM and Administrators only
-          $acl = Get-Acl C:\denpa-run
-          $acl.Access | Format-Table IdentityReference, FileSystemRights, IsInherited -AutoSize
-          $owner = (New-Object Security.Principal.NTAccount $acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
-          if ($owner -ne 'S-1-5-18') { throw "C:\denpa-run owner is $($acl.Owner)" }
-          if (-not $acl.AreAccessRulesProtected -or @($acl.Access).Count -ne 2) { throw 'C:\denpa-run DACL is not the expected one' }
+          Get-ChildItem "$env:RUNNER_TEMP\wdi" -Recurse | ForEach-Object FullName
+          Get-ChildItem Cert:\LocalMachine\TrustedPublisher, Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*libwdi autogenerated*' } | Format-List PSParentPath, Subject, HasPrivateKey
+          if (@(Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object { $_.Subject -like '*VID_054C&PID_04B2*libwdi autogenerated*' }).Count -ne 1) { throw 'no libwdi certificate in TrustedPublisher' }
+          $driver = Get-WindowsDriver -Online | Where-Object { $_.OriginalFileName -like '*usb_device.inf' }
+          $driver | Format-List Driver, OriginalFileName, ProviderName, ClassName, Version
+          if (-not $driver) { throw 'the WinUSB driver package is not in the driver store' }
 
           # install.ps1 waits until denpa-agent --status answers again, and keeps the pair token
           & $script -AgentOnly -NoOpen
@@ -705,7 +877,6 @@ jobs:
           & $script -Uninstall
           if (Get-ScheduledTask -TaskName denpa-agent -ErrorAction SilentlyContinue) { throw 'task left' }
           if (Test-Path $prefix) { throw "$prefix left" }
-          if (Test-Path C:\denpa-run) { throw 'C:\denpa-run left' }
           if (Get-Process denpa-agent -ErrorAction SilentlyContinue) { throw 'agent still running' }
           # keeps ~/denpa/config
           if (-not (Test-Path "$env:USERPROFILE\denpa\config")) { throw '~/denpa/config removed' }
@@ -722,14 +893,17 @@ jobs:
 
   # **Windows でそのまま動かす denpa 本体の配布物** (windows-server.yml が組む。リリースと同じ組み方)
   server-windows-bundle:
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
     uses: ./.github/workflows/windows-server.yml
 
-  # 配布物を Windows のランナーで確かめる。**必須チェックにはしない** (agent-windows と同じ理由)。
-  # 1. 同梱の ffmpeg で denpa の経路を流し、名前付きパイプで受ける進み具合と、スリープを止める呼び出しを見る (tests/native-smoke.ts)
+  # 配布物を Windows のランナーで確かめる。**必須チェックにはしない** (Windows のランナーは混むと待たされる)。
+  # 1. 同梱の ffmpeg で denpa の経路を流し、同梱の ffprobe で denpa が読む形式を読み、名前付きパイプで受ける進み具合と、スリープを止める呼び出しを見る (tests/native-smoke.ts)
   # 2. 本体をそのまま `bun server.js` で起こし、/api/health・画面・字・デコーダが返るか
   # 3. install.ps1 で本体ごと入れて (タスクは SYSTEM)、本体がエージェントと組めるか。上げ直して、外す
   server-windows:
-    needs: [server-windows-bundle, agent-windows-install]
+    needs: [changes, server-windows-bundle, agent-windows-install]
+    if: needs.changes.outputs.bundle == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -869,17 +1043,20 @@ jobs:
 
   # **Mac でそのまま動かす denpa 本体の配布物** (macos-server.yml が組む。リリースと同じ組み方)
   server-macos-bundle:
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
     uses: ./.github/workflows/macos-server.yml
 
-  # 配布物を Mac のランナーで確かめる。**必須チェックにはしない** (agent-macos と同じ理由)。
+  # 配布物を Mac のランナーで確かめる。**必須チェックにはしない** (Mac のランナーは混むと待たされる)。
   # Mac のランナーは混むので、確かめることは 1 つのジョブにまとめる (server-windows と同じ並び)。
-  # 1. 同梱の ffmpeg で denpa の経路を流し、VideoToolbox が組み込まれていること、GPU で試せなければソフトウェアに戻ること、
+  # 1. 同梱の ffmpeg で denpa の経路を流し、同梱の ffprobe で denpa が読む形式を読み、VideoToolbox が組み込まれていること、GPU で試せなければソフトウェアに戻ること、
   #    fd 3 の進み具合、スリープを止める呼び出しと、録画の前に起こす予約を見る (tests/native-smoke.ts。予約は root が要るので sudo で)
   # 2. 本体をそのまま `bun server.js` で起こし、/api/health・画面・字・デコーダが返るか
   # 3. 前のバージョン (本体が Docker) から移る形で install.sh を流し (偽の docker。tests/install-mac-migrate.sh)、本体ごと入れて
   #    (LaunchDaemon は root)、本体がエージェントと組めるか。上げ直して、外す
   server-macos:
-    needs: [server-macos-bundle, agent-macos, tray-macos]
+    needs: [changes, server-macos-bundle, agent-macos, tray-macos]
+    if: needs.changes.outputs.bundle == 'true'
     runs-on: macos-26
     timeout-minutes: 30
     steps:
@@ -952,7 +1129,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/agent/denpa-agent.tar.gz" -C "$bundle"
           cp "$RUNNER_TEMP/tray/denpa-tray" "$bundle/denpa-tray"
           chmod 755 "$bundle/denpa-agent" "$bundle/denpa-tray"
-          tar -czf "$RUNNER_TEMP/denpa-agent-tray.tar.gz" -C "$bundle" denpa-agent denpa-tray
+          tar -czf "$RUNNER_TEMP/denpa-agent-tray.tar.gz" -C "$bundle" denpa-agent denpa-tray LICENCE.siano
           export DENPA_AGENT_TARBALL="$RUNNER_TEMP/denpa-agent-tray.tar.gz"
           tray_plist=/Library/LaunchAgents/io.github.danything.denpa-tray.plist
           DENPA_SERVER_TARBALL=$(ls "$RUNNER_TEMP"/server/denpa-*-darwin-arm64.tar.gz)
@@ -1029,31 +1206,55 @@ jobs:
         # 同じ組に固まり、28秒の組と3.6分の組ができていた
         # **組を増やしたら、main の ruleset の必須チェックにも `e2e (n)` を足すこと** (足さないと
         # 増やした組が落ちていてもマージできてしまう。bump の PR は ruleset から引くので直さなくてよい)
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    # 触ったファイルを読む (下の「中身を回すか」)
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # **PR がアプリを触っていなければ (エージェント・文書・入れ方だけなら)、中身を飛ばす** (.github/ci-changes.sh の e2e)。
+      # 必須チェックなので、ジョブは走らせて成功で終える。changes ジョブを待たずに、ここで決める (E2E の始まりを遅らせない)
+      - name: 中身を回すか
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # 決められないとき (API が答えない) は回す。changes ジョブも、落ちたときは全部回す側に倒れる
+          run=$(.github/ci-changes.sh | sed -n 's/^e2e=//p') || run=true
+          echo "RUN=$run" >> "$GITHUB_ENV"
+          if [ "$run" != true ]; then
+            echo "::notice::この PR はアプリを触っていない (エージェント・文書・入れ方だけ) ので、E2E を飛ばしました (.github/ci-changes.sh)"
+          fi
+
       - name: Read bun version from Dockerfile
+        if: env.RUN == 'true'
         id: bun
         run: echo "version=$(grep -oP 'oven/bun:\K[^-\s]+' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Set up bun
+        if: env.RUN == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ steps.bun.outputs.version }}
 
       - name: Install dependencies
+        if: env.RUN == 'true'
         run: bun install --frozen-lockfile
 
       # ブラウザは 270MB ほどあり、毎回落とすと1分近く持っていかれる。
       # 中身は Playwright のバージョンでしか変わらないので、それを鍵にする。
       # **割った先どうしで使い回せている** (実測で 269MB を7秒で復元)
       - name: Read Playwright version
+        if: env.RUN == 'true'
         id: playwright
         run: echo "version=$(bun pm ls | grep -oP '@playwright/test@\K[^\s]+' | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browser
+        if: env.RUN == 'true'
         id: playwright-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1074,7 +1275,7 @@ jobs:
       # ランナーの中身が変わってライブラリが欠けたら、ブラウザが起動できずに
       # 落ちる。そのときは足りないものだけを apt で入れる (総当たりに戻さない)
       - name: Install Playwright browser
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        if: env.RUN == 'true' && steps.playwright-cache.outputs.cache-hit != 'true'
         timeout-minutes: 4
         run: bunx playwright install chromium
 
@@ -1084,13 +1285,14 @@ jobs:
       # 同じ行を取り合ってぶつかる。足した PR では 5 組に寄るだけなので、所要時間を見て
       # あとで割り直せばよい (どれが寄ったかは注記に出す)
       - name: 組分けの検算
+        if: env.RUN == 'true'
         id: specs
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           ls tests/e2e/*.spec.ts | xargs -n1 basename | sed 's/\.spec\.ts$//' | sort > "$RUNNER_TEMP/all"
           jq -r 'del(."//") | .[][]' tests/e2e/shards.json | sort > "$RUNNER_TEMP/listed"
-          jq -e 'del(."//") | keys == ["1","2","3","4","5","6"]' tests/e2e/shards.json > /dev/null
+          jq -e 'del(."//") | [keys[] | tonumber] | sort == [range(1; 11)]' tests/e2e/shards.json > /dev/null
           dup=$(uniq -d "$RUNNER_TEMP/listed")
           if [ -n "$dup" ]; then echo "::error::2つの組に入っています: $(echo $dup)"; exit 1; fi
           gone=$(comm -13 "$RUNNER_TEMP/all" "$RUNNER_TEMP/listed")
@@ -1116,6 +1318,7 @@ jobs:
       # 上の2つを変えた PR と、それが main に入った直後の1回だけ。組が同時に組んでも
       # 置けるのは1つで、残りは「もうある」と言って置かずに進む)
       - name: Key for the MPEG-2 decoder (WASM)
+        if: env.RUN == 'true'
         id: mpeg2
         run: |
           stage=$(sed -n '/ AS mpeg2wasm$/,/^COPY --from=mpeg2wasm /p' Dockerfile)
@@ -1123,6 +1326,7 @@ jobs:
           echo "stage=$(printf '%s' "$stage" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the MPEG-2 decoder (WASM)
+        if: env.RUN == 'true'
         id: mpeg2-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1130,11 +1334,11 @@ jobs:
           key: mpeg2wasm-${{ steps.mpeg2.outputs.stage }}-${{ hashFiles('wasm/**') }}
 
       - name: Build the MPEG-2 decoder (WASM)
-        if: steps.mpeg2-cache.outputs.cache-hit != 'true'
+        if: env.RUN == 'true' && steps.mpeg2-cache.outputs.cache-hit != 'true'
         run: docker build --target mpeg2wasm-out --output "type=local,dest=$RUNNER_TEMP/mpeg2" .
 
       - name: Save the MPEG-2 decoder (WASM)
-        if: steps.mpeg2-cache.outputs.cache-hit != 'true'
+        if: env.RUN == 'true' && steps.mpeg2-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/mpeg2
@@ -1142,12 +1346,13 @@ jobs:
 
       # アプリを1度だけ組んでから、ワーカーの数だけ立てる。
       # 偽エージェント・偽通知先もワーカーごとに1式ずつ (tests/stack.ts)。
-      # **6 組は 1 ワーカー。** ライブの貯め方 (50-live-pacing・51-live-gaps) は、ほかのワーカーが動くと届く間隔が乱れて
-      # 落ちるので、2 本を順に流す (shards.json の注記)
+      # **9 組と 10 組は 1 ワーカー。** ライブの貯め方 (50-live-pacing・51-live-gaps) は、ほかのワーカーが動くと届く間隔が乱れて
+      # 落ちるので、1 本ずつ別の組で流す (shards.json の注記)
       - name: E2E tests
+        if: env.RUN == 'true'
         env:
           MPEG2_DIR: ${{ runner.temp }}/mpeg2
-          WORKERS: ${{ matrix.shard == 6 && '--workers=1' || '' }}
+          WORKERS: ${{ matrix.shard >= 9 && '--workers=1' || '' }}
         run: bunx playwright test $WORKERS ${{ steps.specs.outputs.files }}
 
       - name: Upload Playwright report

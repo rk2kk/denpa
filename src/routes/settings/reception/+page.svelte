@@ -2,6 +2,7 @@
   import Toasts, { errorNotice } from "#lib/components/Toasts.svelte";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
 
+  import Agents from "./Agents.svelte";
   import Broadcast from "./Broadcast.svelte";
   import Channels from "./Channels.svelte";
   import Tuners from "./Tuners.svelte";
@@ -29,6 +30,21 @@
      */
     if (form?.done)
       list.push({ key: "tuner-done", kind: "success", text: form.done });
+    if (form?.agentAdded)
+      list.push({
+        key: "agent-added",
+        kind: "success",
+        text: `「${form.agentAdded}」を登録しました`,
+      });
+    if (form?.agentMoved)
+      list.push({
+        key: "agent-moved",
+        kind: "success",
+        text: `「${form.agentMoved}」の URL を変えました`,
+      });
+    // 削除できたが、エージェントに届かなかった (エージェントの側に登録が残る)
+    if (form?.agentLeft)
+      list.push({ key: "agent-left", kind: "warning", text: form.agentLeft });
     return list;
   });
 </script>
@@ -36,6 +52,7 @@
 <Toasts {notices} source={form} />
 
 <!-- 節の並びと名前は `#lib/settings-sections.ts`。`id` は左の一覧から飛ぶ先 -->
+<div id="agents" data-part><Agents {data} /></div>
 <div id="tuners" data-part><Tuners {data} /></div>
 <div id="channels" data-part><Channels {data} {form} /></div>
 <div id="broadcast" data-part><Broadcast {data} /></div>

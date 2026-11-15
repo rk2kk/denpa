@@ -24,6 +24,7 @@
   import Menu from "#lib/components/Menu.svelte";
   import ProgramActions from "#lib/components/ProgramActions.svelte";
   import ProgramDetail from "#lib/components/ProgramDetail.svelte";
+  import ProgramState from "#lib/components/ProgramState.svelte";
   import Toasts, {
     errorNotice,
     type Notice,
@@ -44,6 +45,7 @@
   } from "#lib/components/home/placement.js";
   import TimelineBar from "#lib/components/home/TimelineBar.svelte";
   import TimelineEntry from "#lib/components/home/TimelineEntry.svelte";
+  import { writeCookie } from "#lib/cookie.js";
   import { type DetailSeed, programDetail } from "#lib/detail.svelte.js";
   import { applyEncodeProgress } from "#lib/encode-live.svelte.js";
   import {
@@ -52,6 +54,7 @@
     fullDate,
     logoUnusable,
     nowStatus,
+    videoLossNote,
   } from "#lib/format.js";
   import { GROUPED_COOKIE } from "#lib/grouping.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
@@ -82,6 +85,7 @@
     type Traits,
     type Zone,
   } from "#lib/timeline.js";
+  import type { DetailNote } from "#lib/types.js";
 
   let { data, form } = $props();
 
@@ -144,7 +148,7 @@
   });
 
   /**
-   * 端末に保存する ([docs/offline.md](../../docs/offline.md))。落とすものは
+   * 端末に保存する ([docs/offline.md](../../docs/offline.md))。保存するものは
    * `saveOffline` が決める (AV1 → H.265 → H.264 のうち、端末で観られる最初のもの)。
    * 始めたら返ってくる (ページで受け取るときも終わりは待たない) ので、押したら詳細は閉じる
    */
@@ -174,7 +178,7 @@
   /** 行から開いた番組詳細。番組表と同じ見せ方をする (detail.svelte.ts) */
   const detail = programDetail();
   /** その行が失敗・削除された理由。詳細の中で見せる */
-  let detailNotes = $state<{ title: string; text: string }[]>([]);
+  let detailNotes = $state<DetailNote[]>([]);
   /**
    * 何で検出したか。ロゴが効いているかどうかがここで分かる。
    * うまくいったときは持たない (`cmNoteWorthShowing`)
@@ -202,7 +206,7 @@
   function openDetail(
     programId: number | null,
     row: DetailSeed,
-    notes: { title: string; text: string }[] = [],
+    notes: DetailNote[] = [],
     cmNote: string | null = null,
   ): void {
     // 開いた行の操作だけ出す。録画は openRecording、予約は openReservation が入れ直す
@@ -227,22 +231,19 @@
   /**
    * その録画を観る画面。**観られないものには無い。**
    * 消したものと、**録画そのものが失敗したもの**も外す。後者は途中まで書けた
-   * ファイルが残っていることはあるが、頭からスクランブルが掛かっていたり
+   * ファイルが残っていることはあるが、先頭からスクランブルが掛かっていたり
    * 中身が空だったりで、押しても何も映らない
    */
   function watchLink(rec: Rec): string | null {
     if (rec.deleted_at !== null || rec.state === "failed") return null;
-    if (rec.library_path !== null) return resolve(`watch/${rec.id}`);
     /*
      * **エンコードが終わる前でも観られる。** 録り終えて CM 検出やエンコードを待っている間 (失敗したときも) は
-     * 観る画面がサーバに元の TS をその場で変換させて流す (`server/playback.ts`)。録っている最中だけ
-     * 追っかけ再生の画面 (`/chase`。伸びている TS を追い読みする)
+     * 観る画面がサーバに元の TS をその場で変換させて流す (`server/playback.ts`)。録っている最中の録画は
+     * 予約の行に出る (追っかけはそちらから)
      */
-    if (rec.ts_path !== null)
-      return resolve(
-        rec.finished_at !== null ? `watch/${rec.id}` : `chase/${rec.id}`,
-      );
-    return null;
+    return (rec.library_path ?? rec.ts_path) === null
+      ? null
+      : resolve(`watch/${rec.id}`);
   }
 
   /**
@@ -279,7 +280,7 @@
    * 理由は 3 種類あって、それぞれ別物なので見出しを付けて分けて渡す
    */
   function openRecording(rec: Rec): void {
-    const notes: { title: string; text: string }[] = [];
+    const notes: DetailNote[] = [];
     // error 列に入るのは**録画そのものの失敗だけ**。エンコードの理由は encode_error
     if (rec.state === "failed" && rec.error) {
       notes.push({ title: "録画に失敗しました", text: rec.error });
@@ -289,6 +290,15 @@
     }
     if (rec.encode_error) {
       notes.push({ title: "エンコードに失敗しました", text: rec.encode_error });
+    }
+    const loss = videoLossNote(rec.video_loss);
+    // 一覧と同じく、消した録画には出さない
+    if (loss !== null && rec.deleted_at === null) {
+      notes.push({
+        tone: "warning",
+        title: loss.label,
+        text: `${loss.detail}の映像が残っています。元の TS に映像が無かった所は、エンコードしたものにもありません`,
+      });
     }
     openDetail(rec.program_id, rec, notes, rec.cm_note);
     detailRec = rec;
@@ -308,12 +318,12 @@
   /*
    * ---- 1 本の時間軸 (`#lib/timeline.ts`) ----
    *
-   * 予約・録画・録り逃しを 1 つの一覧に並べる。上が録れたものと録画中、「いま」の線、
+   * 予約・録画・録り逃しを 1 つの一覧に並べる。上が録れたものと録画中、「いま」の行、
    * 下がこれからの予約 (下へ行くほど時間が進む)。行の形 (`Item`) は部品と分け合う (`#lib/components/home/context.ts`)
    */
 
   /**
-   * 予約をどの側に置くか。録画中は線のすぐ上、放送が終わっていないものは線の下 (これからの予約)。
+   * 予約をどの側に置くか。録画中は「いま」の行のすぐ上、放送が終わっていないものは「いま」の行の下 (これからの予約)。
    * 「完了した予約も表示」で出る終わった予約 (完了・失敗・取り消し) は録れたものの側
    */
   function zoneOf(res: Res, now: number): Zone {
@@ -404,7 +414,7 @@
   /**
    * **新しい順で表示 (issue #1930)。** 上下を返し、上から予約 (遠い順)・「いま」・録画中・録れたもの (新しい順) に並べる。
    * まとめて表示と同じく端末ごとに cookie で覚え、**サーバが読む** (`+page.server.ts`)。逆にするのは並べる所
-   * (`sections`・`timelineLines`) だけで、ここでは線より上と下のどちらに描くかを替える
+   * (`sections`・`timelineLines`) だけで、ここでは「いま」の行より上と下のどちらに描くかを替える
    */
   // svelte-ignore state_referenced_locally
   let reversed = $state(data.reversed);
@@ -423,7 +433,7 @@
 
   /**
    * **「まとめて表示」(issue #480)。** 端末ごとに cookie で覚え、**サーバが読む**
-   * (`+page.server.ts`)。予約にも録画にも効き、同じ番組でも線の上と下で別の見出しになる
+   * (`+page.server.ts`)。予約にも録画にも効き、同じ番組でも「いま」の行の上と下で別の見出しになる
    */
   // svelte-ignore state_referenced_locally
   let grouped = $state(data.grouped);
@@ -438,9 +448,9 @@
     if (openedGroups.has(key)) openedGroups.delete(key);
     else openedGroups.add(key);
   }
-  /** 端末に覚える (サーバが読む)。パスは接頭辞込み (`live-player.svelte.ts` の `remember` と同じ) */
+  /** 端末に覚える (サーバが読む。`cookie.writeCookie`) */
   function remember(name: string, on: boolean): void {
-    document.cookie = `${name}=${on ? "1" : "0"}; path=${resolve("")}; max-age=31536000; samesite=lax`;
+    writeCookie(name, on ? "1" : "0", resolve(""));
   }
   function setGrouped(on: boolean): void {
     grouped = on;
@@ -452,30 +462,30 @@
   const lines = $derived(
     timelineLines(parts, { now: clock, grouped, reversed, isOpen }),
   );
-  /** 開いた瞬間に作る行数 (線の上と下それぞれ)。1 画面に収まるくらい。残りは表示したあとで足す (`fillSoon`) */
+  /** 開いた瞬間に作る行数 (「いま」の行の上と下それぞれ)。1 画面に収まるくらい。残りは表示したあとで足す (`fillSoon`) */
   const FIRST_ROWS = 15;
   /** 映したい行の上に余分に作る行数 (見出しの貼り付きと、上に少し送ったときのため) */
   const FIRST_MARGIN = 4;
   /*
    * **録れたものは少しずつ描く** (`#lib/paging.svelte.js`)。300 件を一度に描くと、
-   * 開いた直後に一瞬止まって見えた。描くのは線の側 (新しいほう) から `pastPage.shown` 行で、
-   * 古いほうは一覧の端 (ふだんは頭、新しい順のときは末尾) に近づいたら足す。上へ足しても読んでいる所は動かさない (`holdPlace`)。
+   * 開いた直後に一瞬止まって見えた。描くのは「いま」の行の側 (新しいほう) から `pastPage.shown` 行で、
+   * 古いほうは一覧の端 (ふだんは先頭、新しい順のときは末尾) に近づいたら足す。上へ足しても読んでいる所は動かさない (`holdPlace`)。
    * 録画中は全部描く
    */
   const pastPage = new Paged(() => lines.past, 60, FIRST_ROWS);
   /**
-   * 予約を線の側から何行描くか。**開いた瞬間は線に近い数行だけ**で、残りは表示したあとで足す (`fillSoon`)。
+   * 予約を「いま」の行の側から何行描くか。**開いた瞬間は「いま」の行に近い数行だけ**で、残りは表示したあとで足す (`fillSoon`)。
    * 予約が多いと、画面の外の行まで作るぶん開くのが一コマ重くなっていた
    */
   let futureShown = $state(FIRST_ROWS);
   /*
-   * 線より上の側 (ふだんは録れたもの、新しい順のときは予約) は末尾から描き、見出しの途中から描かないよう見出しまで戻す
-   * (`pageStart`)。下の側は頭から描き、開いた番組の途中で切らない (`pageEnd`)
+   * 「いま」の行より上の側 (ふだんは録れたもの、新しい順のときは予約) は末尾から描き、見出しの途中から描かないよう見出しまで戻す
+   * (`pageStart`)。下の側は先頭から描き、開いた番組の途中で切らない (`pageEnd`)
    */
   const futureRows = $derived(
     reversed
       ? lines.future.slice(pageStart(lines.future, futureShown))
-      : lines.future.slice(0, futureShown),
+      : lines.future.slice(0, pageEnd(lines.future, futureShown)),
   );
   /** 描いている録れたものの範囲 (`lines.past` の [pastFrom, pastTo)) */
   const pastFrom = $derived(
@@ -487,7 +497,7 @@
   const pastRows = $derived(lines.past.slice(pastFrom, pastTo));
   /** 録れたものを描き切ったか (300 件の頭打ちの案内を出す) */
   const pastDone = $derived(pastFrom === 0 && pastTo === lines.past.length);
-  /** 描く行を見出しごとに包む (`blocks`)。今日の包みは線と今日の予約 (新しい順のときは今日の録画) まで抱える */
+  /** 描く行を見出しごとに包む (`blocks`)。今日の包みは「いま」の行と今日の予約 (新しい順のときは今日の録画) まで抱える */
   const shownBlocks = $derived(
     blocks(
       reversed
@@ -496,7 +506,7 @@
     ),
   );
   /**
-   * 線の側から数えて、その行まで描く (開いたとき・絞り込みや向きを替えたときに映したい行)。**切り上げない。**
+   * 「いま」の行の側から数えて、その行まで描く (開いたとき・絞り込みや向きを替えたときに映したい行)。**切り上げない。**
    * 映す行のまわりに何行か余分に作るだけで、残りは表示したあとで足す (`fillSoon`)。
    * 新しい順のときは、行の下にも 1 回に足すぶん (`step`) を作る (見ていた行を同じ高さに戻せるように)
    */
@@ -514,8 +524,11 @@
    * 上に足すぶん読んでいる所は動かさない (`holdPlace`)
    */
   let filling = 0;
-  // 画面を離れたら取り消す。onDestroy はサーバで描くときにも呼ばれる (そこに cancelAnimationFrame は無い) ので、effect の後片付けで
-  $effect(() => () => cancelAnimationFrame(filling));
+  // 画面を離れたら取り消す (下の、先頭に貼り付いている日を読み直す `pinFrame` も)。onDestroy はサーバで描くときにも呼ばれる (そこに cancelAnimationFrame は無い) ので、effect の後片付けで
+  $effect(() => () => {
+    cancelAnimationFrame(filling);
+    cancelAnimationFrame(pinFrame);
+  });
   function fillSoon(): void {
     if (filling !== 0) return;
     filling = requestAnimationFrame(() => {
@@ -550,7 +563,7 @@
           Number(b.job_state === "running") - Number(a.job_state === "running"),
       ),
   );
-  /** 次の録画 (「いま」の線の一言)。絞り込みに関係なく、いまより後に始まる予約のうちいちばん早いもの */
+  /** 次の録画 (「いま」の行の一言)。絞り込みに関係なく、いまより後に始まる予約のうちいちばん早いもの */
   const nextRes = $derived.by(() => {
     let next: Res | null = null;
     for (const item of items) {
@@ -565,7 +578,7 @@
     }
     return next;
   });
-  /** 「いま」の線に添える一言。次の録画まで (絞り込みに関係なく。録画中のあと何分かは行の 3 段目) */
+  /** 「いま」の行に添える一言。次の録画まで (絞り込みに関係なく。録画中のあと何分かは行の 3 段目) */
   const lineStatus = $derived(nowStatus(minute.now, nextRes));
   function dayLabel(at: number): string {
     return dayName(at, clock) ?? fullDate(at);
@@ -574,9 +587,9 @@
   /*
    * ---- 開いたときの位置 ----
    *
-   * **観終えていない録画があれば、いちばん古いものを映す** (`catchUp`)。無ければ「いま」の線。
+   * **観終えていない録画があれば、いちばん古いものを映す** (`catchUp`)。無ければ「いま」の行。
    * まだ描いていない所にあれば、そこまで描いてから送る。
-   * **新しい順のときは探さず、「いま」の線を上のほうに映す** (線のすぐ下に新しい録画が並ぶ。古い未視聴へ送ると、
+   * **新しい順のときは探さず、「いま」の行を上のほうに映す** (「いま」の行のすぐ下に新しい録画が並ぶ。古い未視聴へ送ると、
    * 新しいものがすべて上に残り、読む向きと逆になる)。
    * 並べ替えや絞り込みのたびには動かさない (開いたときの 1 回だけ)
    */
@@ -590,7 +603,7 @@
     const list = listBox;
     placeTimeline(list, target?.key ?? null, reversed);
     // 字 (放送の字は後から届く) とポスターで行の高さが変わると、映した行がずれ、見出しの下で行が半分に切れる。
-    // 届いてから、映した行 (無ければ線) を元の高さに戻して合わせ直す。その間に自分で動かしていたら触らない (動かした所を奪わない)
+    // 届いてから、映した行 (無ければ「いま」の行) を元の高さに戻して合わせ直す。その間に自分で動かしていたら触らない (動かした所を奪わない)
     const before = window.scrollY;
     const restore = holdPlace(list, target?.key ?? null);
     await document.fonts.ready;
@@ -608,7 +621,7 @@
    * **絞り込みや並びの向きを替えても、見ていた行をその場に残す。** 替える前に見えている所のいちばん上の行を覚え、
    * 替えたあともその行があれば同じ高さに戻す (無くなっていれば「いま」)。
    * 絞り込みは画面の中だけで替える (URL も読み込みも動かさない)。広い画面はページの位置合わせを自分でする
-   * (`overflow-anchor: none`) ので、何もしないと「すべて」に戻したとき頭まで飛んでいた
+   * (`overflow-anchor: none`) ので、何もしないと「すべて」に戻したとき先頭まで飛んでいた
    */
   let filtering: Promise<void> = Promise.resolve();
   /** 続けて押されたら順に替える (前の位置合わせが済んでから、次の「見ていた行」を覚える) */
@@ -638,7 +651,7 @@
   }
 
   /**
-   * 古い録画を足す (一覧の端の「残り N 件」が見えたとき。ふだんは頭、新しい順のときは末尾)。**開いたときの位置に送り終えるまでは足さない。**
+   * 古い録画を足す (一覧の端の「残り N 件」が見えたとき。ふだんは先頭、新しい順のときは末尾)。**開いたときの位置に送り終えるまでは足さない。**
    * 送っている途中に足すと、送った先がずれる。待っている間も印が見えたかは確かめ続けるので、送り終えたら足す (`sentinel`)
    */
   let ready = false;
@@ -661,14 +674,14 @@
   /*
    * ---- サイドバーのカレンダー (`HomeCalendar`・`#lib/calendar.ts`) ----
    *
-   * 押せる日は**一覧に出ている行** (絞り込みの後) で決める。頭に貼り付いている日 (`pinned`) は送るたびに読み直し、
+   * 押せる日は**一覧に出ている行** (絞り込みの後) で決める。先頭に貼り付いている日 (`pinned`) は送るたびに読み直し、
    * カレンダーで下線を引く。日を押したらその日の見出しへ送る
    */
   const today = $derived(dayStart(clock));
   const dayMarks = $derived(markDays(shownItems, today));
   let pinned = $state<number | null>(null);
   let pinFrame = 0;
-  /** 頭の日を読み直す。送っている間は 1 コマに 1 回だけ */
+  /** 先頭に貼り付いている日を読み直す。送っている間は 1 コマに 1 回だけ */
   function trackPinned(): void {
     if (pinFrame !== 0) return;
     pinFrame = requestAnimationFrame(() => {
@@ -683,9 +696,9 @@
   });
 
   /**
-   * その日の見出しを頭に送る。**まだ描いていない古い日なら、そこまで描いてから** (`showPastUpTo` と同じ数え方)。
+   * その日の見出しを先頭に送る。**まだ描いていない古い日なら、そこまで描いてから** (`showPastUpTo` と同じ数え方)。
    * 上へ足すときは、足す間は読んでいる所を動かさず (`holdPlace`)、描き終えてから送る。足したぶん飛んでから送り直す、
-   * という 2 段の動きを見せない。新しい順のときは見出しの下にも 1 回に足すぶんを描く (見出しを頭まで送れるように)
+   * という 2 段の動きを見せない。新しい順のときは見出しの下にも 1 回に足すぶんを描く (見出しを先頭まで送れるように)
    */
   async function pickDay(day: number): Promise<void> {
     if (listBox === undefined) return;
@@ -736,7 +749,7 @@
       return lineStatus;
     },
     get firstLiveKey() {
-      // バー (と時刻) を出せる最初の行。長さの分からない予約はバーが無いので飛ばす (無ければ線を見せる)
+      // バー (と時刻) を出せる最初の行。長さの分からない予約はバーが無いので飛ばす (無ければ「いま」の行を見せる)
       return (
         parts.now.find(
           (item) => item.kind === "res" && item.res.end_at > item.res.start_at,
@@ -756,7 +769,7 @@
   });
 </script>
 
-<!-- 聞き返しは他所を触ったら取り下げる (`stand`)。巻いたらカレンダーの頭の日を読み直す (`trackPinned`) -->
+<!-- 聞き返しは他所を触ったら取り下げる (`stand`)。巻いたら、先頭に貼り付いている日 (カレンダーの印) を読み直す (`trackPinned`) -->
 <svelte:window onclick={deleting.stand} onscroll={trackPinned} />
 
 <!--
@@ -829,7 +842,7 @@
       {#if !reversed}{@render older()}{/if}
       <!--
                 見出しごとに包む。見出しは包みの中だけで貼り付くので、前の日の見出しが次の日に残らない。
-                今日の包みは線と今日の予約 (新しい順のときは今日の録画) まで抱えるので、線をまたいでも「今日」が頭に残る
+                今日の包みは「いま」の行と今日の予約 (新しい順のときは今日の録画) まで抱えるので、「いま」の行をまたいでも「今日」が先頭に残る
             -->
       <div class="t-rows">
         {#each shownBlocks as block (block.key)}
@@ -881,6 +894,7 @@
     cmNote={detailCmNote}
     onclose={() => detail.close()}
     fps={detailRec?.fps ?? null}
+    status={detailRes !== null ? reservationState : undefined}
     actions={detailRec !== null
       ? recordingActions
       : detailRes !== null
@@ -888,6 +902,13 @@
         : undefined}
   />
 {/if}
+
+<!-- 予約の状態。番組表・検索の詳細と同じ (`ProgramState`) -->
+{#snippet reservationState()}
+  {#if detailRes !== null}
+    <ProgramState state={detailRes.state} ended={detailRes.end_at <= clock} />
+  {/if}
+{/snippet}
 
 <!--
     予約の詳細から取り消す。**行の「取消」と同じアクション** (`?/cancel`) なので、
@@ -935,7 +956,7 @@
             -->
       {#if offline.usable && rec.library_path?.endsWith(".mkv") === true}
         <!--
-                    **端末に保存 (オフライン視聴)。** 落とすのはエンコードしたもの
+                    **端末に保存 (オフライン視聴)。** 保存するのはエンコードしたもの
                     (docs/offline.md)。元の TS しか無い録画 (エンコードしない予約で
                     保存先に置いた .m2ts も) はブラウザで再生できないので出さない。
                     保存済みなら「端末から削除」に変わる。
@@ -948,7 +969,7 @@
             class="secondary outline"
             onclick={() => saveToDevice(rec)}
           >
-            {held?.state === "failed" ? "保存をやり直す" : "端末に保存"}
+            {held?.state === "failed" ? "保存を再試行" : "端末に保存"}
           </button>
         {/if}
         {#if held !== undefined}
@@ -1007,7 +1028,7 @@
           >
         {/snippet}
         <!--
-                    **未視聴の印を付け外しする** (`?/watched`)。末尾まで観れば勝手に外れる
+                    **未視聴の印を付け外しする** (`?/watched`)。末尾まで観れば自動で外れる
                     ので、押すのは観直したいときか、よそで観たときくらい。どちらも続きの位置は消す
                     (残すと進捗バーが残って、押した結果が一覧に出ない)。
                     詳細は開いたときの行を持っているので、送ったら閉じる (`menuSubmit`)
@@ -1049,13 +1070,13 @@
               tabindex="-1"
               data-testid="cm-redo-button"
             >
-              CM 検出をやり直す
+              CM の再検出
             </div>
             <div class="menu-note muted small">{redo.reason}</div>
           {:else}
             {@render menuSubmit(
               "?/redetectCm",
-              "CM 検出をやり直す",
+              "CM の再検出",
               "cm-redo-button",
               { id: rec.id },
               detail.close,
@@ -1081,12 +1102,5 @@
   :global(.more-menu) {
     width: 16rem;
     max-width: calc(100vw - 2rem);
-  }
-  /*
-     * 押せない項目のすぐ下に出す理由 (CM 検出をやり直せないわけ)。項目と同じ字下げで、次の項目とは余白で分ける。
-     * 理由はメニューの幅 (16rem) より長いので折り返す (1 行に詰めると、メニューの中に横のスクロールバーが出る)
-     */
-  .menu-note {
-    padding: 0.25rem 0.75rem 0.5rem;
   }
 </style>

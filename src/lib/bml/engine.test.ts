@@ -16,7 +16,7 @@ import type { ImageSource } from "./render";
 
 /*
  * エンジンを丸ごと動かす。描く先はブラウザではないので、何でも受け取る小さな偽の DOM に描かせる
- * (中身は見ない。確かめるのはエンジンがページの手を放すか)
+ * (中身は見ない。確かめるのはエンジンがメインスレッドを明け渡すか)
  */
 
 type Loose = Record<PropertyKey, unknown>;
@@ -128,8 +128,8 @@ const inside = (bml: Bml) =>
   };
 
 /**
- * `until` が真になるまで待ちながら、ページの手が空かなかった最も長い間 (ms) を計る。
- * 0ms のタイマーを回し続け、その間隔の最大を見る (エンジンが握っている間はタイマーが来ない)
+ * `until` が真になるまで待ちながら、メインスレッドが空かなかった最も長い間 (ms) を計る。
+ * 0ms のタイマーを回し続け、その間隔の最大を見る (エンジンが動いている間はタイマーが来ない)
  */
 async function watch(
   until: () => boolean,
@@ -174,10 +174,10 @@ describe("エンジンはページを固めない", () => {
     expect(fetches).toBeLessThan(10);
   });
 
-  test("すぐ返る待ち (届いているファイルの BinaryTable) をくり返すスクリプトでも、手を放す", async () => {
+  test("すぐ返る待ち (届いているファイルの BinaryTable) をくり返すスクリプトでも、メインスレッドを明け渡す", async () => {
     const { bml } = open();
     // 届いているファイルの BinaryTable はすぐ返る。直す前は、待ち → 続き → 待ち… が
-    // マイクロタスクでつながり、ループが終わるまで一度も手を放さなかった
+    // マイクロタスクでつながり、ループが終わるまで一度もメインスレッドを明け渡さなかった
     const script = `function start() {
             var n = 0;
             for (var i = 0; i < 100000; i++) {
@@ -200,7 +200,7 @@ describe("エンジンはページを固めない", () => {
     expect(longest).toBeLessThan(100);
   }, 70_000);
 
-  test("長いループでも 1 回に握るのは区切りの長さほど", async () => {
+  test("長いループでも 1 回に占めるのは区切りの長さほど", async () => {
     const { bml } = open();
     const script = `function start() {
             var s = 0;
@@ -216,9 +216,9 @@ describe("エンジンはページを固めない", () => {
     expect(longest).toBeLessThan(100);
   }, 70_000);
 
-  test("受け手が自分を呼び直し続ける (lockModuleOnMemory の通知で押さえ直す) と、手を放しながら回る", async () => {
+  test("ハンドラが自分を呼び直し続ける (lockModuleOnMemory の通知で押さえ直す) と、メインスレッドを明け渡しながら回る", async () => {
     const { bml } = open();
-    // 押さえ直すと、届いているモジュールはすぐ通知が来る。直す前は、通知 → 受け手 →
+    // 押さえ直すと、届いているモジュールはすぐ通知が来る。直す前は、通知 → ハンドラ →
     // 押さえ直す → 通知… がマイクロタスクで回り続けた
     const script = `var n = 0;
             function start() { browser.lockModuleOnMemory("/40/0000"); }
@@ -244,9 +244,9 @@ describe("エンジンはページを固めない", () => {
     expect(longest).toBeLessThan(100);
   }, 30_000);
 
-  test("setInterval の受け手が間隔より重くても、待ちに重ねて積まない", async () => {
+  test("setInterval のハンドラが間隔より重くても、待ちに重ねて積まない", async () => {
     const { bml } = open();
-    // 1ms ごとに、1 回に区切りを何度もまたぐ受け手。直す前は動いている間の刻みが全部積まれ、
+    // 1ms ごとに、1 回に区切りを何度もまたぐハンドラ。直す前は動いている間の刻みが全部積まれ、
     // 止めた後も積んだ分が動き続けた
     const script = `var n = 0, id;
             function start() { id = browser.setInterval("tick();", 1, 0); }
@@ -267,9 +267,9 @@ describe("エンジンはページを固めない", () => {
     expect(Number(inside(bml).ureg[1])).toBeLessThanOrEqual(6);
   }, 30_000);
 
-  test("手が空かないまま続く文書は止めて知らせる", async () => {
+  test("休みなく動き続ける文書は止めて知らせる", async () => {
     const { bml, logs } = open({ budget: { window: 100 } });
-    // 終わらないループ。命令の数の上限に届く前に、手が空かない時間の上限で止まる
+    // 終わらないループ。命令の数の上限に届く前に、動き続けた時間の上限で止まる
     for (const message of carousel([
       startup("", "function start() { for (;;) {} }"),
     ]))
@@ -575,6 +575,33 @@ describe("移れない文書へ移ろうとしても閉じない", () => {
     });
   }
 
+  test("a 要素の href が放送に無いモジュールを指す: 決定を押しても入口へ出直さず、今の文書のまま", async () => {
+    const visible: boolean[] = [];
+    const { bml, logs } = open({ onVisible: (on) => visible.push(on) });
+    const files = hiddenEntry("menu.bml");
+    files[1] = bmlFile(
+      "menu.bml",
+      '<a id="go" href="/40/0005/a.bml">x</a>',
+      'function start() { document.getElementById("go").focus(); browser.Ureg[2] = browser.getActiveDocument(); }',
+    );
+    feedAll(bml, [PROGRAM, ...carousel(files)]);
+    const { done } = await watch(() => inside(bml).ureg[2] !== "");
+    expect(done).toBe(true);
+    expect(bml.path).toBe("/40/0000/menu.bml");
+    bml.key(18, true);
+    bml.key(18, false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bml.path).toBe("/40/0000/menu.bml");
+    expect(visible.at(-1)).toBe(true);
+    expect(
+      logs.some(
+        (line) =>
+          line.includes("モジュールが放送に無い") &&
+          line.includes("/40/0005/a.bml"),
+      ),
+    ).toBe(true);
+  });
+
   /** 双方向をオンにして、決めた URL に決めたものを返す中継 (リクエストされた URL を控える) */
   function relay(
     pages: Record<string, { status?: number; type: string; body: string }>,
@@ -700,6 +727,47 @@ describe("通信の文書", () => {
       "https://www.example.com/d/lib/app.js",
     ]);
   });
+
+  test("通信の文書から unlockAllModulesOnMemory を呼んでも、放送の文書が押さえたものを外す", async () => {
+    const remote = bmlFile(
+      "x",
+      "",
+      `function start() {
+                var before = browser.getLockedModuleInfo().length;
+                browser.unlockAllModulesOnMemory();
+                browser.Ureg[1] = before + "," + browser.getLockedModuleInfo().length;
+            }`,
+    )[2];
+    const { bml } = open({
+      ip: {
+        connected: () => true,
+        transmit: async () => ({
+          resultCode: 0,
+          status: "",
+          body: new Uint8Array(),
+        }),
+        confirm: async () => null,
+        get: async () => ({
+          status: 200,
+          contentType: "text/X-arib-bml; charset=EUC-JP",
+          body: Uint8Array.from(Buffer.from(remote, "latin1")),
+        }),
+      },
+    });
+    feedAll(bml, [
+      PROGRAM,
+      ...carousel([
+        startup(
+          "",
+          'function start() { browser.lockModuleOnMemoryEx("/40/0000"); browser.launchDocument("https://www.example.com/d/menu.bml", "cut"); }',
+        ),
+      ]),
+    ]);
+    const { done } = await watch(() => inside(bml).ureg[1] !== "");
+    expect(done).toBe(true);
+    // Ex で押さえたものは文書を替えても残る。通信の文書からでも全部外れる
+    expect(inside(bml).ureg[1]).toBe("1,0");
+  });
 });
 
 describe("lockModuleOnMemoryEx", () => {
@@ -717,7 +785,7 @@ describe("lockModuleOnMemoryEx", () => {
 });
 
 /**
- * 常に受信している端末 (`DataBroadcast` の `receive`)。**開く前から入口を裏で動かすのは、自動起動の
+ * 自動で受信している端末 (`DataBroadcast` の `receive`)。**開く前から入口を裏で動かすのは、自動起動の
  * 指定 (`auto_start_flag`) がある入口だけ**。開いたら (`open`) 始め、閉じたら (`reset`) 入口へ戻す
  */
 describe("開く前の入口", () => {
@@ -1019,15 +1087,6 @@ describe("16:9 の面の配置", () => {
       },
     );
   });
-
-  test("面の比率が未指定なら 16:9 で収める", () => {
-    expect(planeArea({ width: 400, height: 900 }, {})).toEqual({
-      left: 0,
-      top: 337.5,
-      width: 400,
-      height: 225,
-    });
-  });
 });
 
 describe("MNG", () => {
@@ -1056,7 +1115,7 @@ describe("MNG", () => {
   });
 });
 
-describe("ライブのように流し続けても、持つものと握る時間が一定に収まる", () => {
+describe("ライブのように流し続けても、持つものと占める時間が一定に収まる", () => {
   /** 入口の部品のモジュール 1 つ */
   const moduleOf = (
     id: number,
@@ -1145,7 +1204,7 @@ describe("ライブのように流し続けても、持つものと握る時間�
     try {
       // 実行の上限で止めずに、持つものだけを見る (流す速さはライブの何百倍)。時計はライブと同じ TOT
       const { bml, logs } = open({ clock: () => null, budget: { ratio: 1 } });
-      // 本番の局の書き方に寄せる: 1 回きりのタイマーを受け手のたびに作り直す (chkRen)、
+      // 本番の局の書き方に寄せる: 1 回きりのタイマーをハンドラのたびに作り直す (chkRen)、
       // バージョンが上がったら押さえ直して字を書き換える、イベントのたびに消さないタイマーを足す (後始末し忘れ)
       const script = `var n = 0, m = 0;
                 function start() { browser.setInterval("chk();", 1, 1); browser.Ureg[1] = "ready"; }
@@ -1205,7 +1264,7 @@ describe("ライブのように流し続けても、持つものと握る時間�
       }
       await watch(() => false, 300);
       const inner = engine(bml);
-      // ストリームは届いている (受け手が動いた)
+      // ストリームは届いている (ハンドラが動いた)
       expect(Number(inner.ureg[2])).toBeGreaterThan(10);
       expect(Number(inner.ureg[3])).toBeGreaterThan(10);
       expect(inner.halted).toBe(false);
@@ -1220,16 +1279,16 @@ describe("ライブのように流し続けても、持つものと握る時間�
       // 画像の URL は今のバージョンのぶんだけ (バージョンが上がるたびに返す)
       expect(urls.live()).toBeLessThanOrEqual(2);
       expect(logs.some((line) => line.includes("タイマーが"))).toBe(true);
-      // 手が空かなかった間は短いまま (流し込む側の 10 回ぶんを含めて)
+      // メインスレッドが空かなかった間は短いまま (流し込む側の 10 回ぶんを含めて)
       expect(longest).toBeLessThan(200);
     } finally {
       urls.restore();
     }
   }, 120_000);
 
-  test("受け手が届かないモジュールを待って止まっている間に来たイベントは、上限を超えたら捨てる", async () => {
+  test("ハンドラが届かないモジュールを待って止まっている間に来たイベントは、上限を超えたら捨てる", async () => {
     const { bml, logs } = open();
-    // モジュール 2 は DII にあるが届かない。BinaryTable で待ったまま、次の受け手が動けない
+    // モジュール 2 は DII にあるが届かない。BinaryTable で待ったまま、次のハンドラが動けない
     const script = `function start() {
                 browser.Ureg[1] = "waiting";
                 var t = new BinaryTable("/40/0002/x.bin", "0,U:1B");

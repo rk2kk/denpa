@@ -24,18 +24,6 @@ export interface GrabSize {
   height: number;
 }
 
-/**
- * `createImageBitmap` に渡す縮め方。**`VideoFrame` の無いブラウザで、画面の側で `<video>` を縮めるときだけ使う**
- * (worker の中は `downscale.ts`)。`high` で縮める。低いほど 1920 から 32 へ点で間引き、写すたびに色が揺れる
- */
-export function shrink(size: GrabSize): ImageBitmapOptions {
-  return {
-    resizeWidth: size.width,
-    resizeHeight: size.height,
-    resizeQuality: "high",
-  };
-}
-
 /** 画面 → worker */
 export type ToWorker =
   | {
@@ -52,8 +40,9 @@ export type ToWorker =
       follow: boolean;
     }
   /**
-   * 届いたもの (TS、fMP4 の init・媒体 1 つ、Matroska)。**先頭の 9 バイト (多重化のヘッダ) を飛ばした位置から**。
-   * fMP4 は箱の切れ目で届く (サーバが割ってから送る。`ts/fmp4.ts` の `Fmp4Splitter`)
+   * 届いたもの (TS、fMP4 の init・媒体 1 つ、Matroska)。**`offset` から読む** (WebSocket で届いたものは先頭の
+   * 9 バイトが多重化のヘッダなので 9。録画を fetch で読んだもの (`canvas-player.ts`) は 0)。
+   * fMP4 はボックスの切れ目で届く (ライブはサーバが、録画は `canvas-player.ts` が割る。`ts/fmp4.ts` の `Fmp4Splitter`)
    */
   | { type: "data"; buffer: ArrayBuffer; offset: number }
   /**
@@ -93,7 +82,7 @@ export type ToWorker =
   /** 小窓へ書き込むか。出していない間は書かない (1 コマごとに写すぶん重い) */
   | { type: "pipFlow"; on: boolean }
   /**
-   * 画面が見えているか (`visibilitychange`)。**見えていない間は映像をデコードしない**。同じ端末で 2 本見ていると、
+   * 画面が見えているか (`visibilitychange`)。**見えていない間は映像をデコードしない** (放送のままの MPEG-2 のとき)。同じ端末で 2 本見ていると、
    * 裏に回したほうも 1 コマ 10ms 前後デコードし続けて、見ているほうが間に合わなくなっていた。音は流し続ける
    */
   | { type: "visible"; on: boolean }
@@ -105,8 +94,11 @@ export type ToWorker =
 
 /** worker → 画面 */
 export type FromWorker =
-  /** 使えなくなった (デコーダが無い・音がデコードできない・間に合わない。`budget.ts`)。**次の方式に移るか止まるかは画面が決める** */
-  | { type: "fail"; reason: string }
+  /**
+   * 使えなくなった (デコーダが無い・音がデコードできない・間に合わない。`budget.ts`)。**次の方式に移るか止まるかは画面が決める**。
+   * `slow` は間に合わずに打ち切ったときだけ付く、掛かった条件 (`DecodeBudget.why`)
+   */
+  | { type: "fail"; reason: string; slow?: string | undefined }
   /**
    * デコードできた音 1 コマ。面ごとの float (-1〜1)。**時刻は伸ばした PTS** (`pes.unwrap`)
    */

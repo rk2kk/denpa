@@ -11,7 +11,7 @@ const INIT: CompatInit = {
 };
 
 function make(init: CompatInit = INIT): {
-  // oxlint-disable-next-line typescript/no-explicit-any -- アプリから見える形 (型の無い世界) で触る
+  // oxlint-disable-next-line typescript/no-explicit-any -- アプリから見える形 (型の付かない JavaScript) で触る
   api: any;
   posted: Record<string, unknown>[];
 } {
@@ -35,7 +35,7 @@ describe("bmlCompat", () => {
     ]);
   });
 
-  test("NVRAM は読み書きでき、書いた中身を親へ知らせる (データ放送と同じ鍵)", () => {
+  test("NVRAM は読み書きでき、書いた中身を親へ知らせる (データ放送と同じキー)", () => {
     const { api, posted } = make();
     const pseudo = api.bmlCompat.browserPseudo;
     expect(
@@ -50,7 +50,7 @@ describe("bmlCompat", () => {
     expect(posted).toEqual([
       { type: "nvram", key: "group:00:14", value: expect.any(String) },
     ]);
-    // 渡された中身を読む (同じ鍵なら別の作りでも読める)
+    // 渡された中身を読む (同じキーなら別の作りでも読める)
     const again = make({
       ...INIT,
       nvram: { "group:00:14": posted[0]!["value"] as string },
@@ -70,7 +70,7 @@ describe("bmlCompat", () => {
     ).toBe(1);
   });
 
-  test("データ放送へ戻ると言われたら閉じる", () => {
+  test("launchDataBroadcastingBrowser を呼ばれたら閉じる", () => {
     const { api, posted } = make();
     api.applicationManager.launchDataBroadcastingBrowser({ component_tag: 64 });
     expect(posted).toEqual([{ type: "close" }]);
@@ -89,7 +89,7 @@ test("visibleFrom: アプリへ写すのは、起動した局から見える NVR
   expect(visibleFrom("local:4.103:0", bs)).toBe(false);
   expect(visibleFrom("~:4.101:0", bs)).toBe(true);
   expect(visibleFrom("unknown:x:0", nhk)).toBe(false);
-  // アプリが書いてきた鍵も確かめる。`Nvram` が作らない形式は通さない
+  // アプリが書いてきたキーも確かめる。`Nvram` が作らない形式は通さない
   expect(visibleFrom("group:00:64", nhk)).toBe(false);
   expect(visibleFrom("group:zz:0", nhk)).toBe(false);
   expect(visibleFrom("group:00:1:x", nhk)).toBe(false);

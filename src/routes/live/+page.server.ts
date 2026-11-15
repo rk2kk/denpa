@@ -1,15 +1,19 @@
 import { fail } from "@sveltejs/kit";
-import { and, gt, lte, sql } from "drizzle-orm";
+import { and, getTableColumns, gt, lte, sql } from "drizzle-orm";
 
 import { channelNotice } from "#lib/channel-notice.js";
 import { channelNumber } from "#lib/format.js";
+import { parseId } from "#lib/id.js";
 import { jikkyoChannel } from "#lib/jikkyo/channels.js";
+import { type BroadcastCodec, broadcastCodec } from "#lib/live-choice.js";
 import { LAST_COOKIE } from "#lib/live.js";
-import { channelAlert } from "#lib/server/channel-alert.js";
+import { serviceChannel } from "#lib/server/agent-channels.js";
+import { agentCount } from "#lib/server/agents.js";
 import { orm } from "#lib/server/db.js";
 import {
   airing,
   currentServices,
+  listedServices,
   SERVICE_ORDER,
   SERVICE_TYPE_ORDER,
   serviceCounts,
@@ -19,8 +23,8 @@ import { linkState } from "#lib/server/niconico.js";
 import { recordAiring } from "#lib/server/reservations.js";
 import { programs, services as stations } from "#lib/server/schema.js";
 import { settings } from "#lib/server/settings.js";
+import { issue } from "#lib/server/tickets.js";
 import { liveStart, readKept, viewingOptions } from "#lib/server/viewing.js";
-import type { Service } from "#lib/types.js";
 
 import type { Actions } from "./$types";
 
@@ -56,6 +60,11 @@ export interface LiveChannel {
   /** 実況のチャンネル (`jk1` など。`#lib/jikkyo/channels.ts`)。実況の無い局と、世帯の設定 (連携の「実況」) がオフのときは null */
   jikkyo: string | null;
   hasLogo: boolean;
+  /**
+   * 放送のコーデック (`#lib/live-choice.ts` の `BroadcastCodec`)。4K の局は `hevc` で、画面は「放送のまま」を HEVC の詰め替えとして
+   * リクエストする。再生できるかも 4K の HEVC で確かめる (`#lib/hevc-4k.ts`)
+   */
+  broadcast: BroadcastCodec;
   /** いま流れている番組。無いこともある (番組表がまだ薄い局) */
   now: {
     id: number;
@@ -70,12 +79,20 @@ export function load(event) {
   const { url, cookies } = event;
   const at = Date.now();
   // テレビと同じ並び (SERVICE_TYPE_ORDER / SERVICE_ORDER)
-  const services: Service[] = orm()
-    .select()
+  const services = orm()
+    .select({ ...getTableColumns(stations), channel: serviceChannel() })
     .from(stations)
     .where(currentServices())
     .orderBy(sql.raw(SERVICE_TYPE_ORDER), sql.raw(SERVICE_ORDER))
-    .all();
+    .all()
+    /*
+     * 復号できない局は出さない。選んでもスクランブルされたままで映らない (`services.decodable`)。
+     * チャンネルの分からない局 (エージェントの控えの写しがまだ無い) も選局できないので出さない
+     */
+    .filter(
+      (service): service is typeof service & { channel: string } =>
+        service.decodable && service.channel !== null,
+    );
 
   /*
    * いま流れているものだけ引く。番組表を丸ごと持ってくると、局の数 × 8 日ぶんに
@@ -110,6 +127,7 @@ export function load(event) {
       serviceId: service.service_id,
       number: channelNumber(service),
       hasLogo: service.has_logo,
+      broadcast: broadcastCodec(service.transport),
       jikkyo: current.jikkyo ? jikkyoChannel(service) : null,
       now:
         program === undefined
@@ -129,8 +147,8 @@ export function load(event) {
    * 番組表から名指しで来た局 (`?service=`。無い番号は使わない) → 前回の局 (`LAST_COOKIE`) → 一覧の先頭
    */
   const viewing = viewingOptions(url);
-  // 選択 (自動・AV1・H.265・H.264・MPEG-2) は局が変わっても引き継ぐ (その端末で出るかの話)。H.264・H.265 を外す設定ならそれは自動
-  const kept = readKept(cookies.get(LAST_COOKIE), viewing.hidden.length > 0);
+  // 選択 (自動・エンコードするもの・MPEG-2) は局が変わっても引き継ぐ (その端末で出るかの話)。いまその場でエンコードできないものを選んでいた端末は自動
+  const kept = readKept(cookies.get(LAST_COOKIE), viewing.liveCodecs);
   const start = liveStart(
     channels,
     Number(url.searchParams.get("service")),
@@ -141,7 +159,7 @@ export function load(event) {
   /*
    * 繋いでくる前にエンコードし始める (`live.warm`。WebSocket が繋がるまでの 160ms を ffmpeg の立ち上がりと重ねる)。
    * 形式は選択と開いた名前から決めたもの (自動なら家の中は放送のまま、外は AV1。`viewing.warmFormat`)。
-   * 画面が別の形式に決めても、温めたものは誰も来なければ 8 秒で畳む
+   * 画面が別の形式をリクエストしたら、そのリクエストがチューナーを使えた時点で畳む (`live.dropWarm`)。誰も来なければ 8 秒で畳む
    */
   if (start !== null)
     warm(
@@ -157,17 +175,25 @@ export function load(event) {
   return {
     channels,
     /** 局が無いときに上に出す案内 (`#lib/channel-notice.ts`。出すのは `+layout.svelte`) */
-    channelNotice: channelNotice(serviceCounts()),
-    channelAlert: channelAlert(),
+    channelNotice: channelNotice(
+      serviceCounts(),
+      listedServices(),
+      agentCount(),
+    ),
     start,
+    /**
+     * WebSocket に繋ぐチケット (`server/tickets.ts`)。**最初の 1 回はこれで繋ぎ**、`/api/live/ticket` の往復 (100ms ほど) を省く。
+     * このページも認証を通った人にしか返らないので、`/api/live/ticket` で配るのと同じ。開く局が無ければ配らない
+     */
+    ticket: start === null ? null : issue(),
     /** コーデックのメニューで選んでいるもの (端末ごと。`LAST_COOKIE`) */
     choice: kept.choice,
     /** 開いた名前が家の中か (`#lib/host.ts` の `indoorHost`)。「自動」の形式を画面が決めるのに使う */
     indoor: viewing.indoor,
-    /** コーデックのメニューから外すもの (世帯の設定) */
-    hidden: viewing.hidden,
     /** ライブで H.265 を出せるか (ライブのエンコーダが GPU のときだけ。`viewing.viewingOptions`) */
     hevc: viewing.hevc,
+    /** その場でエンコードできるコーデック (`viewing.viewingOptions`)。コーデックのメニューに並べる 1 つを画面が選ぶ */
+    liveCodecs: viewing.liveCodecs,
     postalCode: current.postalCode,
     prefecture: current.prefecture,
     bmlNetwork: current.bmlNetwork,
@@ -189,13 +215,17 @@ export const actions = {
    */
   record: async ({ request }) => {
     const form = await request.formData();
-    const serviceId = Number(form.get("service"));
-    if (!Number.isInteger(serviceId))
-      return fail(400, { message: "局の指定が不正です" });
+    const serviceId = parseId(form.get("service"));
+    if (serviceId === null) return fail(400, { message: "局の指定が不正です" });
 
     // アプリの `POST /api/services/<id>/record` と同じ経路 (`recordAiring`)
     const result = await recordAiring(serviceId);
     if (!result.ok) return fail(result.status, { message: result.message });
-    return { recorded: result.name };
+    // 予約できても、競合・コピー禁止で録らないことがある。画面はそれを見て文を変える
+    return {
+      recorded: result.name,
+      state: result.state,
+      reason: result.reason,
+    };
   },
 } satisfies Actions;

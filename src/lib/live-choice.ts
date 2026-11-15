@@ -5,11 +5,13 @@
  * ここに置く (docs/stream.md「どの形式で流すか」)。
  */
 
+import { CODEC_LABEL, HW_CODECS, type HwCodec } from "./hw";
 import { LIVE_CODECS, type LiveCodec } from "./live";
 
 /**
  * メニューで選んだもの。`auto` は端末と開いた場所 (家の中か) に合わせる (`autoCodec`)。
- * `raw` は MPEG-2 (放送のまま)。ライブは**端末ごとに覚える** (`LAST_COOKIE` の `choice`)
+ * `raw` は放送のまま (MPEG-2 の局は MPEG-2、4K の局は HEVC。`BroadcastCodec`)。エンコードするものはメニューに 1 つだけ並ぶ (`shownCodec`)。
+ * ライブは**端末ごとに覚える** (`LAST_COOKIE` の `choice`)
  */
 export type LiveChoice = "auto" | LiveCodec | "raw";
 
@@ -17,30 +19,87 @@ export type LiveChoice = "auto" | LiveCodec | "raw";
 export type LiveFormat = LiveCodec | "raw";
 
 /**
- * **世帯の設定でメニューから外すコーデック** (設定 `hideH264Hevc`)。外すのはメニューだけで、
- * AV1 を再生できない端末には自動で H.265 や H.264 を流す (サーバは今までどおり出す)
+ * **放送のコーデック。メニューの「放送のまま」はこれを指す。** MPEG-2 TS の局は MPEG-2 (`raw` で元の TS を送り、端末が WASM でデコードする)、
+ * 4K の局 (MMT/TLV) は HEVC (`hevc` で放送の HEVC をエンコードせずに fMP4 に詰め替え、MSE で再生する)。
+ * 4K の局の `hevc` は詰め替えだけを指し、H.265 にエンコードすることはしない (docs/stream.md「4K の局のライブ」)
  */
-export const HIDDEN_CODECS = ["h264", "hevc"] as const;
+export type BroadcastCodec = "mpeg2" | "hevc";
 
-/** 形式の名前 (メニューと断り書き) */
-export function formatLabel(format: LiveFormat): string {
-  if (format === "raw") return "MPEG-2";
+/** 伝送の形式 (`types.Transport`) から放送のコーデック。TLV は 4K の局 */
+export function broadcastCodec(transport: "ts" | "tlv"): BroadcastCodec {
+  return transport === "tlv" ? "hevc" : "mpeg2";
+}
+
+/** 「放送のまま」で実際にリクエストする形式。MPEG-2 の局は `raw`、4K の局は `hevc` (詰め替え) */
+export function broadcastFormat(broadcast: BroadcastCodec): LiveFormat {
+  return broadcast === "hevc" ? "hevc" : "raw";
+}
+
+/**
+ * **録画の観る画面のメニューに並べないコーデック** (`ts/playback.ts` の `codecChoices`)。外すのはメニューだけで、
+ * 自動は今までどおり選ぶ。ライブと追っかけのメニューは、サーバがその場でエンコードできるもので決める (`shownCodec`・`hiddenCodecs`)
+ */
+export const WATCH_HIDDEN_CODECS = ["h264", "hevc"] as const;
+
+/**
+ * **ライブと追っかけのメニューに並べる、エンコードするコーデック (1 つだけ)。** サーバがその場でエンコードできる並び
+ * (`live`。`server/live.ts` の `liveRealtime`。AV1 → H.265 → H.264 のうち GPU でエンコードできるものと、ソフトウェアの H.264) の先頭から、
+ * この端末で再生できるもの (`plays`)。どれも再生できなければ先頭 (押すと代わりの形式に替えて断り書きを出す)。並びが空なら null。
+ * その画面で出せない形式 (追っかけ・互換モード・4K の局の H.265) は、呼ぶ側が `live` から外して渡す
+ */
+export function shownCodec(
+  live: readonly LiveCodec[],
+  plays: (codec: LiveCodec) => boolean,
+): LiveCodec | null {
+  return live.find(plays) ?? live[0] ?? null;
+}
+
+/**
+ * **テレビのアプリのメニューから外すもの** (`GET /api/playback/options` の `hidden`)。エンコードするコーデックのうち、
+ * サーバがその場でエンコードできる並び (`live`) の先頭以外。アプリは端末で再生できるかを見ずにこれを外す
+ */
+export function hiddenCodecs(live: readonly LiveCodec[]): LiveCodec[] {
+  return LIVE_CODECS.map((codec) => codec.id).filter((id) => id !== live[0]);
+}
+
+/**
+ * **覚えていた選択のうち、いま使うもの。** エンコードするものは、いまメニューに並んでいるもの (`shown`) と同じときだけ使い、
+ * 違えば自動として扱う (GPU が変わった・前のバージョンで選んだ・4K の局を開いた)。覚えた値は書き換えないので、また並べば選んだものに戻る
+ */
+export function keptChoice(
+  choice: LiveChoice,
+  shown: LiveCodec | null,
+): LiveChoice {
+  return choice === "auto" || choice === "raw" || choice === shown
+    ? choice
+    : "auto";
+}
+
+/** 形式の名前 (メニューと断り書き)。放送のまま (`raw`) は放送のコーデックの名前 */
+export function formatLabel(
+  format: LiveFormat,
+  broadcast: BroadcastCodec = "mpeg2",
+): string {
+  if (format === "raw")
+    return broadcast === "hevc" ? CODEC_LABEL.hevc : "MPEG-2";
   return LIVE_CODECS.find((codec) => codec.id === format)?.label ?? format;
 }
 
 /**
  * 覚えていた選択を読む。**知らない値・前の形式の cookie (`codec`・`raw` だけで `choice` が無い) は自動。**
- * H.264・H.265 を外す設定 (`hidden`) なら、それを選んでいた端末も自動として扱う。H.265 を選んでいても、ライブの
- * エンコーダが GPU でなくなっていれば、画面が代わりを選んで断り書きを出す (`live-player.svelte.ts` の `pickFormat`)
+ * H.265・H.264 もそのまま読む。いまメニューに並んでいないものを自動として扱うのは `keptChoice`
  */
-export function readChoice(value: unknown, hidden: boolean): LiveChoice {
-  if (value === "av1" || value === "raw") return value;
-  if ((value === "h264" || value === "hevc") && !hidden) return value;
-  return "auto";
+export function readChoice(value: unknown): LiveChoice {
+  return value === "av1" ||
+    value === "hevc" ||
+    value === "h264" ||
+    value === "raw"
+    ? value
+    : "auto";
 }
 
-/** エンコード済みのコーデック (録画の観る画面で選ぶもの) */
-type EncodedCodec = "av1" | "hevc" | "h264";
+/** エンコード済みのコーデック (録画の観る画面で選ぶもの)。並びは GPU でエンコードする順 (`HW_CODECS`) と同じ */
+type EncodedCodec = HwCodec;
 
 /**
  * **「自動」の順。ライブ・追っかけ・録画の観る画面で、この 1 つで決める。** その画面で出せない形式
@@ -49,22 +108,32 @@ type EncodedCodec = "av1" | "hevc" | "h264";
  * | 場面 | 家の中 (`indoor`) | 外 | 互換モード (`compat`。canvas に描く) |
  * | --- | --- | --- | --- |
  * | その場でエンコード (ライブ・追っかけ) | MPEG-2 → H.264 → AV1 → H.265 | AV1 → H.265 → H.264 | AV1 → H.264 → MPEG-2 |
+ * | 4K の局のライブ (`broadcast` が `hevc`) | HEVC → H.264 → AV1 | AV1 → H.264 | AV1 → H.264 (canvas は HEVC を描かない) |
  * | エンコード済み (`encoded`。録画の観る画面) | AV1 → H.265 → H.264 | AV1 → H.265 → H.264 | 同じ形式の詰め替え → 上の互換モードの順 (`ts/playback.ts` の `pickCanvas`) |
  *
  * - 家の中は**開くまでの速さ**を採る。MPEG-2 はエンコードせずに済み、画質も放送のまま。次はエンコードの立ち上がりが速い H.264
  * - 外は**回線**を採る。放送のままは 1 局で 15Mbit/s ほどあり太すぎる。同じ画質で小さい順 (AV1 → H.265 → H.264)
  * - 互換モードで MPEG-2 を後ろにするのは、エンコードしたものより canvas に描くのが重いから
  * - エンコード済みは小さい順。もうエンコードしてあるので、開く速さはコーデックで変わらない
+ * - **4K の局は、放送のまま (MPEG-2) の場所に HEVC (詰め替え) を入れる。** H.265 にエンコードすることはしないので、
+ *   エンコードする H.265 は並べない。外で放送のままを選ばないのは MPEG-2 の局と同じ (4K の HEVC は 1 局で約 33Mbit/s)
  */
 export function autoOrder(scene: "encoded"): readonly EncodedCodec[];
 export function autoOrder(scene: {
   indoor: boolean;
   compat: boolean;
+  broadcast?: BroadcastCodec;
 }): readonly LiveFormat[];
 export function autoOrder(
-  scene: "encoded" | { indoor: boolean; compat: boolean },
+  scene:
+    | "encoded"
+    | { indoor: boolean; compat: boolean; broadcast?: BroadcastCodec },
 ): readonly LiveFormat[] {
-  if (scene === "encoded") return ["av1", "hevc", "h264"];
+  if (scene === "encoded") return HW_CODECS;
+  if (scene.broadcast === "hevc") {
+    if (scene.compat) return ["av1", "h264"];
+    return scene.indoor ? ["hevc", "h264", "av1"] : ["av1", "h264"];
+  }
   if (scene.compat) return ["av1", "h264", "raw"];
   return scene.indoor
     ? ["raw", "h264", "av1", "hevc"]
@@ -77,7 +146,8 @@ export function autoOrder(
  *
  * `rawOk` は「この端末で MPEG-2 をデコードできて、まだ打ち切っていない」、`av1`・`hevc`・`h264` は「受け取れて (互換モードなら
  * 描けて)、まだ打ち切っていない」。`hevc` はそのうえでライブのエンコーダが GPU のとき (`server/viewing.ts` の
- * `ViewingOptions.hevc`)。追っかけと互換モードでは呼ぶ側が false にする。どれをやめたかは呼ぶ側が持つ
+ * `ViewingOptions.hevc`)。TS の局の追っかけと互換モードでは呼ぶ側が false にする。どれをやめたかは呼ぶ側が持つ。
+ * 4K の局 (`broadcast` が `hevc`) の `hevc` は「放送の HEVC (2160p・10 ビット・HLG) を再生できる」で、GPU は要らない (`#lib/hevc-4k.ts`)
  */
 export function autoCodec(o: {
   indoor: boolean;
@@ -86,6 +156,7 @@ export function autoCodec(o: {
   hevc: boolean;
   h264: boolean;
   compat: boolean;
+  broadcast?: BroadcastCodec;
 }): LiveFormat | null {
   return (
     autoOrder(o).find((format) => (format === "raw" ? o.rawOk : o[format])) ??

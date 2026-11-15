@@ -10,27 +10,23 @@ namespace Denpa.Agent;
 /// デバイスを**確保したまま**選局する。
 ///
 /// <para>
-/// 選局のたびに外のコマンド (<c>recisdb</c>) を起こしていた頃は、チャンネルを
+/// 選局のたびに外のコマンド (<c>recisdb</c>) を起動していた頃は、チャンネルを
 /// 変えるたびにデバイスが宙に浮き、取り直す隙間ができた (docs/agent.md)。
 /// </para>
 ///
 /// <para>
-/// 方式は 5 つある。どれも「開く → 選局 → 流し始める → 読む → 選局し直す」で、
+/// 方式は 6 つある。どれも「開く → 選局 → 流し始める → 読む → 選局し直す」で、
 /// 違うのは誰がデバイスを持っているか。
 /// </para>
 ///
 /// <list type="bullet">
 /// <item><see cref="DvbTuner"/> … 標準の Linux DVB v5。PT2/PT3、PX-S1UD、PX-BCUD。カーネルが持つ</item>
-/// <item><see cref="Px4Tuner"/> … px4-userland の機材 (PX-Q3U4 など) と asicen-userland の機材 (PX-W3U3。同じ IPC)。<c>px4d</c> (asicen なら <c>asicend</c>) が持ち、受信機を取ったまま制御ソケットで選局し直す (Px4.cs)</item>
-/// <item><see cref="SianoTuner"/> … siano-userland の機材 (PX-S1UD などをカーネルに使わせていないとき)。<c>siano-ts</c> を起こしたまま標準入力で選局し直す (Siano.cs)</item>
+/// <item><see cref="It930xTuner"/> … IT930x の機材 (PX-MLT5・PX-Q3・PX-W3 系など)。エージェントが USB を直に持ち、機材を初めての選局で開いたまま受信機ごとに選局し直す (It930xDevice.cs)</item>
+/// <item><see cref="AsicenTuner"/> … asicen-userland の機材 (PX-W3U3 など。試験的)。<c>asicend</c> が持ち、選局のたびに受信機を取り直す (AsicenUdtv.cs)</item>
+/// <item><see cref="SianoTuner"/> … Siano の機材 (PX-S1UD などをカーネルに使わせていないとき)。エージェントが USB を直に持ち、機材を開いたまま選局のメッセージを送り直す (Siano.cs)</item>
 /// <item><see cref="Zd1jTuner"/> … Sony CECH-ZD1 J。エージェントが USB を直に持ち、ボードを開いたまま周波数まわりだけ書き換える (Zd1j.cs)</item>
 /// <item><see cref="Dt295NativeTuner"/> … PIXELA PIX-DT295。エージェントが USB を直に持ち、機材を初めての選局で開いたまま選局し直す (Dt295NativeTuner.cs)</item>
 /// </list>
-///
-/// <para>
-/// <c>px4_drv</c> の chardev (<c>/dev/px4video*</c>) は受け取らない。ホストに DKMS で
-/// カーネルモジュールを入れてもらう前提そのものをやめたので (Px4.cs)。
-/// </para>
 /// </summary>
 public interface ITuneDevice : IDisposable
 {
@@ -38,16 +34,16 @@ public interface ITuneDevice : IDisposable
     /// 選局する。**開いたまま何度でも呼べる。**
     /// 同期しなければ例外 (電波が来ていない、その周波数に放送が無い)。
     /// </summary>
-    void Tune(ChannelTable.Tuning tuning, uint streamId);
+    void Tune(ChannelTable.Tuning tuning);
 
     /// <summary>TS の読み出し側。<see cref="Tune"/> のあとで取る (選局し直したら取り直す)</summary>
     Stream Output { get; }
 
     /// <summary>
-    /// 前の選局がまだ生きているか。
+    /// 前の選局がまだ続いているか。
     ///
     /// <para>
-    /// DVB は一度合わせたら合ったまま。px4-userland は読む側がいなくなると
+    /// DVB は一度合わせたら合ったまま。asicen-userland は読む側がいなくなると
     /// TS のストリームを畳む (受信機は取ったまま) ので、**同じチャンネルでも選局し直しが要る**ことがある。
     /// TunerPool は「同じチャンネルならそのまま」の前にここを見る。
     /// </para>
@@ -60,15 +56,49 @@ public interface ITuneDevice : IDisposable
     /// </summary>
     TunerSignal? Signal() => null;
 
+    /// <summary>
+    /// <see cref="Output"/> が流すバイト列の形式。<see cref="Tune"/> が戻ったあとに読む。
+    /// ISDB-C で TSMF から選んだ TS が分割 TLV なら <see cref="StreamFormat.Tlv"/> (<see cref="TsmfSelector.Format"/>)。ほかの方式はどれも TS
+    /// </summary>
+    StreamFormat Format => StreamFormat.Ts;
+
+    /// <summary>
+    /// 最後に ISDB-C を選局したときの TSMF の判定 (<c>/denpa/stream</c> の <c>X-Denpa-Tsmf-Streams</c> と <c>--tune</c> が読む)。
+    /// ISDB-C を選局しない機材と、ISDB-C でない選局では null
+    /// </summary>
+    TsmfSelector? Tsmf => null;
+
+    /// <summary>
+    /// この方式の選局を受け付けるか。**受け付けない方式は <see cref="Tune"/> に渡さない** (<see cref="TunerPool"/> と <c>--tune</c> が先に断る)。
+    /// J.83B と ISDB-C を選局できない機材に渡すと、地上波の選局として扱ってしまうため。既定は地上波と衛星だけ
+    /// </summary>
+    bool Accepts(ChannelTable.Tuning tuning) => !tuning.Cable && !tuning.IsdbC;
+
     /// <summary>同期しなかったときの文言 (どの方式でも同じにする)</summary>
     const string SyncFailed = "同期しませんでした (電波が来ていないか、その周波数に放送がありません)";
+}
+
+/// <summary>
+/// **機材の電源を入れ直すまで、どのチャンネルを選局しても TS が届かないと分かっているときの失敗** (IT930x のブリッジの溢れ。<see cref="It930xDevice.Jammed"/>)。
+/// <see cref="TunerPool"/> は、このチューナーをどのチャンネルでも組の後ろに回し、同じ組の空いているチューナーで選局し直す
+/// </summary>
+public sealed class TunerUnusableException(string message) : IOException(message);
+
+/// <summary>チューナーが流すバイト列の形式 (<see cref="ITuneDevice.Format"/>。<c>/denpa/stream</c> の Content-Type)</summary>
+public enum StreamFormat
+{
+    /// <summary>MPEG-2 TS (188 バイトのパケット)</summary>
+    Ts,
+
+    /// <summary>ARIB STD-B32 の TLV パケットの並び (4K の MMT/TLV。ケーブルの分割 TLV から組み立てたもの。SplitTlv.cs)</summary>
+    Tlv,
 }
 
 /// <summary>
 /// libc の関数 (open・ioctl・poll など。kill だけは Interop.cs)。
 ///
 /// <para>
-/// **macOS でも同じ関数で動く** (Mac で siano-ts の pipe を読むため)。"libc" は
+/// **macOS でも同じ関数で動く。** "libc" は
 /// macOS でも <c>/usr/lib/libc.dylib</c> (libSystem の別名) で引ける。ただし**数値が
 /// OS ごとに違うもの** (<c>O_NONBLOCK</c>、errno) は決め打ちにできないので、ここと
 /// <see cref="DeviceStream"/> で OS を見て選ぶ。
@@ -83,7 +113,7 @@ internal static unsafe partial class Sys
 
     /// <summary>
     /// <c>O_CLOEXEC</c>。Linux は 0x80000、macOS は 0x1000000。.NET の Process.Start は付いていない fd を閉じないので、
-    /// 付けずに開くと、あとから起こした px4d・asicend・siano-ts がデバイスを開いたまま持ち続け、閉じたあとに開き直すと Device or resource busy になる
+    /// 付けずに開くと、あとから起動した asicend がデバイスを開いたまま持ち続け、閉じたあとに開き直すと Device or resource busy になる
     /// </summary>
     public static readonly int CloseOnExec = OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
 
@@ -96,22 +126,35 @@ internal static unsafe partial class Sys
     [LibraryImport("libc", EntryPoint = "read", SetLastError = true)]
     public static partial nint ReadFd(int fd, byte* buffer, nuint count);
 
-    [LibraryImport("libc", EntryPoint = "poll", SetLastError = true)]
-    public static partial int Poll(byte* fds, nuint count, int timeout);
+    /// <summary>位置を動かさずに <paramref name="offset"/> から読む (64bit の off_t)</summary>
+    [LibraryImport("libc", EntryPoint = "pread", SetLastError = true)]
+    public static partial nint PRead(int fd, byte* buffer, nuint count, long offset);
 
     [LibraryImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    public static partial int Fcntl(int fd, int command, int argument);
+    private static partial int Fcntl(int fd, int command, int argument);
+
+    /// <summary>F_DUPFD_CLOEXEC (Linux)</summary>
+    private const int DupFdCloseOnExec = 1030;
+
+    /// <summary>close-on-exec を付けた複製 (<c>fcntl(F_DUPFD_CLOEXEC)</c>)。失敗は負</summary>
+    public static int DupCloseOnExec(int fd) => Fcntl(fd, DupFdCloseOnExec, 0);
+
+    /// <summary>F_DUPFD (Linux)</summary>
+    private const int DupFd = 0;
+
+    /// <summary>
+    /// close-on-exec を付けない複製 (<c>fcntl(F_DUPFD)</c>。標準入出力の 0〜2 は避ける)。子プロセスに継がせる fd に使う
+    /// (<see cref="InheritedFds"/>)。失敗は負
+    /// </summary>
+    public static int DupInheritable(int fd) => Fcntl(fd, DupFd, 3);
+
+    [LibraryImport("libc", EntryPoint = "poll", SetLastError = true)]
+    public static partial int Poll(byte* fds, nuint count, int timeout);
 
     [LibraryImport("libc", EntryPoint = "close")]
     public static partial int Close(int fd);
 
-    /// <summary><c>F_SETPIPE_SZ</c>。pipe の深さを変える (**Linux だけ**。macOS には無い)</summary>
-    public const int SetPipeSize = 1031;
-
-    /// <summary><c>F_GETPIPE_SZ</c>。いまの pipe の深さ (広げられなかったときに記録へ出す)</summary>
-    public const int GetPipeSize = 1032;
-
-    /// <summary>開けなければ errno を添えて投げる。デバイスが無い・使用中の区別が要る</summary>
+    /// <summary>開けなければ errno を添えて例外を送出する。デバイスが無い・使用中の区別が要る</summary>
     public static SafeFileHandle Must(string path, int flags)
     {
         var fd = Open(path, flags);
@@ -129,55 +172,108 @@ internal static unsafe partial class Sys
 }
 
 /// <summary>
+/// 機材から読んだ TS を読む側 (<see cref="TunerPool"/>) へ渡すバッファ。asicend (<see cref="AsicenStream"/>)、CECH-ZD1 J (<c>Zd1jStream</c>)、
+/// PIX-DT295 (<see cref="Dt295NativeStream"/>)、IT930x (<see cref="It930xTsOutput"/>) の TS のストリームが使う。OS の pipe は使わない (Windows に poll が無く、深さも OS ごとに違った)
+/// </summary>
+internal static class TsBuffer
+{
+    /// <summary>深さ。地上波で 3.5 秒ぶん。これを超えたら書く側が待つ</summary>
+    internal const int Depth = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// 待ちの続きは Inline で呼ぶ (スレッドプールに回さない。書く側は専用のスレッドで、読む側も 200 ms ごとに自分で確かめる)
+    /// </summary>
+    public static Pipe New() => new(new PipeOptions(
+        pauseWriterThreshold: Depth,
+        resumeWriterThreshold: Depth * 3 / 4,
+        minimumSegmentSize: 64 * 1024,
+        readerScheduler: PipeScheduler.Inline,
+        writerScheduler: PipeScheduler.Inline,
+        useSynchronizationContext: false));
+
+    /// <summary>
+    /// 書いたぶんを渡す。続けて書けるなら true。<paramref name="stopped"/> になったら (50 ms ごとに見る)、
+    /// またはバッファが空かないまま <paramref name="limit"/> 経ったら渡すのをやめて false (後者は読む側がいないとみて <paramref name="stalled"/> を呼ぶ)。
+    /// 読み出し側が閉じていたら <paramref name="closed"/> を呼んで false
+    /// </summary>
+    public static bool Flush(PipeWriter writer, Func<bool> stopped, TimeSpan limit, Action stalled, Action? closed = null)
+    {
+        var flushing = writer.FlushAsync();
+        FlushResult result;
+        if (flushing.IsCompleted)
+        {
+            result = flushing.GetAwaiter().GetResult();
+        }
+        else
+        {
+            var waiting = flushing.AsTask();
+            var elapsed = Stopwatch.StartNew();
+            while (!waiting.Wait(50))
+            {
+                if (stopped())
+                {
+                    writer.CancelPendingFlush();
+                    return false;
+                }
+                if (elapsed.Elapsed >= limit)
+                {
+                    writer.CancelPendingFlush();
+                    stalled();
+                    return false;
+                }
+            }
+            result = waiting.GetAwaiter().GetResult();
+        }
+        if (result.IsCompleted)
+        {
+            closed?.Invoke();
+            return false;
+        }
+        return !result.IsCanceled;
+    }
+}
+
+/// <summary>
 /// デバイスからの読み出し側。**待っている最中でも畳める。**
 ///
 /// <para>
 /// 素直に開いて読むと、<c>read</c> で待っている間は誰にも止められない。
 /// TS が来なくなったチューナーを確保したまま、畳もうとしても畳めない、という
-/// 止まり方をする。<c>poll</c> で待って**時々起きる**ようにしてある。
+/// 止まり方をする。<c>poll</c> で待って**時々印を確かめる**ようにしてある。
 /// </para>
 ///
 /// <para>
-/// **Windows には poll が無い。** 子 (siano-ts) の標準出力の pipe は .NET の <see cref="Stream"/> を
-/// 裏のスレッドに読ませ、こちらは同じく 200ms ごとに起きて印を見る (<see cref="Background"/>)。
-/// px4d・CECH-ZD1 J・DT295 から受けた TS はどの OS でも fd を使わない (<see cref="Piped"/>)。
+/// fd で読むのは DVB の dvr だけ。asicend・CECH-ZD1 J・PIX-DT295・Siano・IT930x の機材から受けた TS は、
+/// どの OS でも fd を使わずに Pipe で受ける (<see cref="Piped"/>。Windows には poll が無い)。
 /// </para>
 /// </summary>
-/// <param name="handle">読む fd。DVB の dvr でも、子プロセスの標準出力の pipe でも同じ</param>
+/// <param name="handle">読む fd (DVB の dvr)</param>
 /// <param name="ended">
-/// **尽きたときの理由。** 子プロセスの pipe なら EOF は子が終わったということで、
-/// 黙って 0 を返すと読む側には「選局が終了しました」としか伝わらない。
-/// 理由があるなら (終了コード・stderr の末尾) それを投げる。null なら普通の終わり
+/// **尽きたときの理由。** 書く側が終わって尽きたときに理由を付けずに 0 を返すと、
+/// 読む側には「選局が終了しました」としか伝わらない。理由があればそれを例外として送出する。null なら普通の終わり
 /// </param>
 internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? ended = null) : Stream
 {
-    /// <summary>読み出し側そのもの。**リングバッファの大きさはここに言う** (<c>DvbTuner.StartFilter</c>)</summary>
+    /// <summary>読み出し側そのもの。**リングバッファの大きさはここに設定する** (<c>DvbTuner.StartFilter</c>)</summary>
     public SafeFileHandle Handle => handle;
 
-    /// <summary>この間隔で起きて、畳めと言われていないか見る</summary>
+    /// <summary>この間隔で、畳む印が立っていないか確かめる</summary>
     private const int WakeMs = 200;
-
-    /// <summary>Windows の読み出し側 (<see cref="Background"/>)。あれば fd は使わない</summary>
-    private readonly Background? _background;
-
-    /// <summary>Windows で子の標準出力を読む部分。fd は無いので、空の (無効な) ハンドルを持たせておく</summary>
-    public DeviceStream(Stream pipe, Func<string?>? ended = null)
-        : this(new SafeFileHandle(), ended) => _background = new Background(pipe);
 
     /// <summary>Pipe に詰めた TS の読み出し側 (<see cref="Piped"/>)。あれば fd は使わない</summary>
     private readonly Piped? _piped;
 
-    /// <summary>Pipe に詰めた TS (Px4Stream・Zd1jStream・Dt295NativeStream) を読む部分。fd は無いので、空の (無効な) ハンドルを持たせておく</summary>
+    /// <summary>Pipe に詰めた TS (AsicenStream・Zd1jStream・Dt295NativeStream・SianoStream・It930xTsOutput) を読む部分。fd は無いので、空の (無効な) ハンドルを持たせておく</summary>
     public DeviceStream(PipeReader reader, Func<string?>? ended = null)
         : this(new SafeFileHandle(), ended) => _piped = new Piped(reader);
 
     /// <summary>
-    /// **<see cref="PipeReader"/> から読む。待つのは 200ms ずつ** (fd の poll と同じく、時々起きて印を見る)。
+    /// **<see cref="PipeReader"/> から読む。待つのは 200 ms ずつ** (fd の poll と同じく、時々印を確かめる)。
     ///
     /// <para>
-    /// 読みかけの間に読む側が抜けても、待っている読み (<c>ReadAsync</c>) は捨てずに次の読む側が引き継ぐ。
-    /// PipeReader は同時に 1 つしか読めないので、読む側はロックで 1 つずつ通す (<see cref="Background"/> と同じ)。
-    /// 溜めにあるぶんは <c>TryRead</c> で待たずに取り、無いときだけ待つ (待たない読みは確保をしない)
+    /// 読みかけの間に読む側が抜けても、待っている読み出し (<c>ReadAsync</c>) は捨てずに次の読む側が引き継ぐ。
+    /// PipeReader は同時に 1 つしか読めないので、読む側はロックで 1 つずつ通す。
+    /// バッファにあるぶんは <c>TryRead</c> で待たずに取り、無いときだけ待つ (待たない読み出しは確保をしない)
     /// </para>
     /// </summary>
     private sealed class Piped
@@ -187,8 +283,8 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
 
         /// <summary>
         /// 待っている読み。**Task にしない。** 待つたびに Task と待ち合わせの入れ物を作ると、
-        /// 8 本ぶん流したときに秒あたり数千回の確保になる。読みが済んだら <see cref="_ready"/> を立ててもらい、
-        /// それを 200ms ずつ待つ (どちらも使い回す)
+        /// 8 本ぶん流したときに秒あたり数千回の確保になる。読み出しが済むと PipeReader が <see cref="_ready"/> を立てるので、
+        /// それを 200 ms ずつ待つ (どちらも使い回す)
         /// </summary>
         private ValueTask<ReadResult> _pending;
         private bool _waiting;
@@ -202,16 +298,16 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
         }
 
         /// <summary>
-        /// 待っている読みが済むのを、長くても <see cref="WakeMs"/> 待つ。
+        /// 待っている読み出しが済むのを、長くても <see cref="WakeMs"/> 待つ。
         ///
         /// <para>
         /// **済んだかは <see cref="_pending"/> で見る。<see cref="_ready"/> だけで決めない。**
         /// PipeReader は済んだ印を立ててから、ロックの外で合図を呼ぶ。読む側はその間に印を見て先に読み進め、
-        /// 次の読みを待ちはじめることがあるので、**前の読みの合図が遅れて届く**。それを次の読みが済んだと
-        /// 取ると、まだ済んでいない読みの結果を取得しようとして投げる (CI でときどき落ちていた)
+        /// 次の読み出しを待ちはじめることがあるので、**前の読み出しの合図が遅れて届く**。それを次の読み出しが済んだと
+        /// 取ると、まだ済んでいない読み出しの結果を取得しようとして例外になる (CI でときどき落ちていた)
         /// </para>
         /// <para>
-        /// <see cref="Wake"/> で起こされたときは <paramref name="giveUp"/> を見て、降りるならすぐ戻る
+        /// <see cref="Wake"/> で待ちが終わったときは <paramref name="giveUp"/> を確かめ、抜けるならすぐ戻る
         /// </para>
         /// </summary>
         private bool WaitPending(Func<bool>? giveUp = null)
@@ -222,7 +318,7 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
                 var left = WakeMs - (int)(Environment.TickCount64 - since);
                 if (left <= 0 || !_ready.Wait(left)) return _pending.IsCompleted;
                 if (_pending.IsCompleted) break;
-                // 前の読みの合図か、起こされただけ。下ろして待ち直す (下ろす前にこの読みが済んでいても、上の印で気づく)
+                // 前の読み出しの合図か、Wake で待ちが終わっただけ。下ろして待ち直す (下ろす前にこの読み出しが済んでいても、上の印で分かる)
                 _ready.Reset();
                 if (giveUp?.Invoke() == true) return false;
             }
@@ -230,12 +326,12 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
         }
 
         /// <summary>
-        /// **待っている読む側を今すぐ起こす** (止めたとき)。起きた側は降りる合図を見て戻る。
-        /// 合図を立てる前に降りる合図を立てておくこと (起きた側が見落とさないように)
+        /// **待っている読む側の待ちを今すぐ終わらせる** (止めたとき)。待ちが終わった側は抜ける合図を確かめて戻る。
+        /// 合図を立てる前に抜ける合図を立てておくこと (待ちが終わった側が見落とさないように)
         /// </summary>
         public void Wake() => _ready.Set();
 
-        /// <summary>読めたバイト数。0 は尽きた、null は降りた</summary>
+        /// <summary>読めたバイト数。0 は尽きた、null は抜けた</summary>
         public int? Read(Span<byte> target, Func<bool> giveUp)
         {
             while (!_gate.TryEnter(WakeMs))
@@ -288,8 +384,8 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
         }
 
         /// <summary>
-        /// 読むのをやめる。書く側はもう終わっている (Px4Stream などが先に閉じる) ので、待っている読みも戻っている。
-        /// **読む側がまだ中にいれば触らない** (同時に触ると PipeReader が投げる。溜めは GC に任せる)
+        /// 読むのをやめる。書く側はもう終わっている (AsicenStream などが先に閉じる) ので、待っている読み出しも戻っている。
+        /// **読む側がまだ中にいれば触らない** (同時に触ると PipeReader が例外を送出する。バッファは GC が回収する)
         /// </summary>
         public void Complete()
         {
@@ -299,7 +395,7 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
                 _reader.CancelPendingRead();
                 if (_waiting && WaitPending())
                 {
-                    // 受けた読みは返してから閉じる (返さないまま閉じると、読んでいる最中だと言われる)
+                    // 受けた読み出しは返してから閉じる (返さないまま閉じると、読んでいる最中として例外になる)
                     _reader.AdvanceTo(_pending.GetAwaiter().GetResult().Buffer.End);
                 }
                 _waiting = false;
@@ -308,55 +404,6 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
             catch (Exception error) when (error is InvalidOperationException or AggregateException)
             {
                 // 読みかけが残っていた
-            }
-            finally
-            {
-                _gate.Exit();
-            }
-        }
-    }
-
-    /// <summary>
-    /// **読むのは裏のスレッド、待つのはこちら。** 読みかけの間に読む側が抜けても、読めたぶんは
-    /// 捨てずに次の <see cref="DeviceStream.Read(byte[], int, int, Func{bool}?)"/> に渡す
-    /// (poll で待ってから読む Unix と同じく、抜けた側が中身を持ち去らない)
-    /// </summary>
-    private sealed class Background(Stream pipe)
-    {
-        private readonly byte[] _buffer = new byte[188 * 1024];
-        private readonly Lock _gate = new();
-        private Task<int>? _reading;
-        private int _at;
-        private int _left;
-
-        /// <summary>
-        /// 読めたバイト数。0 は尽きた、null は降りた。**ロックを待つ間も降りる合図を見る。**
-        /// 先に読んでいる側が待っている間、後から来た側 (抜けたい側) がロックの手前で止まらないように
-        /// </summary>
-        public int? Read(Span<byte> target, Func<bool> giveUp)
-        {
-            while (!_gate.TryEnter(WakeMs))
-            {
-                if (giveUp()) return null;
-            }
-            try
-            {
-                while (_left == 0)
-                {
-                    if (giveUp()) return null;
-                    _reading ??= Task.Run(() => pipe.Read(_buffer, 0, _buffer.Length));
-                    if (!((IAsyncResult)_reading).AsyncWaitHandle.WaitOne(WakeMs)) continue;
-                    // 読めなかったなら、ここで元の例外がそのまま出る
-                    _left = _reading.GetAwaiter().GetResult();
-                    _reading = null;
-                    _at = 0;
-                    if (_left == 0) return 0;
-                }
-                var count = Math.Min(target.Length, _left);
-                _buffer.AsSpan(_at, count).CopyTo(target);
-                _at += count;
-                _left -= count;
-                return count;
             }
             finally
             {
@@ -374,20 +421,20 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
     private const int EIntr = 4;
 
     /// <summary>
-    /// **読むのが追いつかず、ドライバのリングバッファが溢れた。** 選局はそのまま生きているので畳まない
+    /// **読むのが追いつかず、ドライバのリングバッファが溢れた。** 選局はそのまま続いているので畳まない
     /// (docs/agent.md「リングバッファが溢れても畳まない」)
     /// </summary>
     private static readonly int EOverflow = OperatingSystem.IsMacOS() ? 84 : 75;
 
     private volatile bool _closed;
 
-    /// <summary>畳めと言われたか (<see cref="Piped"/> に渡す。使い回す)</summary>
+    /// <summary>畳む指示が出たか (<see cref="Piped"/> に渡す。使い回す)</summary>
     private Func<bool>? _stopped;
 
     private int _overflows;
 
     /// <summary>
-    /// **最後に中身を返した時刻。** 溢れたときに「どれだけ空いたか」を言うために持つ
+    /// **最後に中身を返した時刻。** 溢れたときに「どれだけ空いたか」を記録に出すために持つ
     /// </summary>
     private long _handedAt = Stopwatch.GetTimestamp();
 
@@ -396,17 +443,17 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
 
     /// <summary>
     /// この選局で一度でも中身を受け取ったか (<see cref="Begin"/> で false に戻る)。**受け取る前の溢れは、
-    /// 局を変えている間に埋まった印**で、この選局のせいではない
+    /// 局を変えている間に埋まった印**で、この選局が原因ではない
     /// </summary>
     private bool _handed;
 
-    /// <summary>選局の前に溢れていた回数。**読む側のせいではない**ので分けて数える</summary>
+    /// <summary>選局の前に溢れていた回数。**読む側が原因ではない**ので分けて数える</summary>
     private int _stale;
 
     /// <summary>
-    /// 前に聞かれてからリングバッファが溢れた回数と、**そのとき読む側がどれだけ空いていたか** (溜めが浅いのか
+    /// 前回呼ばれてからリングバッファが溢れた回数と、**そのとき読む側がどれだけ空いていたか** (バッファが浅いのか
     /// 読む側が止まっているのかを分ける。docs/agent.md「リングバッファが溢れても畳まない」)。
-    /// **聞いたら 0 に戻る** (デバイスは選局を跨いで開きっぱなしなので、どの選局のぶんか分からなくなる)
+    /// **呼んだら 0 に戻る** (デバイスは選局を跨いで開きっぱなしなので、どの選局のぶんか分からなくなる)
     /// </summary>
     public (int Count, int WorstGapMs, int Stale) TakeOverflows()
     {
@@ -420,12 +467,12 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
     /// <summary>
     /// **いま溜まっているぶんを読んで捨てる。待たない** (<c>DvbTuner.Tune</c>。demux を止めてから呼ぶ)。
     /// 溢れの印 (<c>EOVERFLOW</c>) はカーネルが読んだときに空にするので、そのまま読み続ける。
-    /// fd を持たない読み出し側 (Pipe に詰めた TS・Windows の pipe) では何もしない
+    /// fd を持たない読み出し側 (Pipe に詰めた TS) では何もしない
     /// </summary>
     /// <returns>捨てたバイト数</returns>
     public long Discard()
     {
-        if (_piped is not null || _background is not null) return 0;
+        if (_piped is not null) return 0;
         var fd = (int)handle.DangerousGetHandle();
         var buffer = new byte[188 * 1024];
         var descriptor = stackalloc byte[8];
@@ -464,8 +511,8 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
     }
 
     /// <summary>
-    /// 畳む。Pipe に詰めた TS を待っている読む側は**すぐ起こす** (次に起きる 200ms を待たない。
-    /// 混んだ CI では 500ms を超えていた)。印を立ててから起こす (起きた側がその印を見て戻る)
+    /// 畳む。Pipe に詰めた TS を待っている読む側の待ちは**すぐ終わらせる** (200 ms ごとの確認を待たない。
+    /// 混んだ CI では 500 ms を超えていた)。印を立ててから待ちを終わらせる (待ちが終わった側がその印を確かめて戻る)
     /// </summary>
     public void Stop()
     {
@@ -482,7 +529,7 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
     /// <summary>
     /// <see cref="Stop"/> のあと、**読みかけの読む側が戻るまで待つ** (長くても <paramref name="most"/>)。
     /// 止めたあとに始まった Read は fd に触らずに戻るので、見るのは中にいる数だけでよい。
-    /// 読む側が先に抜けていれば待たない (局替えのたびに固定で寝ていた 300ms がこれで消える)
+    /// 読む側が先に抜けていれば待たない (局替えのたびに固定で待っていた 300 ms がこれで消える)
     /// </summary>
     public void WaitReaders(TimeSpan most)
     {
@@ -491,7 +538,7 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
     }
 
     /// <summary>
-    /// **理由の分かる終わり方をする。** 戻らない失敗は 0 (= 終わり) にせず投げる。0 にしていた頃は、
+    /// **理由の分かる終わり方をする。** 戻らない失敗は 0 (= 終わり) にせず例外を送出する。0 にしていた頃は、
     /// 選局が落ちた記録に理由が残らなかった
     /// </summary>
     public override int Read(byte[] buffer, int offset, int count) => Read(buffer, offset, count, null);
@@ -518,13 +565,10 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
 
     private int ReadCore(byte[] buffer, int offset, int count, Func<bool>? giveUp)
     {
-        if (_piped is not null || _background is not null)
+        if (_piped is not null)
         {
-            var target = buffer.AsSpan(offset, count);
-            var read = _piped is not null
-                // 降りる合図を渡されなければ、畳めと言われたかだけを見る (使い回す。読むたびに作ると確保が積もる)
-                ? _piped.Read(target, giveUp is null ? (_stopped ??= () => _closed) : () => _closed || giveUp())
-                : _background!.Read(target, () => _closed || giveUp?.Invoke() == true);
+            // 抜ける合図を渡されなければ、畳む指示が出たかだけを見る (使い回す。読むたびに作ると確保が積もる)
+            var read = _piped.Read(buffer.AsSpan(offset, count), giveUp is null ? (_stopped ??= () => _closed) : () => _closed || giveUp());
             if (read is null) return 0;
             if (read > 0) return read.Value;
             if (ended?.Invoke() is { } reason) throw new IOException(reason);
@@ -559,7 +603,7 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
                     _handedAt = Stopwatch.GetTimestamp();
                     return (int)read;
                 }
-                // 本当に何も無くなった。理由が分かるなら添えて投げる (pipe の向こうが終わった)
+                // 尽きた。理由が分かるなら添えて例外を送出する
                 if (read == 0)
                 {
                     if (ended?.Invoke() is { } reason) throw new IOException(reason);
@@ -620,14 +664,14 @@ internal sealed unsafe class DeviceStream(SafeFileHandle handle, Func<string?>? 
 ///
 /// <para>
 /// 手順は <c>recisdb</c> の DVB 側 (<c>dvbv5.rs</c>) と同じ並びにしてある。
-/// あちらが libdvbv5 越しにやっていることを、ここでは ioctl で直に言うだけ。
+/// あちらが libdvbv5 越しにやっていることを、ここでは ioctl で直に指定するだけ。
 /// </para>
 /// </summary>
 public sealed unsafe class DvbTuner : ITuneDevice
 {
     // linux/dvb/frontend.h
     private const uint FeSetProperty = 0x40106f52;   // _IOW('o', 82, struct dtv_properties)
-    private const uint FeGetProperty = 0x80106f53;   // _IOR('o', 83, struct dtv_properties)
+    internal const uint FeGetProperty = 0x80106f53;  // _IOR('o', 83, struct dtv_properties)
     private const uint FeReadStatus = 0x80046f45;    // _IOR('o', 69, fe_status_t)
     private const uint FeSetVoltage = 0x6f43;        // _IO('o', 67)。電圧は引数にそのまま渡す
     private const uint FeHasLock = 0x10;
@@ -639,19 +683,41 @@ public sealed unsafe class DvbTuner : ITuneDevice
 
     private const uint DtvTune = 1;
     private const uint DtvFrequency = 3;
+    private const uint DtvModulation = 4;
     private const uint DtvBandwidthHz = 5;
+    private const uint DtvInversion = 6;
+    private const uint DtvSymbolRate = 8;
     private const uint DtvDeliverySystem = 17;
     private const uint DtvIsdbtPartialReception = 18;
     private const uint DtvIsdbtSoundBroadcasting = 19;
     private const uint DtvIsdbtLayerEnabled = 41;
     private const uint DtvStreamId = 42;
-    private const uint DtvStatCnr = 62;
+    private const uint DtvStatSignalStrength = 62;
+    private const uint DtvStatCnr = 63;
+
+    // enum fe_modulation の QAM_64・QAM_256・QAM_AUTO と、enum fe_spectral_inversion の INVERSION_AUTO (linux/dvb/frontend.h)
+    internal const uint Qam64 = 3;
+    internal const uint Qam256 = 5;
+    internal const uint QamAuto = 6;
+    private const uint InversionAuto = 2;
+
+    /// <summary>enum fe_caps の FE_CAN_QAM_AUTO (linux/dvb/frontend.h)。復調器が変調を自分で見分ける</summary>
+    internal const uint CanQamAuto = 0x10000;
+
+    /// <summary>
+    /// ISDB-C で試す変調の順。**ケーブルの搬送波は 64QAM と 256QAM が混ざる** (J:COM の回線で QC26 が 256QAM だった。2026-11-11)。
+    /// 復調器が変調を見分けられれば (<see cref="CanQamAuto"/>) QAM_AUTO を 1 回、見分けられなければ 64QAM、256QAM の順に試す
+    /// </summary>
+    internal static uint[] CableModulations(uint caps) => (caps & CanQamAuto) != 0 ? [QamAuto] : [Qam64, Qam256];
+
+    /// <summary>ISDB-C のシンボルレート (5.274 Mbaud。ITU-T J.83 Annex C)。DVB-C の機材にはボー単位で渡す</summary>
+    internal const uint CableSymbolRate = 5_274_000;
 
     // struct dtv_stats の scale (linux/dvb/frontend.h の enum fecap_scale_params)
     private const byte FeScaleDecibel = 1;
     private const byte FeScaleRelative = 2;
 
-    internal const int PropertySize = 76;            // packed。DeviceProbe の頭のコメントに実測値
+    internal const int PropertySize = 76;            // packed。DeviceProbe の冒頭のコメントに実測値
     internal const int PropertyDataAt = 16;
 
     // linux/dvb/dmx.h
@@ -668,7 +734,7 @@ public sealed unsafe class DvbTuner : ITuneDevice
 
     /// <summary>
     /// **dvr のリングバッファの大きさ。** 全 PID を <c>DMX_OUT_TS_TAP</c> で流すので、溜まるのは demux のフィルタではなく dvr。
-    /// 既定 (≒1.8MB) は地上波で 0.9 秒ぶんしかなく、8MB で 3.5 秒ぶん (docs/agent.md「リングバッファが溢れても畳まない」)
+    /// 既定 (≒1.8 MB) は地上波で 0.9 秒ぶんしかなく、8 MB で 3.5 秒ぶん (docs/agent.md「リングバッファが溢れても畳まない」)
     /// </summary>
     private const int DvrBuffer = 8 * 1024 * 1024;
 
@@ -678,19 +744,31 @@ public sealed unsafe class DvbTuner : ITuneDevice
     private readonly SafeFileHandle _frontend;
     private readonly SafeFileHandle _demux;
     private readonly DeviceStream _dvr;
-    /// <summary>どのアダプタか。記録に添えるためだけに持つ</summary>
-    private readonly string _adapter;
+    /// <summary>設定のチューナーの名前。記録の先頭に付けるためだけに持つ</summary>
+    private readonly string _name;
     private readonly int? _voltage;
     /// <summary>電圧を断られた。以後は送らない (記録も 1 回だけ)</summary>
     private bool _noVoltage;
     private bool _streaming;
+    /// <summary>ISDB-C を選局するときに渡す方式 (<see cref="DeviceProbe.CableSystem"/>)。DVB-C に対応していなければ null</summary>
+    private readonly int? _cableSystem;
+    /// <summary>フロントエンドの <c>caps</c> (<see cref="DeviceProbe.Caps"/>)。ISDB-C の変調の渡し方を決める (<see cref="CableModulations"/>)</summary>
+    private readonly uint _caps;
+    /// <summary>ISDB-C で前にロックした変調 (選局表の周波数ごと)</summary>
+    private readonly Dictionary<uint, uint> _lockedModulation = [];
+    /// <summary>ISDB-C を受けている間の、dvr から TSMF の TS を選んで流す処理。ほかの方式では null</summary>
+    private DvbCable? _cable;
+
+    /// <summary>ISDB-C でロックしたのに、TSMF の判定の時間切れまで dvr から TS が 1 パケットも届かなかったときの失敗の文</summary>
+    public const string TsMissing = "ロックしましたが、TS が 1 パケットも届きません (dvr から TS が出てきません)";
 
     /// <param name="frontend">`/dev/dvb/adapter0/frontend0`。demux と dvr は同じ番号から組み立てる</param>
     /// <param name="lnb">衛星の給電 (`15v` / `11v`)。要らない構成では null</param>
-    public DvbTuner(string frontend, string? lnb)
+    /// <param name="name">設定のチューナーの名前。無ければアダプタの名前 (`adapter0`。検出したときの名前と同じ)</param>
+    public DvbTuner(string frontend, string? lnb, string? name = null)
     {
         var (adapter, number) = Split(frontend);
-        _adapter = $"{adapter}/{number}";
+        _name = name ?? Path.GetFileName(adapter);
         _frontend = Sys.Must(frontend, Sys.ReadWrite | Sys.CloseOnExec);
         try
         {
@@ -706,15 +784,63 @@ public sealed unsafe class DvbTuner : ITuneDevice
 
         // recisdb と同じ対応。11v→13V / 15v→18V (SEC_VOLTAGE_13 = 0, SEC_VOLTAGE_18 = 1)
         _voltage = lnb switch { "15v" => 1, "11v" => 0, _ => null };
+        _cableSystem = DeviceProbe.CableSystem(DeviceProbe.Delivery((int)_frontend.DangerousGetHandle()));
+        if (_cableSystem is not null) _caps = DeviceProbe.Caps((int)_frontend.DangerousGetHandle());
     }
 
-    public Stream Output => _dvr;
+    /// <summary>TS の読み出し側。ISDB-C では TSMF から選んだ TS (<see cref="DvbCable"/>)、ほかの方式は dvr そのもの</summary>
+    public Stream Output => _cable?.Output ?? (Stream)_dvr;
 
-    /// <summary>カーネルが持っているので、一度合わせたら合ったまま</summary>
-    public bool Tuned => _streaming;
+    /// <summary>カーネルが持っているので、一度合わせたら合ったまま。ISDB-C は、TSMF から選んだ TS の出口が閉じたら (読む側が閉じた・形式が変わった) 選局し直す</summary>
+    public bool Tuned => _streaming && _cable is not { Closed: true };
 
-    public void Tune(ChannelTable.Tuning tuning, uint streamId)
+    /// <summary>J.83B は受け付けない。ISDB-C は DVB-C (Annex C か Annex A) に対応しているときだけ受け付ける</summary>
+    public bool Accepts(ChannelTable.Tuning tuning) => !tuning.Cable && (!tuning.IsdbC || _cableSystem is not null);
+
+    /// <summary>最後に ISDB-C を選局したときの TSMF の判定。選局に失敗したあとも残す。ISDB-C でないか、ロックしなかったなら null</summary>
+    public TsmfSelector? Tsmf { get; private set; }
+
+    /// <summary>最後の ISDB-C の選局で、分割 TLV を組み立てる処理 (<c>--tune</c> が数を出す)。ISDB-C でなければ null</summary>
+    public SplitTlv? Tlv { get; private set; }
+
+    /// <summary>流しているバイト列の形式。TSMF から選んだ TS が分割 TLV なら <see cref="StreamFormat.Tlv"/></summary>
+    public StreamFormat Format => Tsmf?.Format ?? StreamFormat.Ts;
+
+    /// <summary>最後の ISDB-C の選局でロックした周波数 (Hz。<c>--tune</c> が出す)。ISDB-C でないか、ロックしなかったなら null</summary>
+    public uint? CableFrequency { get; private set; }
+
+    /// <summary>ISDB-C を選局するときの方式の名前 (<c>--tune</c> が出す)。DVB-C に対応していなければ null</summary>
+    public string? CableSystemName => _cableSystem switch
     {
+        ChannelTable.SysDvbcAnnexC => "DVB-C Annex C",
+        ChannelTable.SysDvbcAnnexA => "DVB-C Annex A",
+        _ => null,
+    };
+
+    /// <summary>
+    /// ISDB-C の選局で渡す property。5.274 Mbaud で、周波数は選局表の中心周波数 (Hz)、変調は <see cref="CableModulations"/> の 1 つ。
+    /// 方式は <c>SYS_DVBC_ANNEX_C</c> か <c>SYS_DVBC_ANNEX_A</c> (<see cref="DeviceProbe.CableSystem"/>)。ロールオフは方式で決まるので渡さない
+    /// </summary>
+    internal static List<(uint Command, uint Value)> CableProperties(int system, uint hertz, uint modulation = Qam64) =>
+    [
+        (DtvDeliverySystem, (uint)system),
+        (DtvFrequency, hertz),
+        (DtvModulation, modulation),
+        (DtvSymbolRate, CableSymbolRate),
+        (DtvInversion, InversionAuto),
+        // これを最後に置いて初めて選局が始まる
+        (DtvTune, 0),
+    ];
+
+    public void Tune(ChannelTable.Tuning tuning)
+    {
+        if (!Accepts(tuning)) throw new IOException(TunerPool.Unaccepted(tuning.Type, tuning));
+        var streamId = tuning.StreamId;
+        // ISDB-C の TS を流す処理は、demux を止める前に止める (dvr を読んでいる間に捨てない)
+        StopCable();
+        Tsmf = null;
+        Tlv = null;
+        CableFrequency = null;
         // 選局し直す間は止める。前のチャンネルの残りが混ざったまま流れると、
         // 読む側 (denpa) には途中で中身が変わったようにしか見えない
         if (_streaming)
@@ -724,41 +850,107 @@ public sealed unsafe class DvbTuner : ITuneDevice
              * **止めたうえで、dvr に残っている前のチャンネルのぶんを捨てる。** dvr のリングバッファは
              * DMX_START でも空にならず (カーネルが空にするのは開いたときと溢れを読んだときだけ)、
              * 前の利用者が抜けてから溢れるまでの数秒の間に次の選局が来ると、前のチャンネルの PAT が
-             * 新しい選局の頭に乗る。衛星の局ロゴはそれを見て、当たりの中継 (BS15:16625) を「外れ」と
+             * 新しい選局の先頭に入る。衛星の局ロゴはそれを見て、当たりの中継 (BS15:16625) を「外れ」と
              * 1 週間控えていた (docs/logo.md)
              */
             _dvr.Discard();
         }
 
-        var properties = new List<(uint Command, uint Value)>
+        if (tuning.IsdbC)
         {
-            (DtvDeliverySystem, (uint)tuning.Delivery),
-            (DtvFrequency, tuning.Frequency),
-        };
-
-        if (tuning.Satellite)
-        {
-            properties.Add((DtvStreamId, streamId));
-            if (_voltage is { } voltage && !_noVoltage) _noVoltage = !PowerLnb(_adapter, voltage, SetVoltage);
+            LockCable(tuning);
         }
         else
         {
-            properties.Add((DtvBandwidthHz, 6_000_000));
-            // 地上波は階層が 3 つある。全部受ける (部分受信=ワンセグだけ、ではない)
-            properties.Add((DtvIsdbtPartialReception, 0));
-            properties.Add((DtvIsdbtSoundBroadcasting, 0));
-            properties.Add((DtvIsdbtLayerEnabled, 0x07));
+            var properties = new List<(uint Command, uint Value)>
+            {
+                (DtvDeliverySystem, (uint)tuning.Delivery),
+                (DtvFrequency, tuning.Frequency),
+            };
+
+            if (tuning.Satellite)
+            {
+                properties.Add((DtvStreamId, streamId));
+                if (_voltage is { } voltage && !_noVoltage) _noVoltage = !PowerLnb(_name, voltage, SetVoltage);
+            }
+            else
+            {
+                properties.Add((DtvBandwidthHz, 6_000_000));
+                // 地上波は階層が 3 つある。全部受ける (部分受信=ワンセグだけ、ではない)
+                properties.Add((DtvIsdbtPartialReception, 0));
+                properties.Add((DtvIsdbtSoundBroadcasting, 0));
+                properties.Add((DtvIsdbtLayerEnabled, 0x07));
+            }
+
+            // これを最後に置いて初めて選局が始まる
+            properties.Add((DtvTune, 0));
+
+            SetProperties(properties);
+            if (!WaitForLock()) throw new IOException(ITuneDevice.SyncFailed);
         }
-
-        // これを最後に置いて初めて選局が始まる
-        properties.Add((DtvTune, 0));
-
-        SetProperties(properties);
-        WaitForLock();
 
         // 全 PID (0x2000) をそのまま dvr へ。選り分けるのは denpa の仕事
         StartFilter();
         _streaming = true;
+        if (tuning.IsdbC) StartCable(tuning);
+    }
+
+    /// <summary>
+    /// ISDB-C を DVB-C として選局し、ロックを待つ。ずらして送られることがあるチャンネル (<see cref="ChannelTable.Tuning.ShiftedFrequency"/>) は、
+    /// 中心周波数でロックしなければ、ずらした周波数も試す。変調は <see cref="CableModulations"/> の順に試し、前にロックした変調を先にする
+    /// (64QAM と 256QAM を試す機材で、256QAM の搬送波を選局するたびに 64QAM の時間切れを待たないため)
+    /// </summary>
+    private void LockCable(ChannelTable.Tuning tuning)
+    {
+        var system = _cableSystem ?? throw new IOException(TunerPool.Unaccepted(tuning.Type, tuning));
+        uint[] frequencies = tuning.ShiftedFrequency is { } shifted ? [tuning.Frequency, shifted] : [tuning.Frequency];
+        var modulations = CableModulations(_caps);
+        if (_lockedModulation.TryGetValue(tuning.Frequency, out var last))
+            modulations = [last, .. modulations.Where(modulation => modulation != last)];
+        foreach (var hertz in frequencies)
+        {
+            foreach (var modulation in modulations)
+            {
+                SetProperties(CableProperties(system, hertz, modulation));
+                if (!WaitForLock()) continue;
+                CableFrequency = hertz;
+                _lockedModulation[tuning.Frequency] = modulation;
+                return;
+            }
+        }
+        throw new IOException(ITuneDevice.SyncFailed);
+    }
+
+    /// <summary>
+    /// ISDB-C で、dvr から読んだ TS を TSMF の処理に通して流し始め (<see cref="DvbCable"/>)、判定を待つ。
+    /// 判定の扱いは IT930x の受信機と同じ (<see cref="It930xTuner.TsmfFailure"/>)。失敗したら TS を止めて、例外を送出する
+    /// </summary>
+    private void StartCable(ChannelTable.Tuning tuning)
+    {
+        var tsmf = new TsmfSelector(tuning.TsmfIndex);
+        var tlv = new SplitTlv();
+        Tsmf = tsmf;
+        Tlv = tlv;
+        _dvr.Begin();
+        _cable = new DvbCable(_dvr.Read, tsmf, tlv, _name);
+        var decision = tsmf.Wait(TsmfSelector.TimeoutMs);
+        if (decision is TsmfDecision.Selected or TsmfDecision.Passthrough) return;
+        StopCable();
+        Sys.Call(_demux, DmxStop, 0, "demux の停止");
+        _dvr.Discard();
+        _streaming = false;
+        throw new IOException(It930xTuner.TsmfFailure(tsmf, decision, TsMissing));
+    }
+
+    /// <summary>ISDB-C の TS を流す処理を止める。dvr の溢れと、読む側が詰まって捨てたパケットがあれば記録に残す</summary>
+    private void StopCable()
+    {
+        if (_cable is not { } cable) return;
+        _cable = null;
+        cable.Stop();
+        var (overflows, worst, _) = _dvr.TakeOverflows();
+        if (overflows > 0) Log.Write($"[{_name}] dvr のリングバッファが {overflows} 回溢れました (読む側がいちばん長く空いたのは {worst} ms)");
+        if (cable.Dropped > 0) Log.Write($"[{_name}] 読む側が詰まって、TSMF から選んだ TS を {cable.Dropped} パケット捨てました");
     }
 
     /// <summary>
@@ -774,11 +966,11 @@ public sealed unsafe class DvbTuner : ITuneDevice
     ///
     /// <para>
     /// 出せない機材 (<c>ENOTSUPP</c> / <c>EOPNOTSUPP</c>) なら記録に残して false を返す。
-    /// 呼ぶ側は以後送らないので、記録は 1 回で済む。それ以外の失敗は投げる。
+    /// 呼ぶ側は以後送らないので、記録は 1 回で済む。それ以外の失敗は例外を送出する。
     /// </para>
     /// </summary>
     /// <param name="setVoltage"><c>FE_SET_VOLTAGE</c> を呼び、成功なら 0、失敗なら errno を返す</param>
-    internal static bool PowerLnb(string adapter, int voltage, Func<int, int> setVoltage)
+    internal static bool PowerLnb(string name, int voltage, Func<int, int> setVoltage)
     {
         var errno = setVoltage(voltage);
         if (errno == 0) return true;
@@ -786,7 +978,7 @@ public sealed unsafe class DvbTuner : ITuneDevice
         {
             throw new IOException($"LNB の電源の切り替えに失敗しました ({Marshal.GetPInvokeErrorMessage(errno)})");
         }
-        Log.Write($"[{adapter}] この機材は LNB の電源を出せません。電源を出さずに選局します");
+        Log.Write($"[{name}] この機材は LNB の電源を出せません。電源を出さずに選局します");
         return false;
     }
 
@@ -794,8 +986,8 @@ public sealed unsafe class DvbTuner : ITuneDevice
         Sys.Ioctl((int)_frontend.DangerousGetHandle(), FeSetVoltage, voltage) < 0 ? Marshal.GetLastPInvokeError() : 0;
 
     /// <summary>
-    /// 受信の状態 (<c>FE_READ_STATUS</c>) と C/N (<c>FE_GET_PROPERTY</c> の <c>DTV_STAT_CNR</c>)。**dB に直すのはドライバ。**
-    /// カーネルの DVB の API (uAPI) は C/N を 0.001 dB 刻み (<c>FE_SCALE_DECIBEL</c>) か、ドライバが決めた 0〜65535 の相対値
+    /// 受信の状態 (<c>FE_READ_STATUS</c>) と、C/N と強度 (1 回の <c>FE_GET_PROPERTY</c> で <c>DTV_STAT_CNR</c> と <c>DTV_STAT_SIGNAL_STRENGTH</c>)。
+    /// **dB や dBm に直すのはドライバ。** カーネルの DVB の API (uAPI) は C/N を 0.001 dB 刻み (<c>FE_SCALE_DECIBEL</c>) か、ドライバが決めた 0〜65535 の相対値
     /// (<c>FE_SCALE_RELATIVE</c>) で返す。どちらでもないドライバ (測れない) は C/N を null にする。ioctl を 2 つ呼ぶだけで、dvr の読み出しには触らない
     /// </summary>
     public TunerSignal? Signal()
@@ -819,30 +1011,36 @@ public sealed unsafe class DvbTuner : ITuneDevice
         uint status = 0;
         if (Sys.Ioctl(fd, FeReadStatus, (nint)(&status)) < 0) return null;
         var locked = (status & FeHasLock) != 0;
-        var property = new byte[PropertySize];
-        BitConverter.TryWriteBytes(property.AsSpan(0), DtvStatCnr);
+        var properties = new byte[PropertySize * 2];
+        BitConverter.TryWriteBytes(properties.AsSpan(0), DtvStatCnr);
+        BitConverter.TryWriteBytes(properties.AsSpan(PropertySize), DtvStatSignalStrength);
         // struct dtv_properties { u32 num; struct dtv_property *props; } (SetProperties と同じ)
         var header = new byte[16];
-        BitConverter.TryWriteBytes(header.AsSpan(0), 1u);
-        fixed (byte* props = property)
+        BitConverter.TryWriteBytes(header.AsSpan(0), 2u);
+        fixed (byte* props = properties)
         fixed (byte* headerAt = header)
         {
             BitConverter.TryWriteBytes(header.AsSpan(8), (long)props);
             if (Sys.Ioctl(fd, FeGetProperty, (nint)headerAt) < 0) return new TunerSignal(locked, null, TunerSignal.Db);
         }
-        return Cnr(locked, property);
+        return Stats(locked, properties);
     }
 
     /// <summary>
-    /// <c>DTV_STAT_CNR</c> の答え (struct dtv_property。packed) を読む。<c>u.st</c> は <see cref="PropertyDataAt"/> から
-    /// <c>u8 len</c> と <c>struct dtv_stats { u8 scale; s64 svalue; }</c> の並び。使うのは先頭 (全体の値) だけ
+    /// <c>DTV_STAT_CNR</c> と <c>DTV_STAT_SIGNAL_STRENGTH</c> の結果 (struct dtv_property。packed) を、この順に 2 つ並べたものを読む。
+    /// **強度は dBm (<c>FE_SCALE_DECIBEL</c>。0.001 dBm 刻み) で返すドライバのものだけ使う。** 相対値はドライバごとの尺度で dBm に直せないので出さない
     /// </summary>
+    internal static TunerSignal Stats(bool locked, ReadOnlySpan<byte> properties)
+    {
+        var cnr = Cnr(locked, properties[..PropertySize]);
+        var (scale, value) = Stat(properties[PropertySize..]);
+        return scale == FeScaleDecibel ? cnr with { StrengthDbm = value / 1000.0 } : cnr;
+    }
+
+    /// <summary><c>DTV_STAT_CNR</c> の結果 (struct dtv_property。packed) を読む</summary>
     internal static TunerSignal Cnr(bool locked, ReadOnlySpan<byte> property)
     {
-        var length = property[PropertyDataAt];
-        var scale = property[PropertyDataAt + 1];
-        var value = BitConverter.ToInt64(property[(PropertyDataAt + 2)..]);
-        if (length == 0) return new TunerSignal(locked, null, TunerSignal.Db);
+        var (scale, value) = Stat(property);
         return scale switch
         {
             FeScaleDecibel => new TunerSignal(locked, value / 1000.0, TunerSignal.Db),
@@ -850,6 +1048,16 @@ public sealed unsafe class DvbTuner : ITuneDevice
             _ => new TunerSignal(locked, null, TunerSignal.Db),
         };
     }
+
+    /// <summary>
+    /// struct dtv_property の <c>u.st</c> を読む。<see cref="PropertyDataAt"/> から <c>u8 len</c> と
+    /// <c>struct dtv_stats { u8 scale; s64 svalue; }</c> の並び。使うのは先頭 (全体の値) だけ。
+    /// 値が 1 つも無ければ scale を 0 (<c>FE_SCALE_NOT_AVAILABLE</c>) にする
+    /// </summary>
+    private static (byte Scale, long Value) Stat(ReadOnlySpan<byte> property) =>
+        property[PropertyDataAt] == 0
+            ? ((byte)0, 0L)
+            : (property[PropertyDataAt + 1], BitConverter.ToInt64(property[(PropertyDataAt + 2)..]));
 
     private void SetProperties(List<(uint Command, uint Value)> properties)
     {
@@ -878,33 +1086,33 @@ public sealed unsafe class DvbTuner : ITuneDevice
     /// <para>
     /// **待たずに読み始めてはいけない。** 同期前の dvr からは何も出ないか、
     /// 崩れたものが出る。総当たりのスキャンはここで待つのをやめる時間がそのまま
-    /// 一周の長さになるので、短めにしてある。
+    /// 一周の長さになるので、短めにしてある。同期したら true、上限を過ぎたら false
     /// </para>
     /// </summary>
-    private void WaitForLock()
+    private bool WaitForLock()
     {
         uint status = 0;
         var deadline = DateTime.UtcNow + LockTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            // 細かく見る。同期は 200ms ほどで来るので、100ms 刻みだと
+            // 細かく見る。同期は 200 ms ほどで来るので、100 ms 刻みだと
             // その半分が待つだけの時間になる (カーネルは選局のたびに
             // status を 0 に戻すので、前のチャンネルの同期を読み取ることはない)
             Thread.Sleep(10);
-            if (Sys.Ioctl((int)_frontend.DangerousGetHandle(), FeReadStatus, (nint)(&status)) >= 0 && (status & FeHasLock) != 0) return;
+            if (Sys.Ioctl((int)_frontend.DangerousGetHandle(), FeReadStatus, (nint)(&status)) >= 0 && (status & FeHasLock) != 0) return true;
         }
-        throw new IOException(ITuneDevice.SyncFailed);
+        return false;
     }
 
     private void StartFilter()
     {
         /*
          * **断られても続ける。** 大きくできなくても選局は通るので、
-         * 投げると「溢れにくくする」ために選局を落とすことになる (古いカーネルや別のドライバが断る目もある)
+         * 例外にすると「溢れにくくする」ために選局を落とすことになる (古いカーネルや別のドライバが断る目もある)
          */
         if (Sys.Ioctl((int)_dvr.Handle.DangerousGetHandle(), DmxSetBufferSize, DvrBuffer) < 0)
         {
-            Log.Write($"[{_adapter}] dvr の溜めを広げられませんでした ({Marshal.GetLastPInvokeErrorMessage()})");
+            Log.Write($"[{_name}] dvr のバッファを広げられませんでした ({Marshal.GetLastPInvokeErrorMessage()})");
         }
 
         // struct dmx_pes_filter_params { __u16 pid; enum input; enum output; enum pes_type; __u32 flags; }
@@ -932,8 +1140,10 @@ public sealed unsafe class DvbTuner : ITuneDevice
 
     public void Dispose()
     {
+        // ISDB-C の TS を流す処理は、dvr を閉じる前に止める (閉じた fd を読ませない)
+        StopCable();
         // 先に読み出し側を閉じる。demux を止めてから閉じると、dvr で待っている
-        // 読む側が誰にも起こされないまま残る
+        // 読む側の待ちが終わらないまま残る
         _dvr.Dispose();
         _demux.Dispose();
         _frontend.Dispose();

@@ -52,7 +52,7 @@ const ESS_SERVICE_ID = 929;
 const DESC_STREAM_IDENTIFIER = 0x52;
 /** DDB (ブロック) の table_id。数えるためだけに持つ (読むのは `parseDdb`) */
 const TABLE_DDB = 0x3c;
-/** ロゴのカルーセルが乗る ES の目印。0x79 が BS、0x7A が CS */
+/** ロゴのカルーセルが流れる ES の目印。0x79 が BS、0x7A が CS */
 const LOGO_COMPONENT_TAGS = new Set([0x79, 0x7a]);
 
 /** モジュール記述子の名前。ロゴかどうかはこれで見分ける */
@@ -179,7 +179,7 @@ function downloadKey(downloadId: number, moduleId: number): string {
  * 揃ったロゴの見分け。
  *
  * `logo_id` は 9 ビットで、**BS と CS で番号が別々に振られている**。
- * logo_id だけを鍵にしていると、同じ番号の BS と CS のロゴが上書きし合う。
+ * logo_id だけをキーにしていると、同じ番号の BS と CS のロゴが上書きし合う。
  */
 function logoKey(logo: ModuleLogo): string {
   return `${logo.logoType}:${logo.logoId}:${logo.services[0]?.networkId ?? 0}`;
@@ -214,7 +214,7 @@ export class CarouselProgress {
    * **読み進んだ数。** 初めて知らされたロゴのモジュール (DII) と、初めて受け取ったブロック (DDB) だけを数える。
    * 開いている間に増えなければ、その間カルーセルは一度も流れてこなかった (`server/logo.ts` の `carouselWatch`)。
    * 同じ DII や受け取り済みのブロックは数えない。カルーセルを流していない間も DII だけ流し続ける中継があると、
-   * 毎回「届いた」ことになってずっとダウンロードの期間中に見え、番組表の取得より上の優先度で 20 分ずつチューナーを塞ぎ続ける
+   * 毎回「届いた」ことになってずっとダウンロードの期間中に見え、番組表の取得より先に 20 分ずつチューナーを塞ぎ続ける
    */
   get received(): number {
     return this.sections;

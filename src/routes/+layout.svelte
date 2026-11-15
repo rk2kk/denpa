@@ -16,6 +16,8 @@
   import Tv from "~icons/lucide/tv";
 
   import type { ChannelNotice as NoticeKind } from "#lib/channel-notice.js";
+  import ChannelAlert from "#lib/components/ChannelAlert.svelte";
+  import ChannelAlertDot from "#lib/components/ChannelAlertDot.svelte";
   import ChannelNotice from "#lib/components/ChannelNotice.svelte";
   import GuidePending, {
     guideNavigation,
@@ -42,7 +44,7 @@
   onMount(markLite);
 
   /*
-   * **読んでいる間は操作の層を引っ込める。** 中身を下へ送るとスマホの形の下のタブ (とその上の操作の 1 行) を隠し、上へ戻すと出す。
+   * **読んでいる間は操作の層を引っ込める。** 中身を下へ送ると、スマホの形で出す下のタブ (とその上の操作の 1 行) を隠し、上へ戻すと出す。
    * 広い形のヘッダーは引っ込めない (検索の欄を見せたまま)。JS は印 (`data-retract`) を付け外しするだけで、動きは CSS。
    * **見るのは窓の巻き取りと、自分で巻き取る箱 (`data-retract-scroll`。番組表の表の箱) の縦の巻き取り。**
    * 箱を横に送ったときは出し入れしない (縦の量が変わらない。局を探しているところで、読み進めているのではない)。
@@ -78,7 +80,7 @@
       if (!(target instanceof Element)) return;
       if (!target.hasAttribute("data-retract-scroll")) return;
       const y = target.scrollTop;
-      // 初めて巻いた箱は頭 (0) から動いた。今の位置と比べると、頭から一度に大きく送った分を見落とす
+      // 初めて巻いた箱は先頭 (0) から動いた。今の位置と比べると、先頭から一度に大きく送った分を見落とす
       const before = boxes.get(target) ?? 0;
       boxes.set(target, y);
       if (touched instanceof Node && target.contains(touched))
@@ -170,7 +172,7 @@
   });
 
   /**
-   * **その端末の高さを読む表示** (`Measure`)。入り口は `?measure` (1 回だけ) と設定画面のオン/オフ
+   * **その端末の高さを読む表示** (`Measure`)。入口は `?measure` (1 回だけ) と設定画面のオン/オフ
    * (覚える。PWA にはアドレスバーが無いので URL だけでは入れない)
    */
   $effect(() => {
@@ -216,23 +218,32 @@
     };
   });
 
-  /*
+  /**
+   * **スマホの形 (1000px 未満とテーブルトップ。`#lib/phone-form.ts`) では、ナビを画面の下のタブにする** (下の `.tabbar`)。
+   *
+   * 項目を横に並べると、スマートフォンの幅ではヘッダーそのものが画面より
+   * 広くなり、ページ全体が横スクロールしていた (実測で 390px の端末に対して
+   * 420px)。上のハンバーガーに畳んでいた頃は、画面を移るたびに 2 回押していた。
+   * 640px 未満はよく開く 3 画面と検索をタブに、残り (切り抜き・ルール・設定) は「その他」の `Menu` (popover) に。
+   * 640px からは切り抜き・ルール・設定もタブに出し (`wide`。7 つ並ぶ。並びはヘッダーと同じ)、「その他」は出さない (中身が無くなる)。
+   * テーマは設定の「この端末」、新しいバージョンは設定の「バージョンと環境」にあり、設定の入口に点で知らせる (下の `fresh`)。
+   * ヘッダー (検索の欄) を隠すので、検索はタブから入る。
+   *
    * `/offline` (端末に保存した録画) はここに並べない。ふだんの操作は一覧で
    * 全部できて、あの画面が要るのは**電波が無いとき**だけ。そのときは
-   * サービスワーカーが勝手にあそこへ落とす (service-worker/index.ts)
+   * サービスワーカーがあそこへ移す (service-worker/index.ts)
    */
-  const links = [
-    { href: "/", label: "録画" },
-    { href: "/guide", label: "番組表" },
-    { href: "/live", label: "ライブ" },
-    { href: "/clips", label: "切り抜き" },
-    { href: "/rules", label: "ルール" },
-    { href: "/settings", label: "設定" },
+  const tabs = [
+    { href: "/", label: "録画", icon: ListVideo, wide: false },
+    { href: "/guide", label: "番組表", icon: CalendarDays, wide: false },
+    { href: "/live", label: "ライブ", icon: Tv, wide: false },
+    { href: "/clips", label: "切り抜き", icon: Camera, wide: true },
+    { href: "/rules", label: "ルール", icon: ListChecks, wide: true },
+    { href: "/search", label: "検索", icon: Search, wide: false },
+    { href: "/settings", label: "設定", icon: Settings, wide: true },
   ] as const;
-
-  /** 検索 (`/search`)。ヘッダーでは欄にして、スマホの形では下のタブに置く (上の `links` には並べない) */
-  const SEARCH = { href: "/search", label: "検索" } as const;
-  const pages = [...links, SEARCH];
+  /** ヘッダーのリンク。検索はヘッダーでは欄にするので並べない */
+  const links = tabs.filter((tab) => tab.href !== "/search");
   /** テストの目印 (`nav-*`・`tab-*`) に使う画面の名前 */
   const slug = (href: string) => (href === "/" ? "home" : href.slice(1));
 
@@ -248,12 +259,12 @@
 
   /**
    * いま開いている画面のナビの行き先。**設定はグループごとに経路が分かれている** (`/settings/reception` など) ので、
-   * その下も「設定」に数える。録画 (`/`) は頭が全部に合うので、ぴったりのときだけ
+   * その下も「設定」に数える。録画 (`/`) は先頭が全部に合うので、ぴったりのときだけ
    */
   const here = $derived.by(() => {
     const route = page.route.id ?? "";
     return (
-      pages.find(
+      tabs.find(
         (l) =>
           route === l.href ||
           (l.href !== "/" && route.startsWith(`${l.href}/`)),
@@ -271,7 +282,7 @@
    * 検索は言葉を前に付ける (履歴に並んだときに、どの検索だったか分かる)
    */
   const title = $derived.by(() => {
-    const label = pages.find((l) => l.href === here)?.label ?? "denpa";
+    const label = tabs.find((l) => l.href === here)?.label ?? "denpa";
     const section =
       here === "/settings"
         ? groupLabel(page.route.id?.split("/")[2] ?? "")
@@ -299,11 +310,14 @@
    * ライブは 1 段・観る画面は 2 段。映像の大きさが 772px と 436px)。ここと、
    * 各画面の 1000px の `@media` がその 1 本の線で、**片方だけ動かさない**。横にしたスマホは 768px から画面ぴったりにする (下の style)
    */
-  const FILLED = ["/live", "/watch/[id]", "/chase/[id]", "/guide"];
-  // 比べるのは経路 (route.id)。URL は前段の接頭辞の下だと頭が付く (server/paths.ts)
+  /** 映像の画面 (ライブ・観る画面・追っかけ)。画面ぴったりにする・下のタブを出す・テーブルトップで下の段に浮かべる、のどれもこの一覧で決める */
+  const VIDEO_ROUTES = ["/live", "/watch/[id]", "/chase/[id]"];
+  const FILLED = [...VIDEO_ROUTES, "/guide"];
+  // 比べるのは経路 (route.id)。URL は前段の接頭辞の下だと先頭が付く (server/paths.ts)
   const fill = $derived(
     pending !== null || FILLED.includes(page.route.id ?? ""),
   );
+  const video = $derived(VIDEO_ROUTES.includes(page.route.id ?? ""));
   /**
    * 番組表 (と、番組表へ移る途中の骨組み) を出しているか。ヘッダーの影を番組表に合わせるのに使う (下の `.shell.guide`)。
    * **`:has(.guide-frame)` で CSS に探させない。** 土台に `:has()` があると、中に `<button>` を足すたびに
@@ -312,26 +326,6 @@
    */
   const guide = $derived(pending !== null || page.route.id === "/guide");
 
-  /**
-   * **スマホの形 (1000px 未満とテーブルトップ。`#lib/phone-form.ts`) では、ナビを画面の下のタブにする** (下の `.tabbar`)。
-   *
-   * 項目を横に並べると、スマートフォンの幅ではヘッダーそのものが画面より
-   * 広くなり、ページ全体が横スクロールしていた (実測で 390px の端末に対して
-   * 420px)。上のハンバーガーに畳んでいた頃は、画面を移るたびに 2 回押していた。
-   * 640px 未満はよく開く 3 画面と検索をタブに、残り (切り抜き・ルール・設定) は「その他」の `Menu` (popover) に。
-   * 640px からは切り抜き・ルール・設定もタブに出し (`wide`。7 つ並ぶ。並びはヘッダーと同じ)、「その他」は出さない (中身が無くなる)。
-   * テーマは設定の「この端末」、新しいバージョンは設定の「バージョンと環境」にあり、設定の入口に点で知らせる (下の `fresh`)。
-   * ヘッダー (検索の欄) を隠すので、検索はタブから入る
-   */
-  const tabs = [
-    { href: "/", label: "録画", icon: ListVideo, wide: false },
-    { href: "/guide", label: "番組表", icon: CalendarDays, wide: false },
-    { href: "/live", label: "ライブ", icon: Tv, wide: false },
-    { href: "/clips", label: "切り抜き", icon: Camera, wide: true },
-    { href: "/rules", label: "ルール", icon: ListChecks, wide: true },
-    { href: SEARCH.href, label: SEARCH.label, icon: Search, wide: false },
-    { href: "/settings", label: "設定", icon: Settings, wide: true },
-  ] as const;
   /**
    * 切り抜き・ルール・設定もタブに出している幅か。**下の style の `@media (min-width: 640px)` と同じ線**。
    * その幅では「その他」を隠すので、印も付けない (隠れたタブに印が付くと、下線がそこへ滑っていく)
@@ -348,27 +342,30 @@
    * 「その他」とその中の「設定」、広い形はヘッダーの「設定」
    */
   const fresh = $derived(data.update !== null);
-  /** タブを出すのはナビの画面と検索 (設定はその下の節も) だけ (観る画面・追っかけ・ログイン・ペアリングには出さない) */
-  const showTabbar = $derived(here !== null);
   /**
-   * テーブルトップ (`#lib/phone-form.ts`) のライブでは、下のタブは下の段 (舞台の中。黒い地) の下端に浮く。
+   * タブを出すのはナビの画面と検索 (設定はその下の節も) と、観る画面・追っかけ。ログインとペアリングには出さない。
+   * **観る画面・追っかけにも出す。** スマホの形ではタブがある画面だけヘッダーを隠すので、出さなかった頃は
+   * この 2 つだけ上にヘッダーが出ていた。どのタブにも印は付けない (ナビの画面ではない)
+   */
+  const showTabbar = $derived(here !== null || video);
+  /**
+   * テーブルトップ (`#lib/phone-form.ts`) の映像の画面 (ライブ・観る画面・追っかけ) では、下のタブは下の段 (舞台の中。黒い地) の下端に浮く。
    * 右の列と同じく、テーマにかかわらず暗いテーマの色で描く (`PlayerLayout` の `data-theme`)
    */
   const tabletop = new MediaQuery(TABLETOP);
-  const stageTabbar = $derived(tabletop.current && here === "/live");
+  const stageTabbar = $derived(tabletop.current && video);
   /** 局が無いときの案内。録画・番組表・ライブの load が渡す (`#lib/channel-notice.ts`) */
   const notice = $derived(
     (page.data["channelNotice"] ?? null) as NoticeKind | null,
   );
-  /** チャンネルのお知らせの 1 行 (書き換えた・地上波が変わったかもしれない)。同じ load が渡す (`server/channel-alert.ts`) */
-  const alert = $derived(
-    (page.data["channelAlert"] ?? null) as {
-      kind: NoticeKind;
-      text: string;
-    } | null,
-  );
+  /**
+   * チャンネルのお知らせ (書き換えた・地上波を続けて選局できない)。どの画面にも `+layout.server.ts` が渡す (`server/channel-alert.ts`)。
+   * 広い形はヘッダーの印 (`ChannelAlert`)、スマホの形はヘッダーを隠すので、設定の入口 (下のタブの「設定」、640px 未満は「その他」とその中の「設定」) に同じ印を付ける。
+   * 新しいバージョンの点と重なったら、印のほうを出す (1 つの入口に印は 1 つ)
+   */
+  const alert = $derived(data.channelAlert);
   let menuOpen = $state(false);
-  /** 行き先を選んだら閉じる。開いたままだと次の画面の頭が隠れる */
+  /** 行き先を選んだら閉じる。開いたままだと次の画面の先頭が隠れる */
   $effect(() => {
     // pathname を読んでおくと、画面が変わるたびにこの効果が動き直す
     page.url.pathname;
@@ -411,10 +408,10 @@
   }
 
   /**
-   * **放送の字 (Denpa Font) をここで名乗らせる** (使うのは `app.css` の `.broadcast` と字幕)。
+   * **放送の字 (Denpa Font) の `@font-face` をここで読み込む** (使うのは `app.css` の `.broadcast` と字幕)。
    * バージョン付きの URL は組むときに決まるので、`app.css` には書けない (`#lib/font.ts`)。
-   * 名乗らせる CSS は基本の字と JIS X 0213 で足された漢字の 2 つの woff2 を `unicode-range` で分けて書いてあり、
-   * どちらも使う字が画面に出たときだけ落ちてくる。届くまでは画面の字で出しておく (`swap`)
+   * この CSS は基本の字と JIS X 0213 で足された漢字の 2 つの woff2 を `unicode-range` で分けて書いてあり、
+   * どちらも使う字が画面に出たときだけダウンロードされる。届くまでは画面の字で出しておく (`swap`)
    */
   const fontCss = denpaFontCssUrl();
 </script>
@@ -432,7 +429,7 @@
     画面の高さと一致しないことがあった** (PWA で 763.765px 対 708px。差の
     56px は Chrome for Android のアドレスバーの高さそのもの)。
 
-    `%` なら JS も要らず、**描く前から正しい**。**横に倒した携帯** (915x412 など) **も
+    `%` なら JS も要らず、**描く前から正しい**。**横にしたスマホ** (915x412 など) **も
     `.fill` にする** (下の style の 768px) ので、`.fill` のほうも同じ採り方
 -->
 <div
@@ -492,6 +489,12 @@
         >
         <span class="visually-hidden">denpa</span>
       </a>
+      <!--
+                **チャンネルのお知らせの印** (上の `alert`)。乗せるか押すと、文と設定の「チャンネル」へのボタンを印の下に出す
+            -->
+      {#if alert !== null}
+        <ChannelAlert kind={alert.kind} text={alert.text} />
+      {/if}
       <!--
                 **新しいバージョンが出ている** (server/update.ts が GitHub のリリースを見比べる)。
                 押せばリリースのページ。閉じるボタンは無い。上げるか、リリースが消えれば引っ込む。
@@ -557,16 +560,12 @@
   {/if}
 
   <!--
-        **局が無いときの案内と、チャンネルのお知らせ** (録画・番組表・ライブ。`#lib/channel-notice.ts`)。閉じるボタンは無く、
-        元のことが片付けば消える。中身の外 (ヘッダーの下) に置くので、各画面の高さの取り方は変わらない
+        **局が無いときの案内** (録画・番組表・ライブ。`#lib/channel-notice.ts`)。閉じるボタンは無く、
+        元のことが片付けば消える。中身が動いている間に起きたお知らせはここに出さず、ヘッダーの印に畳む (`ChannelAlert`)。中身の外 (ヘッダーの下) に置くので、各画面の高さの取り方は変わらない
     -->
   {#if notice}
     <div class="notice-slot">
       <ChannelNotice kind={notice} />
-    </div>
-  {:else if alert}
-    <div class="notice-slot">
-      <ChannelNotice kind={alert.kind} text={alert.text} />
     </div>
   {/if}
 
@@ -580,7 +579,7 @@
     </div>
   </main>
 
-  <!-- スマホの形の下のタブ (上の `tabs`・`showTabbar`)。ライブの全画面のときは隠す (下の style) -->
+  <!-- スマホの形で出す下のタブ (上の `tabs`・`showTabbar`)。映像の全画面のときは隠す (下の style) -->
   {#if showTabbar}
     <nav
       class="tabbar"
@@ -600,13 +599,13 @@
         >
           <Icon icon={tab.icon} size="size-5" />
           <span
-            >{tab.label}{#if fresh && tab.href === "/settings"}{@render freshDot()}{/if}</span
+            >{tab.label}{#if tab.href === "/settings"}{@render entryMark()}{/if}</span
           >
         </a>
       {/each}
       <!--
                 「その他」(640px 未満だけ。下の style)。ほかのメニューと同じ `Menu` (popover)。リンクを並べるだけなので `nav`。
-                スマホの形ではヘッダーを隠すが、ヘッダーにあったもの (新しいバージョン) は設定の中にあるので、ここは画面へのリンクだけ
+                スマホの形ではヘッダーを隠すが、ヘッダーにあったもの (新しいバージョン・チャンネルのお知らせ) は設定の中にあるので、ここは画面へのリンクと設定の入口の印だけ
             -->
       <div class="tab-more" data-testid="nav-menu">
         <Menu
@@ -624,9 +623,7 @@
               aria-current={moreCurrent ? "page" : undefined}
             >
               <Icon icon={Ellipsis} size="size-5" />
-              <span
-                >その他{#if fresh}{@render freshDot()}{/if}</span
-              >
+              <span>その他{@render entryMark()}</span>
             </button>
           {/snippet}
           <ul class="more-list">
@@ -638,8 +635,8 @@
                   aria-current={here === link.href ? "page" : undefined}
                 >
                   {link.label}
-                  {#if fresh && link.href === "/settings"}
-                    {@render freshDot()}
+                  {#if link.href === "/settings"}
+                    {@render entryMark()}
                   {/if}
                 </a>
               </li>
@@ -663,6 +660,18 @@
     aria-label="新しいバージョンがあります"
     data-testid="update-dot"
   ></span>
+{/snippet}
+
+<!--
+    スマホの形の設定の入口の印 (上の `alert`・`fresh`)。チャンネルのお知らせがあればその印 (ヘッダーの印と同じ形を小さく)、
+    無くて新しいバージョンがあれば点
+-->
+{#snippet entryMark()}
+  {#if alert !== null}
+    <ChannelAlertDot kind={alert.kind} />
+  {:else if fresh}
+    {@render freshDot()}
+  {/if}
 {/snippet}
 
 <style>
@@ -735,7 +744,7 @@
     }
   }
   /*
-     * ヘッダー。スマホの形で下のタブの無い画面 (観る画面・追っかけ) では地の上の 1 行 (高さちょうど 3.5rem)。
+     * ヘッダー。スマホの形で下のタブの無い画面 (ログイン・ペアリング) では地の上の 1 行 (高さちょうど 3.5rem)。
      * 広い形では操作の層として中身の上に浮かせる (下の「広い形」)
      */
   .navbar {
@@ -744,23 +753,23 @@
     z-index: var(--dp-z-header);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
     min-height: 3.5rem;
-    padding: 0.5rem var(--dp-space-3);
+    padding: var(--dp-space-2) var(--dp-space-3);
     background: var(--dp-bg);
   }
   .brand {
     display: flex;
     flex: 1 1 0%;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
   }
   /* 印と名前。名前は 1.25rem の字と同じ大きさで描く (d の頂から p の下まで) */
   .logo {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    padding-block: 0.25rem;
+    gap: var(--dp-space-2);
+    padding-block: var(--dp-space-1);
   }
   .logo-mark {
     width: 1.5rem;
@@ -776,7 +785,7 @@
   .update {
     display: inline-flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
     color: var(--dp-muted);
     font-size: var(--dp-text-xs);
     text-decoration: none;
@@ -789,7 +798,7 @@
     display: flex;
     flex: none;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
   }
   /* 印と余白を消す。Pico のナビの部品は読まないので、文章の決まり (`ul li` の印・下の余白) がそのまま当たる */
   ul.links li,
@@ -801,7 +810,7 @@
     display: none;
     align-items: center;
     gap: 0.125rem;
-    padding: 0 0.25rem;
+    padding: 0 var(--dp-space-1);
   }
   /* ヘッダーのリンクは高さ 40px。小さい字のままでも指で外さない */
   .actions :global(a.button) {
@@ -810,7 +819,8 @@
   /*
      * **いまの画面は主の色の太字と下線で示す** (選んでいるものはどこも線と字。塗らない)。ほかの画面へのリンクは本文の字のまま (薄くしない)。
      * 薄い灰色の地を敷くだけだった頃は、ヘッダーの地とほとんど見分けが付かず「どの画面にいるのか」が読めなかった。
-     * 下線は押す場所の内側に引くので、ヘッダーの高さは変わらない
+     * 下線は押す場所の内側に引くので、ヘッダーの高さは変わらない。線と、画面を移ると前の画面の下線から横に滑る動きは
+     * タブと同じもの (`app.css` の「滑る印」)
      */
   ul.links a.button {
     position: relative;
@@ -819,47 +829,6 @@
   ul.links a.button.ghost[aria-current="page"] {
     --pico-color: var(--dp-primary-text);
     font-weight: var(--dp-weight-bold);
-  }
-  /*
-     * 下線。画面を移ると前の画面の下線から横に滑る (`app.css` の「滑る印」と同じ作り。並びの疑似要素 1 本をアンカーで付ける)。
-     * アンカーに対応していないブラウザは、いまの画面のリンクの中に線を引く (滑らない)
-     */
-  ul.links a.button[aria-current="page"]::after {
-    content: "";
-    position: absolute;
-    inset-inline: 0.65rem;
-    bottom: 0.2rem;
-    height: var(--dp-mark);
-    border-radius: var(--dp-mark);
-    background: var(--pico-primary);
-    pointer-events: none;
-  }
-  @supports (anchor-name: --a) {
-    ul.links {
-      position: relative;
-      anchor-scope: --nav;
-    }
-    ul.links a.button[aria-current="page"] {
-      anchor-name: --nav;
-    }
-    ul.links a.button[aria-current="page"]::after {
-      content: none;
-    }
-    ul.links:has(a.button[aria-current="page"])::after {
-      content: "";
-      position: absolute;
-      position-anchor: --nav;
-      left: calc(anchor(left) + 0.65rem);
-      right: calc(anchor(right) + 0.65rem);
-      bottom: calc(anchor(bottom) + 0.2rem);
-      height: var(--dp-mark);
-      border-radius: var(--dp-mark);
-      background: var(--pico-primary);
-      pointer-events: none;
-      transition:
-        left var(--dp-duration-move) var(--dp-ease-spring),
-        right var(--dp-duration-move) var(--dp-ease-spring);
-    }
   }
   /*
      * ヘッダーの検索の欄 (中身は `SearchField`)。広い形では「印と名前 ｜ 欄 ｜ ナビ」の 3 列にして、
@@ -894,12 +863,13 @@
    */
   .tabbar {
     position: fixed;
-    inset: auto 0.75rem calc(0.5rem + env(safe-area-inset-bottom)) 0.75rem;
+    inset: auto var(--dp-dock-inset)
+      calc(var(--dp-space-2) + env(safe-area-inset-bottom));
     z-index: var(--dp-z-header);
     display: grid;
     grid-auto-columns: minmax(0, 1fr);
     grid-auto-flow: column;
-    padding: 0.25rem;
+    padding: var(--dp-space-1);
     border: 0;
     border-radius: 2rem;
     background: var(--dp-float);
@@ -907,7 +877,7 @@
     transition: transform var(--dp-duration-move) var(--dp-ease-spring);
   }
   /*
-   * テーマを切り替えた下のタブ (テーブルトップのライブ。上の `stageTabbar`) は、字の色もそのテーマから取り直す。
+   * テーマを切り替えた下のタブ (テーブルトップの映像の画面。上の `stageTabbar`) は、字の色もそのテーマから取り直す。
    * `--dp-fg` は `<html>` で決まった値を受け継ぐので、箱のテーマで書き換わる Pico の `--pico-color` を使う
    */
   .tabbar[data-theme] {
@@ -928,7 +898,7 @@
     width: 100%;
     min-height: 3.5rem;
     margin: 0;
-    padding: 0.25rem 0;
+    padding: var(--dp-space-1) 0;
     border: 0;
     border-radius: 1.75rem;
     background: transparent;
@@ -1013,11 +983,11 @@
     width: 12rem;
   }
   /*
-     * 「その他」はいちばん右のタブなので、右端を揃えると画面の端に貼り付く。下のタブの右端 (0.75rem) にそろえる
+     * 「その他」はいちばん右のタブなので、右端を揃えると画面の端に貼り付く。下のタブの右端 (`--dp-dock-inset`) にそろえる
      * (anchor positioning の無いブラウザは `Menu` が JS で置き、端から 4px 空ける)
      */
   :global(.menu.tab-more-menu) {
-    margin-inline-end: 0.75rem;
+    margin-inline-end: var(--dp-dock-inset);
   }
   /* 縦に積む。いまの画面の項目は `app.css` の `.menu-item` (左の縦線と主の色の太字) */
   .more-list {
@@ -1041,6 +1011,17 @@
     top: 0.5rem;
     right: 0.3rem;
   }
+  /* チャンネルのお知らせの印 (上の `entryMark`。`app.css` の `.alert-dot`)。タブは点と同じく字の右上 */
+  .tabbar :global(.tab > span > .alert-dot) {
+    position: absolute;
+    top: -0.5rem;
+    left: 100%;
+    margin: 0;
+  }
+  /* 「その他」の項目は字の後ろに並べる。字との間は点と同じ (`.menu-item` の gap) */
+  .more-list :global(.alert-dot) {
+    margin: 0;
+  }
   /* スマホの形 (`#lib/phone-form.ts`。1000px 未満とテーブルトップ。`<html data-phone>`) */
   :global(:where(html[data-phone]:has(.tabbar))) {
     --dp-tabbar: calc(4rem + 0.5rem + env(safe-area-inset-bottom));
@@ -1053,7 +1034,7 @@
     display: none;
   }
   /*
-     * **スマホの形では頭に 0.5rem 空ける。** ヘッダーが無いので、上の安全域のすぐ下から中身を始める。
+     * **スマホの形では先頭に 0.5rem 空ける。** ヘッダーが無いので、上の安全域のすぐ下から中身を始める。
      * 1rem では、録画の画面で日付の見出しの余白まで重なって、上に大きな空きが出ていた
      */
   :global(:where(html[data-phone])) .shell:has(.tabbar) main {
@@ -1099,7 +1080,7 @@
       font-size: var(--dp-text-xs);
     }
   }
-  /* ライブの全画面のあいだは隠す (映像だけにする) */
+  /* 映像の全画面のあいだは隠す (映像だけにする) */
   :global(html[data-stage-fullscreen]) :is(.tabbar, .notice-slot) {
     display: none;
   }
@@ -1152,27 +1133,45 @@
   /*
    * **ヘッダーは操作の層** (docs/design.md)。端から 0.5rem / `--dp-bar-inset` 離した角丸の面にして、巻くと中身の上に浮かせる (下の `@supports`)。
    * 面は `--dp-float` (メニューの面を 92% 残した半透明。ぼかさない)。中身はヘッダーの下から始め (`--dp-header-space`)、巻くと下を流れる。
-   * 角は入れ子でそろえる: 外 (`--dp-bar-radius` 0.875rem) = 中の欄 (`--dp-radius` 0.5rem) + 間の余白 (0.375rem)
+   * 角は入れ子でそろえる: 外 (`--dp-bar-radius` 0.875rem) = 中の欄 (`--dp-radius` 0.5rem) + 間の余白 (`--dp-bar-pad` 0.375rem)
    *
    * `--dp-header-bottom` はヘッダーの下端。巻いても上に残す操作の 1 行は、ここから `--dp-bar-gap` 離した同じ形の面に乗せて貼り付ける
    * (`app.css` の `dp-bar-float`)。その 1 行がある間はヘッダーも近い影 (`--navbar-shadow`) にそろえ、遠い影が下の 1 行に掛からないようにする
    */
   :global(:where(html:not([data-phone]))) {
     --dp-header-bottom: 3.75rem;
-    /* 中身の頭はヘッダーの下端から、操作の 1 行どうしと同じ隙間 (`--dp-bar-gap`) だけ離す */
+    /* 中身の先頭はヘッダーの下端から、操作の 1 行どうしと同じ隙間 (`--dp-bar-gap`) だけ離す */
     --dp-header-space: calc(var(--dp-header-bottom) + var(--dp-bar-gap));
-    /* 自分で巻き取る画面 (映像・番組表) の箱の頭。番組表は表をヘッダーの裏まで伸ばし、操作の 1 行の面をヘッダーの下 `--dp-bar-gap` に置く (`app.css` の `.guide-bar`) */
+    /* 自分で巻き取る画面 (映像・番組表) の箱の先頭。番組表は表をヘッダーの裏まで伸ばし、操作の 1 行の面をヘッダーの下 `--dp-bar-gap` に置く (`app.css` の `.guide-bar`) */
     --dp-fill-top: 4.25rem;
   }
   :global(:where(html:not([data-phone]))) main {
     --dp-page-top: var(--dp-header-space);
+  }
+  /* ヘッダーの下に操作の 1 行が貼り付いている間 (切り抜きの選ぶ形。印は使う画面が付ける) は、ヘッダーも近い影 */
+  :global(:where(html[data-page-bar]:not([data-phone]))) .navbar {
+    --navbar-shadow: var(--dp-shadow-tight);
+  }
+  /*
+   * **局が無いときの案内の 1 行は、ヘッダーの下から始める。** 広い形のヘッダーは中身の上に浮かせて流れから外している (`position: fixed`) ので、
+   * 流れの先頭に置くとヘッダーの裏に入って重なる。中身と同じくヘッダーの下端から `--dp-bar-gap` 空け、中身は案内のすぐ下から始める。
+   * スクロールすれば中身と一緒にヘッダーの裏を流れる。自分で巻き取る画面 (`.shell.fill`) は箱の上端を空けてあるので、そちらは下の 1000px の所
+   */
+  :global(:where(html:not([data-phone]))) .shell:not(.fill) .notice-slot {
+    margin-top: var(--dp-header-space);
+  }
+  :global(:where(html:not([data-phone])))
+    .shell:not(.fill):has(.notice-slot)
+    main {
+    --dp-page-top: var(--dp-space-2);
   }
   :global(:where(html:not([data-phone]))) .navbar {
     position: fixed;
     top: 0.5rem;
     inset-inline: var(--dp-bar-inset);
     min-height: 3.25rem;
-    padding: 0.375rem 0.375rem 0.375rem 0.75rem;
+    padding: var(--dp-bar-pad) var(--dp-bar-pad) var(--dp-bar-pad)
+      var(--dp-space-3);
     border-radius: var(--dp-bar-radius);
     background: var(--dp-float);
     box-shadow: var(--navbar-shadow, var(--dp-shadow-pop));
@@ -1244,7 +1243,7 @@
          * `position: relative` になるまで) の 1 秒ほど、窓にスクロールバーが出ていた。E2E 20 で毎コマ見る
          *
          * **自分で巻き取る画面 (番組表・映像の画面) は、浮いたヘッダーの下から始める** (docs/design.md の「浮かせ方」)。
-         * 箱のスクロールバーがヘッダーの透かしの裏に見えないように。番組表だけは表を上に伸ばし、スクロールバーを隠してヘッダーの裏まで使う (`app.css` の `.guide-frame`)。中では頭の空き (`--dp-page-top`) を 0 にする
+         * 箱のスクロールバーがヘッダーの透かしの裏に見えないように。番組表だけは表を上に伸ばし、スクロールバーを隠してヘッダーの裏まで使う (`app.css` の `.guide-frame`)。中では先頭の空き (`--dp-page-top`) を 0 にする
          */
     .shell.fill {
       position: relative;
@@ -1283,6 +1282,28 @@
          */
     .shell.fill.guide .navbar {
       --navbar-shadow: var(--dp-shadow-tight);
+    }
+    /*
+         * **案内の 1 行がある間は、表をヘッダーの裏まで伸ばさない** (広い形)。1 行は箱の上端に置くので、伸ばすとマスが 1 行の上を流れる。
+         * 1 行はほかの画面と同じくヘッダーの下端から `--dp-bar-gap` 空けて置き、操作の 1 行と表はそのすぐ下から始める (`--dp-fill-top` を
+         * ヘッダーの下端にそろえると、操作の 1 行 (`app.css` の `.guide-bar`) はヘッダーの裏へ引き上げない)。
+         * 裏に何も来ないので、ヘッダーは表をスクロールしても平らなまま
+         */
+    :global(:where(html:not([data-phone]))) .shell.fill:has(.notice-slot) {
+      padding-top: var(--dp-header-space);
+    }
+    :global(:where(html:not([data-phone]))) .shell.fill:has(.notice-slot) main {
+      --dp-fill-top: var(--dp-header-bottom);
+    }
+    :global(:where(html:not([data-phone])))
+      .shell.fill:has(.notice-slot)
+      :global(.guide-frame) {
+      --guide-head: 0px;
+    }
+    :global(:where(html:not([data-phone])))
+      .shell.fill.guide:has(.notice-slot)
+      .navbar {
+      animation-name: none;
     }
   }
 </style>

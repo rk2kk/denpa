@@ -1,4 +1,20 @@
+import { spawnSync } from "node:child_process";
+
 import { expect, goto, homeTools, syncEpg, test } from "./helpers";
+
+/** このワーカーの DB に直に書く (46 と同じ) */
+function sqlite(db: string, script: string): void {
+  const done = spawnSync(
+    "bun",
+    [
+      "-e",
+      `import { Database } from 'bun:sqlite'; const db = new Database(process.env.SEED_DB); db.exec('PRAGMA busy_timeout = 5000'); ${script}`,
+    ],
+    { env: { ...process.env, SEED_DB: db }, encoding: "utf8" },
+  );
+  if (done.status !== 0)
+    throw new Error(`DB に書けませんでした: ${done.stderr}`);
+}
 
 test.describe("ホームと画面遷移", () => {
   test("データ放送のチャンネルは取り込まない", async ({ page, request }) => {
@@ -11,7 +27,7 @@ test.describe("ホームと画面遷移", () => {
     );
   });
 
-  test("EPG取得後に局・番組が反映され、全ページを開ける", async ({
+  test("EPG 取得後に局・番組が反映され、全ページを開ける", async ({
     page,
     request,
   }) => {
@@ -21,14 +37,14 @@ test.describe("ホームと画面遷移", () => {
      * 取り込めたかどうかは**表そのもの**で見る (件数のバッジは出していない —
      * 表を見れば分かることなので)。**表は種別ごと**なので、両方を見る。
      *
-     * 偽の局は 5 つで、出るのは 地上波 2 + BS1。**データ放送の局**は録画対象に
-     * ならないので取り込まれず、**番組がまだ 1 本も無い BS の局**は列を出さない
-     * (`epg.airing`)。まだ集め終えていない局は本物でも普通にあるので、
-     * それでも表が出ることを一緒に見ておく
+     * 出るのは 地上波 2 + BS 2。**データ放送の局**は録画対象に
+     * ならないので取り込まれない。**番組がまだ 1 本も無い BS の局** (BSテレ東) も
+     * 本チャンネルなので空の列で出す (`epg.airing`)。まだ集め終えていない局は本物でも
+     * 普通にあり、番組表が空でもその局を選べるようにする
      */
     for (const [type, count] of [
       ["GR", 2],
-      ["BS", 1],
+      ["BS", 2],
     ] as const) {
       await goto(page, `/guide?type=${type}`);
       await expect(page.getByTestId("guide-service")).toHaveCount(count);
@@ -179,6 +195,90 @@ test.describe("ホームと画面遷移", () => {
     }
   });
 
+  /*
+   * **中身が動いている間に起きたチャンネルのお知らせは、ヘッダーの印に畳む。** 中身の上に 1 行を足すと、広い形では
+   * その分だけ中身が下がっていた。印に乗せると文と「確認」が出て、離すと消える。押すと離しても出したまま。
+   * スマホの形はヘッダーを隠すので、設定の入口 (下のタブ) に同じ印を付け、文は設定の「チャンネル」で読む
+   */
+  test("チャンネルのお知らせはヘッダーの印に出て、乗せると文が出る", async ({
+    page,
+    request,
+    stack,
+  }) => {
+    await syncEpg(request);
+    const text =
+      "BS のチャンネルが放送で変わったため、受信できるチャンネルを書き換えました";
+    sqlite(
+      `${stack.root}/denpa.db`,
+      `db.run("INSERT INTO channel_changes (type, text, at) VALUES ('BS', '${text}', ${Date.now()})")`,
+    );
+    try {
+      await page.setViewportSize({ width: 1885, height: 900 });
+      for (const [path, below] of [
+        ["/", "[data-testid=timeline]"],
+        ["/guide", ".guide-bar"],
+        ["/live", "[data-player-layout]"],
+      ] as const) {
+        await goto(page, path);
+        await expect(page.getByTestId("channel-notice"), path).toHaveCount(0);
+        const mark = page.locator(".navbar").getByTestId("channel-alert");
+        await expect(mark, path).toBeVisible();
+        // 中身はヘッダーのすぐ下から始まる (1 行の分だけ下げない)
+        const header = (await page.locator(".navbar").boundingBox())!;
+        const next = (await page.locator(below).first().boundingBox())!;
+        expect(next.y, path).toBeLessThan(header.y + header.height + 40);
+      }
+
+      await goto(page, "/");
+      const mark = page.getByTestId("channel-alert");
+      const bubble = page.getByTestId("channel-alert-text");
+      await expect(bubble).toBeHidden();
+      await mark.hover();
+      await expect(bubble).toBeVisible();
+      await expect(bubble).toContainText(text);
+      await expect(bubble.getByRole("link", { name: "確認" })).toHaveAttribute(
+        "href",
+        /\/settings\/reception#channels$/,
+      );
+      // 箱はヘッダーの下に出る
+      const box = (await bubble.boundingBox())!;
+      const markBox = (await mark.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(markBox.y + markBox.height);
+      await page.mouse.move(900, 600);
+      await expect(bubble).toBeHidden();
+      // 押せば、離しても出したまま。もう一度押すと閉じる
+      await mark.click();
+      await page.mouse.move(900, 600);
+      await expect(bubble).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(bubble).toBeHidden();
+
+      // スマホの形: ヘッダーは隠れ、下のタブの「その他」に印。設定の左の一覧の「受信」にも
+      await page.setViewportSize({ width: 390, height: 844 });
+      await goto(page, "/guide");
+      await expect(
+        page
+          .getByTestId("tabbar")
+          .getByTestId("alert-dot")
+          .filter({ visible: true }),
+      ).toBeVisible();
+      await expect(page.getByTestId("channel-alert")).toBeHidden();
+      await goto(page, "/settings");
+      await expect(
+        page.getByTestId("settings-nav-reception").getByTestId("alert-dot"),
+      ).toBeVisible();
+      await goto(page, "/settings/reception");
+      await expect(page.getByTestId("channel-alert-notice")).toContainText(
+        text,
+      );
+    } finally {
+      sqlite(
+        `${stack.root}/denpa.db`,
+        `db.run("DELETE FROM channel_changes WHERE text = '${text}'")`,
+      );
+    }
+  });
+
   test("設定のチューナーにカードリーダーの状態が出る", async ({ page }) => {
     await goto(page, "/settings/reception");
     /*
@@ -317,18 +417,18 @@ test.describe("ホームと画面遷移", () => {
     await expect(page.getByTestId("grid-program").first()).toBeVisible();
     await page.getByTestId("type-GR").click();
 
-    // いまが何時かの線が出て、開いた時点でそこが見えているところまで動いている。
+    // 「いま」の行が出て、開いた時点でそこが見えているところまで動いている。
     // 位置を offsetTop で測っていた頃は、ナビや見出しの高さまで足し込まれて
-    // その分だけ行き過ぎ、線が上に流れて見えなくなっていた
-    await expect(page.getByTestId("now-line")).toBeVisible();
+    // その分だけ行き過ぎ、「いま」の行が上に流れて見えなくなっていた
+    await expect(page.getByTestId("now-mark")).toBeVisible();
     const view = await page.getByTestId("guide-grid").evaluate((el) => {
       const grid = el as HTMLElement;
       const line = grid.querySelector(
-        '[data-testid="now-line"]',
+        '[data-testid="now-mark"]',
       ) as HTMLElement;
       return {
         scrollTop: grid.scrollTop,
-        // グリッドの上端から見た「いま」の線の位置
+        // グリッドの上端から見た「いま」の行の位置
         offset:
           line.getBoundingClientRect().top - grid.getBoundingClientRect().top,
         height: grid.clientHeight,
@@ -340,7 +440,7 @@ test.describe("ホームと画面遷移", () => {
      * 置きたいのは画面の 4 分の 1 あたりだが、番組表は 4:00 から翌 4:00 までの
      * 範囲なので、**端では寄せきれない**:
      *
-     *     4 時台   … 「いま」がもともと上にあり、頭に貼り付く (offset ≒ 0)
+     *     4 時台   … 「いま」がもともと上にあり、先頭に貼り付く (offset ≒ 0)
      *     深夜 1 時 … 下端まで送られていて、それ以上は上がらない (offset が下へ寄る)
      *
      * どちらも正しい動きなので、**画面の中にあれば通す**。ここを
@@ -469,13 +569,13 @@ test.describe("ホームと画面遷移", () => {
     await expect(page.getByTestId("reconcile-result")).toHaveCount(0);
   });
 
-  test("一覧の頭は細い1行。照合と空きは「⋯」の中、狭い幅でも同じ", async ({
+  test("一覧の先頭は細い 1 行。照合と空きは「⋯」の中、狭い幅でも同じ", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await goto(page, "/");
 
-    // 狭い幅では右のサイドバーは出さない。頭の 1 行 (チップと「⋯」) は 44px に収まり、「⋯」は指で押せる高さ
+    // 狭い幅では右のサイドバーは出さない。先頭の 1 行 (チップと「⋯」) は 44px に収まり、「⋯」は指で押せる高さ
     await expect(page.getByTestId("sidebar")).toBeHidden();
     const bar = page.getByTestId("timeline-toolbar");
     expect((await bar.boundingBox())!.height).toBeLessThanOrEqual(44);
@@ -496,7 +596,7 @@ test.describe("ホームと画面遷移", () => {
       return hit !== null && el.contains(hit) && el.matches(":popover-open");
     });
     expect(front).toBe(true);
-    // 状態 (空き) は狭い幅では「⋯」の頭に出す (広い幅はサイドバーのいちばん下)。次の録画は「いま」の線に出す
+    // 状態 (空き) は狭い幅では「⋯」の先頭に出す (広い幅はサイドバーのいちばん下)。次の録画は「いま」の行に出す
     await expect(menu.getByTestId("recordings-capacity-menu")).toBeVisible();
     await expect(menu.getByTestId("menu-summary")).not.toContainText(
       "次の録画",

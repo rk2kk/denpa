@@ -3,25 +3,88 @@ import { describe, expect, test } from "bun:test";
 import {
   NitReader,
   PacketStream,
-  parseNit,
-  parseNitSection,
-  parseSdt,
-  parseSdtOther,
   SdtReader,
   SectionAssembler,
   ServiceReader,
   withCrc,
 } from "./psi.js";
 import {
+  cableDeliveryDescriptor,
   nitSection,
   packetize,
+  patSection,
   satelliteDeliveryDescriptor,
   sdtSection,
   terrestrialDeliveryDescriptor,
 } from "./synth.js";
 
+describe("ケーブルの TS (NIT を待たない)", () => {
+  test("SDT[actual] だけで揃い、ネットワーク ID は SDT の original_network_id", () => {
+    const reader = new ServiceReader({ requireNit: false });
+    expect(
+      reader.feed(
+        packetize(0x0011, sdtSection(16400, 4, [[151, 0x01, "BS朝日1"]])),
+      ),
+    ).toBe(true);
+    expect(reader.network).toBeNull();
+    expect(reader.services()).toEqual([
+      {
+        serviceId: 151,
+        serviceType: 0x01,
+        name: "BS朝日1",
+        networkId: 4,
+        transportStreamId: 16400,
+        remoteControlKeyId: null,
+      },
+    ]);
+  });
+
+  test("NIT が先に来ていれば、自分の TS のリモコン番号だけを使う", () => {
+    const reader = new ServiceReader({ requireNit: false });
+    // CATV のネットワーク (0xFFFE) の NIT。自分の TS (地上波の再送信) 以外の TS も並ぶ
+    reader.feed(
+      packetize(
+        0x0010,
+        nitSection(0xfffe, 3, [
+          [0x7fe0, 0x7fe0, [[1024, 0x01]]],
+          [0x0408, 0x7fe1, [[1032, 0x01]]],
+        ]),
+      ),
+    );
+    reader.feed(
+      packetize(0x0011, sdtSection(0x0408, 0x7fe1, [[1032, 0x01, "地デジ"]])),
+    );
+    const [service] = reader.services();
+    expect(service?.networkId).toBe(0x7fe1);
+    expect(service?.remoteControlKeyId).toBe(3);
+
+    // 自分の TS が NIT に無ければ、リモコン番号は分からない
+    const other = new ServiceReader({ requireNit: false });
+    other.feed(
+      packetize(0x0010, nitSection(0xfffe, 3, [[0x7fe0, 0x7fe0, [[1024, 1]]]])),
+    );
+    other.feed(packetize(0x0011, sdtSection(0x0500, 4, [[151, 0x01]])));
+    expect(other.services()[0]?.remoteControlKeyId).toBeNull();
+  });
+
+  test("PAT に局が 1 つも無い TS は、SDT を待たずに揃って局を返さない", () => {
+    const reader = new ServiceReader({ requireNit: false });
+    expect(reader.feed(packetize(0x0000, patSection([], 0x0500)))).toBe(true);
+    expect(reader.empty).toBe(true);
+    expect(reader.services()).toEqual([]);
+  });
+
+  test("ふつうの読み方は、SDT だけでは揃わない", () => {
+    const reader = new ServiceReader();
+    expect(
+      reader.feed(packetize(0x0011, sdtSection(16400, 4, [[151, 0x01]]))),
+    ).toBe(false);
+    expect(reader.feed(packetize(0x0000, patSection([], 0x0500)))).toBe(false);
+  });
+});
+
 /**
- * 実チューナーが無いので、NIT と SDT を組み立てて食わせる。
+ * 実チューナーが無いので、NIT と SDT を組み立てて渡す。
  * セクションがパケットをまたぐ場合も作って、繋ぎ直しを確かめる。
  */
 
@@ -43,12 +106,17 @@ function stream(): Uint8Array {
 
 describe("セクションの解釈", () => {
   test("SDT からサービスを読む", () => {
-    const parsed = parseSdt(
-      sdtSection(0x0408, 0x0004, [
-        [1024, 0x01, "TOKYO MX1"],
-        [1025, 0x01],
-      ]),
+    const reader = new ServiceReader();
+    reader.feed(
+      packetize(
+        0x0011,
+        sdtSection(0x0408, 0x0004, [
+          [1024, 0x01, "TOKYO MX1"],
+          [1025, 0x01],
+        ]),
+      ),
     );
+    const parsed = reader.transport;
     expect(parsed?.transportStreamId).toBe(0x0408);
     expect(parsed?.originalNetworkId).toBe(0x0004);
     expect(parsed?.services).toEqual([
@@ -58,17 +126,22 @@ describe("セクションの解釈", () => {
     ]);
   });
 
-  test("NIT からネットワークIDとリモコン番号を読む", () => {
-    const parsed = parseNit(
-      nitSection(0x7fe0, 6, [[0x0408, 0x0004, [[1024, 0x01]]]]),
+  test("NIT からネットワーク ID とリモコン番号を読む", () => {
+    const reader = new ServiceReader();
+    reader.feed(
+      packetize(
+        0x0010,
+        nitSection(0x7fe0, 6, [[0x0408, 0x0004, [[1024, 0x01]]]]),
+      ),
     );
+    const parsed = reader.network;
     expect(parsed?.networkId).toBe(0x7fe0);
     expect(parsed?.remoteControlKeyId).toBe(6);
     expect(parsed?.transportStreams[0]?.transportStreamId).toBe(0x0408);
     expect(parsed?.transportStreams[0]?.services[0]?.serviceId).toBe(1024);
   });
 
-  test("CRCが合わないセクションは捨てる", () => {
+  test("CRC が合わないセクションは捨てる", () => {
     const section = sdtSection(0x0408, 0x0004, [[1024, 0x01]]);
     section[section.length - 1]! ^= 0xff;
     const reader = new ServiceReader();
@@ -103,7 +176,7 @@ describe("サービスの読み取り", () => {
     expect(reader.services().map((s) => s.serviceId)).toEqual([1024]);
   });
 
-  test("ネットワークIDとリモコン番号を配る", () => {
+  test("ネットワーク ID とリモコン番号を配る", () => {
     const reader = new ServiceReader();
     reader.feed(stream());
     expect(reader.services()[0]).toMatchObject({
@@ -127,7 +200,7 @@ describe("サービスの読み取り", () => {
     expect(reader.services()).toHaveLength(40);
   });
 
-  test("188の切れ目と無関係に届いても読める", () => {
+  test("188 の切れ目と無関係に届いても読める", () => {
     const reader = new ServiceReader();
     const data = stream();
     for (let at = 0; at < data.length; at += 100)
@@ -136,7 +209,7 @@ describe("サービスの読み取り", () => {
     expect(reader.services().map((s) => s.serviceId)).toEqual([1024]);
   });
 
-  test("別のPIDは読まない", () => {
+  test("別の PID は読まない", () => {
     const reader = new ServiceReader();
     reader.feed(packetize(0x0100, sdtSection(0x0408, 0x0004, [[1024, 0x01]])));
     expect(reader.transport).toBeNull();
@@ -155,9 +228,9 @@ describe("同期の取り直し", () => {
     return Uint8Array.from(parts);
   }
 
-  test("頭がずれていても読める", () => {
+  test("先頭がずれていても読める", () => {
     const body = repeated();
-    // わざと 0x47 で埋める。頭が 1 つ合っただけでは切れ目とは言えない
+    // わざと 0x47 で埋める。0x47 が 1 つ合っただけでは切れ目とは言えない
     const data = new Uint8Array(37 + body.length);
     data.fill(0x47, 0, 37);
     data.set(body, 37);
@@ -169,7 +242,7 @@ describe("同期の取り直し", () => {
 
   test("途中で落ちても後ろを読める", () => {
     const data = repeated();
-    // 頭の NIT の直後で 3 バイト落とす。以降の切れ目が 188 の倍数から外れる
+    // 先頭の NIT の直後で 3 バイト落とす。以降の切れ目が 188 の倍数から外れる
     const broken = Uint8Array.from([
       ...data.subarray(0, 188),
       ...data.subarray(191),
@@ -187,7 +260,7 @@ describe("同期の取り直し", () => {
   });
 });
 
-/** 前の切り分け (塊を毎回丸ごと写していた頃)。今のものと同じパケットが出ることを確かめる */
+/** 前の切り分け (チャンクを毎回丸ごとコピーしていた頃)。今のものと同じパケットが出ることを確かめる */
 class CopyingPacketStream {
   private rest = new Uint8Array(0);
 
@@ -268,7 +341,7 @@ function cut(next: () => number, data: Uint8Array): Uint8Array[] {
   return out;
 }
 
-describe("パケットの切り分け (塊を写さない)", () => {
+describe("パケットの切り分け (チャンクをコピーしない)", () => {
   test("どこで切って届いても、前の切り分けと同じパケットが同じ順に出る", () => {
     for (let seed = 1; seed <= 40; seed++) {
       const next = random(seed);
@@ -286,8 +359,8 @@ describe("パケットの切り分け (塊を写さない)", () => {
     }
   });
 
-  test("入れ物を使い回されても、出したパケットは届いた中身のまま", () => {
-    // recorded-bml.ts と同じ使い方: 1 つの入れ物に読み込み直しながら食わせる
+  test("バッファを使い回されても、出したパケットは届いた中身のまま", () => {
+    // recorded-bml.ts と同じ使い方: 1 つのバッファに読み込み直しながら渡す
     const next = random(7);
     const data = damaged(next, 400);
     const before = new CopyingPacketStream();
@@ -329,6 +402,13 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
   const BS1 = satelliteDeliveryDescriptor(11_727_480);
   const BS15 = satelliteDeliveryDescriptor(11_996_000);
 
+  /** NIT のセクションを 1 つ NitReader に渡して、そろった自分のネットワークの表を返す */
+  function readNit(section: Uint8Array) {
+    const reader = new NitReader();
+    reader.feed(packetize(0x0010, section));
+    return reader.actual;
+  }
+
   /** current_next_indicator を 0 (これから使う表) にしたセクション */
   function next(section: Uint8Array): Uint8Array {
     const body = [...section.subarray(0, -4)];
@@ -337,7 +417,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
   }
 
   test("衛星の分配の記述子から周波数・軌道・シンボルレートを読む", () => {
-    const parsed = parseNitSection(
+    const parsed = readNit(
       nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]]),
     );
     expect(parsed?.transportStreams[0]?.delivery).toEqual({
@@ -354,7 +434,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
 
   test("地上の分配の記述子から周波数を読む (1/7 MHz 単位)", () => {
     // T27 は 557.142857 MHz。放送は 1/7 MHz の 3900 と書く
-    const parsed = parseNitSection(
+    const parsed = readNit(
       nitSection(0x7fe0, 6, [
         [
           0x7fe0,
@@ -373,43 +453,78 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
     });
   });
 
+  test("ケーブルの分配の記述子から周波数・多重フレーム型式・変調・シンボルレートを読む", () => {
+    // QC26 の周波数 (243 MHz) に TSMF で 256QAM。放送は 0243.0000 MHz・005.2740 Msps と BCD で書く
+    const descriptor = cableDeliveryDescriptor(243_000_000, {
+      frameType: 0x1,
+      modulation: 0x05,
+    });
+    expect(descriptor).toEqual([
+      0x44, 11, 0x02, 0x43, 0x00, 0x00, 0xff, 0x12, 0x05, 0x00, 0x52, 0x74,
+      0x0f,
+    ]);
+    const section = nitSection(
+      0xfffe,
+      null,
+      [[0x0021, 0xfffe, [[0x02f0, 0x01]], descriptor]],
+      { name: "ケーブル" },
+    );
+    const parsed = readNit(section);
+    expect(parsed?.name).toBe("ケーブル");
+    expect(parsed?.sections).toEqual([section]);
+    expect(parsed?.transportStreams[0]?.delivery).toEqual({
+      kind: "cable",
+      frequency: 243_000_000,
+      frameType: 0x1,
+      fecOuter: 0x2,
+      modulation: 0x05,
+      symbolRate: 5_274_000,
+      fecInner: 0xf,
+    });
+  });
+
+  test("短すぎるケーブルの分配の記述子は読まない", () => {
+    const parsed = readNit(
+      nitSection(0xfffe, null, [
+        [0x0021, 0xfffe, [[0x02f0, 0x01]], [0x44, 4, 0x02, 0x43, 0x00, 0x00]],
+      ]),
+    );
+    expect(parsed?.name).toBeNull();
+    expect(parsed?.transportStreams[0]?.delivery).toBeNull();
+  });
+
   test("分配の記述子が無い TS は null", () => {
-    const parsed = parseNitSection(
+    const parsed = readNit(
       nitSection(0x7fe0, 6, [[0x0408, 0x0004, [[1024, 0x01]]]]),
     );
     expect(parsed?.transportStreams[0]?.delivery).toBeNull();
   });
 
-  test("セクションの頭からバージョンと節の番号を読む", () => {
-    const parsed = parseNitSection(
-      nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]], {
-        version: 7,
-        sectionNumber: 1,
-        lastSectionNumber: 2,
-      }),
+  test("セクションの先頭からネットワーク ID とバージョンを読む", () => {
+    const parsed = readNit(
+      nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]], { version: 7 }),
     );
-    expect(parsed).toMatchObject({
-      other: false,
-      networkId: 4,
-      version: 7,
-      current: true,
-      sectionNumber: 1,
-      lastSectionNumber: 2,
-    });
+    expect(parsed).toMatchObject({ other: false, networkId: 4, version: 7 });
   });
 
-  test("分配の記述子が付いても parseNit は今までどおり読む", () => {
-    const parsed = parseNit(
-      nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]]),
+  test("分配の記述子が付いても、スキャンは NIT[actual] のネットワークを読む", () => {
+    const reader = new ServiceReader();
+    reader.feed(
+      packetize(0x0010, nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]])),
     );
-    expect(parsed?.networkId).toBe(4);
-    expect(parsed?.transportStreams[0]?.services[0]?.serviceId).toBe(151);
+    expect(reader.network?.networkId).toBe(4);
+    expect(reader.network?.transportStreams[0]?.services[0]?.serviceId).toBe(
+      151,
+    );
     // NIT[other] はスキャンの「どのネットワークか」に使わない
-    expect(
-      parseNit(
+    const other = new ServiceReader();
+    other.feed(
+      packetize(
+        0x0010,
         nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]], { other: true }),
       ),
-    ).toBeNull();
+    );
+    expect(other.network).toBeNull();
   });
 
   test("全部のセクションがそろうまで返さず、そろったら TS をつなぐ", () => {
@@ -422,7 +537,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
       sectionNumber: 0,
       lastSectionNumber: 1,
     });
-    // 後ろの節から届いても並びは section_number の順
+    // 後ろのセクションから届いても並びは section_number の順
     expect(reader.feed(packetize(0x0010, second))).toBe(false);
     expect(reader.actual).toBeNull();
     expect(reader.feed(packetize(0x0010, first, 1))).toBe(true);
@@ -452,7 +567,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
     );
     expect(reader.actual?.version).toBe(0);
 
-    // 局が BS-15 へ移った表 (2 節)。1 節目だけではまだ前の表
+    // 局が BS-15 へ移った表 (2 セクション)。1 セクション目だけではまだ前の表
     const part = { version: 1, lastSectionNumber: 1 };
     expect(
       reader.feed(
@@ -487,7 +602,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
     ).toEqual([16626, 16625]);
   });
 
-  test("集めている途中でバージョンが変わったら、古い節を混ぜない", () => {
+  test("集めている途中でバージョンが変わったら、古いセクションを混ぜない", () => {
     const reader = new NitReader();
     reader.feed(
       packetize(
@@ -499,7 +614,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
         }),
       ),
     );
-    // バージョン 1 の 2 節目だけでは、バージョン 0 の 1 節目とつながない
+    // バージョン 1 の 2 セクション目だけでは、バージョン 0 の 1 セクション目とつながない
     reader.feed(
       packetize(
         0x0010,
@@ -514,7 +629,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
     expect(reader.actual).toBeNull();
   });
 
-  test("置き換えた前のバージョンの節が遅れて届いても、表を前に戻さない", () => {
+  test("置き換えた前のバージョンのセクションが遅れて届いても、表を前に戻さない", () => {
     const reader = new NitReader();
     const old = nitSection(4, null, [[16400, 4, [[151, 0x01]], BS1]]);
     reader.feed(packetize(0x0010, old));
@@ -562,7 +677,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
   });
 
   test("188 の切れ目と無関係に届いても、大きな表を読める", () => {
-    // BS は 26 の TS があり、TS ごとに記述子が付くので 1 節が何パケットにもまたがる
+    // BS は 26 の TS があり、TS ごとに記述子が付くので 1 セクションが何パケットにもまたがる
     const streams: [number, number, [number, number][], number[]][] =
       Array.from({ length: 26 }, (_, i) => [
         16400 + i,
@@ -586,11 +701,13 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
     const section = sdtSection(16625, 4, [[101, 0x01, "NHK BS"]], {
       other: true,
     });
-    expect(parseSdtOther(section)?.services).toEqual([
+    const tables = new SdtReader();
+    tables.feed(packetize(0x0011, section));
+    expect(tables.actual).toBeNull();
+    expect(tables.tables()[0]?.services).toEqual([
       { serviceId: 101, serviceType: 0x01, name: "NHK BS" },
     ]);
-    // 自分の TS の読み取りは SDT[other] を読まない (スキャンが別の TS の局を自分のものと取り違える)
-    expect(parseSdt(section)).toBeNull();
+    // スキャンは SDT[other] を読まない (別の TS の局を自分のものと取り違える)
     const reader = new ServiceReader();
     reader.feed(packetize(0x0011, section));
     expect(reader.transport).toBeNull();
@@ -612,7 +729,7 @@ describe("ネットワークの全部の TS (NIT・SDT[other])", () => {
         1,
       ),
     );
-    // 2 節に分かれた TS は、そろうまで返らない
+    // 2 セクションに分かれた TS は、そろうまで返らない
     expect(reader.tables().map((t) => t.transportStreamId)).toEqual([16400]);
     reader.feed(
       packetize(

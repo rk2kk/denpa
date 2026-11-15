@@ -21,7 +21,7 @@ import { revealed, shownUpTo } from "./paging";
  * ```
  */
 export class Paged<T> {
-  /** いま出している行数 (頭から) */
+  /** いま出している行数 (先頭から) */
   shown = $state(0);
 
   /**
@@ -59,7 +59,7 @@ export class Paged<T> {
   }
 
   /**
-   * 頭から `count` 行目までは出す。開いたときに映したい行が、まだ描いていない所にあるとき。
+   * 先頭から `count` 行目までは出す。開いたときに映したい行が、まだ描いていない所にあるとき。
    * 足す単位 (`step`) に切り上げる (下端の印が、すぐまた鳴らないように)
    */
   showUpTo(count: number): void {
@@ -67,11 +67,11 @@ export class Paged<T> {
   }
 
   /**
-   * 頭から `count` 行目までは出す (切り上げない)。開いたときに映したい行まで、余分を作らずに出す。
+   * 先頭から `count` 行目までは出す (切り上げない)。開いたときに映したい行まで、余分を作らずに出す。
    * 残りは表示したあとで `fill` が足す
    */
   showAtLeast(count: number): void {
-    // 今の一覧の長さで切らない。空のときに 0 にすると、あとで行が増えたときに頭を描かなくなる (`rows` が長さで止める)
+    // 今の一覧の長さで切らない。空のときに 0 にすると、あとで行が増えたときに先頭を描かなくなる (`rows` が長さで止める)
     this.shown = Math.max(this.shown, count);
   }
 
@@ -99,7 +99,7 @@ export function sentinel(node: HTMLElement, onSeen: () => void) {
   let frame = 0;
   /**
    * 外されたか。**外されたあとに積んであった `watch` が走ると、外れた要素を
-   * 見張る observer がもう 1 つできて、誰にも切られない**。最後の 1 回を足した
+   * 観測する observer がもう 1 つでき、どこからも切られない**。最後の 1 回を足した
    * 直後に一覧が出尽くして印ごと消えるとそうなる
    */
   let gone = false;

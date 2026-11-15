@@ -17,7 +17,7 @@
   import { PHONE_LANDSCAPE } from "./PlayerLayout.svelte";
 
   /**
-   * 映像を出す領域。3 つの視聴画面で同じ配線を 1 本に: 操作バーの出し入れとカーソル (`controls`)・キーボードで触っている
+   * 映像を出す領域。3 画面 (ライブ・追っかけ・観る画面) で同じ配線を 1 本に: 操作バーの出し入れとカーソル (`controls`)・キーボードで触っている
    * 間は残す・全画面は枠ごと (iPhone は広げる。`data-pseudo`。テーブルトップはページごと)・枠の大きさから操作バーの詰め方を決める (`compact`)。
    * 中身は画面ごとに違うので snippet で受ける
    */
@@ -41,6 +41,8 @@
      * 光が見えている間は、実況のコメントも枠の外を流れる (下の `outside`)
      */
     ambient?: Ambient;
+    /** 小窓を出しているか (`pip.svelte.ts` の `active`)。出している間は舞台の映像を隠す (下の `data-pip`) */
+    pip?: boolean;
   }
   interface StageApi {
     /** 毎回は使わないものを再生の設定 (⚙) に畳むか。狭い枠か、押すものが一段に収まらないとき */
@@ -54,14 +56,15 @@
     children,
     notes,
     ambient,
+    pip = false,
   }: Props = $props();
 
-  // 中のメニュー (`stageMenu`) が「開いている間は操作バーを残せ」と言う先。取り手で渡す (props は差し替わりうる)
+  // 中のメニュー (`stageMenu`) が「開いている間は操作バーを残せ」と言う先。関数で渡す (props は差し替わりうる)
   setContext(PLAYER_CONTROLS, () => controls);
   /** テーブルトップか (`#lib/phone-form.ts` の `TABLETOP`)。並べ方は CSS、ここは光と反射のどちらを置くかだけ */
   const tabletop = new MediaQuery(TABLETOP);
 
-  // メニューを枠の中に収める先 (`SpeedMenu`・`SettingsMenu`)。bind で入るので取り手で渡す
+  // メニューを枠の中に収める先 (`SpeedMenu`・`SettingsMenu`)。bind で入るので関数で渡す
   setContext(PLAYER_STAGE, () => element);
 
   /**
@@ -147,12 +150,15 @@
         if (told !== undefined) aspect = told;
         return;
       }
-      const video = target.querySelector("video");
+      // 観る画面が段を替えるために用意している側 (`data-spare`) は映していない
+      const video = target.querySelector<HTMLVideoElement>(
+        "video:not([data-spare])",
+      );
       if (video !== null && video.videoWidth > 0 && video.videoHeight > 0)
         aspect = `${video.videoWidth} / ${video.videoHeight}`;
     };
     read();
-    // `<video>` の映像の大きさが変わった (`resize` は泡立たないので、捕まえる側で受ける)
+    // `<video>` の映像の大きさが変わった (`resize` はバブルしないので、キャプチャで受ける)
     target.addEventListener("resize", read, true);
     target.addEventListener("loadedmetadata", read, true);
     // エンジンの canvas が出入りした・形を書き換えた
@@ -161,7 +167,7 @@
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ["data-aspect"],
+      attributeFilter: ["data-aspect", "data-spare"],
     });
     return () => {
       target.removeEventListener("resize", read, true);
@@ -280,7 +286,7 @@
   });
 
   /**
-   * 操作バーを出している間は、字幕を操作バーの上まで持ち上げる (操作バーに潜っていた)。字を描く係が字の縦の範囲を
+   * 操作バーを出している間は、字幕を操作バーの上まで持ち上げる (操作バーに潜っていた)。字を描く処理 (`CaptionPainter`) が字の縦の範囲を
    * `data-ink` に書くので、重なるぶんだけ canvas を `translate` でずらす (字は縮めない)。枠の上端より上へは
    * 出さず、操作バーを引っ込めている間は戻す
    */
@@ -391,6 +397,7 @@
     data-fold={fold ? "" : undefined}
     data-narrow={slim ? "" : undefined}
     data-pseudo={fullscreen.pseudo ? "" : undefined}
+    data-pip={pip ? "" : undefined}
     onpointermove={controls.wake}
     onpointerdown={controls.wake}
     onpointerleave={controls.away}
@@ -404,6 +411,11 @@
     data-testid={testid}
   >
     {@render children({ fold })}
+    {#if pip}
+      <div class="pip-note" role="status" data-testid="{testid}-pip-note">
+        小窓で再生中
+      </div>
+    {/if}
     {#if notes}
       <div class="notes" data-testid="{testid}-notes">{@render notes()}</div>
     {/if}
@@ -419,6 +431,23 @@
     max-height: 100%;
     min-height: 14rem;
   }
+  /*
+   * **小窓を出している間は、舞台の映像と字幕を隠す。** 同じ映像を 2 か所で描くと、非力な端末で重くなる。
+   * 隠すだけで止めない (小窓は同じ `<video>` や worker が描くフレームを出している)
+   */
+  .stage[data-pip] :global(:is(video, canvas)) {
+    visibility: hidden;
+  }
+  .pip-note {
+    position: absolute;
+    inset: 0;
+    z-index: var(--dp-z-stage-comments);
+    display: grid;
+    place-items: center;
+    color: var(--dp-on-video-muted);
+    font-size: var(--dp-text-sm);
+    pointer-events: none;
+  }
   /* 置き場は箱を持たない (狭い画面・横にしたスマホ・広げた全画面。下で二段組だけ箱にする) */
   .room {
     display: contents;
@@ -431,13 +460,14 @@
     display: none;
   }
   /*
-     * 二段組では、枠を映像の形にして使える広さに収める (上の `aspect`)。幅は列の幅 (`100cqw`) と
-     * 「高さ × 縦横比」(`100cqh`) の小さいほう。上に寄せて横は真ん中 (E2E の `expectSideFrame`)。
-     * 測る箱は `.room`。`<main>` の列にすると `position: absolute` の基準になり、`AmbientGlow` の位置がずれる
-     */
-  /* 横にしたスマホ (下) は 1000px を超えても二段組にしないので、ここから外す (`PlayerLayout` の `PHONE_LANDSCAPE`) */
+   * 二段組では、枠を映像の形にして使える広さに収める (上の `aspect`)。幅は列の幅 (`100cqw`) と
+   * 「高さ × 縦横比」(`100cqh`) の小さいほう。上に寄せて横は真ん中 (E2E の `expectSideFrame`)。
+   * 測る箱は `.room`。`<main>` の列にすると `position: absolute` の基準になり、`AmbientGlow` の位置がずれる。
+   * 横にしたスマホ (下) は 1000px を超えても二段組にしないので、ここから外す (`PlayerLayout` の `PHONE_LANDSCAPE`)
+   */
   @media (min-width: 1000px) and (not ((orientation: landscape) and (max-height: 500px) and (pointer: coarse))) {
     .room {
+      position: relative;
       display: flex;
       flex: 1 1 0%;
       min-height: 0;
@@ -445,20 +475,15 @@
       align-items: center;
       container-type: size;
     }
-    .stage {
-      aspect-ratio: var(--dp-aspect, 16 / 9);
-      width: min(100cqw, max(100cqh, 14rem) * var(--dp-aspect, 16 / 9));
-    }
     /*
      * 枠の外を流れるコメント (上の `outside`)。縦は置き場の中、横は窓の端から端まで (左と幅は上の `place` が書く)。
      * はみ出したぶんは切る。右の列 (位置を持つ。`AmbientGlow`) より上に描くため `z-index: 1` にし、
      * 枠も同じ 1 にして文書の順で上に保つ (外のコメントは枠の下)
      */
-    .room {
-      position: relative;
-    }
     .stage {
       z-index: 1;
+      aspect-ratio: var(--dp-aspect, 16 / 9);
+      width: min(100cqw, max(100cqh, 14rem) * var(--dp-aspect, 16 / 9));
     }
     .outside {
       display: block;
@@ -471,9 +496,9 @@
     }
   }
   /*
-     * テーブルトップ (`#lib/phone-form.ts` の `TABLETOP`) では、上の段の幅と高さいっぱいに収める (縦横比は保つ。object-fit: contain と同じ)。
-     * 段が低いので高さの下限は外し、真ん中に置く。上下か左右の余りは上の段の黒い地 (`PlayerLayout`)。幅を問わず当てる
-     */
+   * テーブルトップ (`#lib/phone-form.ts` の `TABLETOP`) では、上の段の幅と高さいっぱいに収める (縦横比は保つ。object-fit: contain と同じ)。
+   * 段が低いので高さの下限は外し、真ん中に置く。上下か左右の余りは上の段の黒い地 (`PlayerLayout`)。幅を問わず当てる
+   */
   @media (device-posture: folded) and (vertical-viewport-segments: 2) {
     .room {
       display: flex;
@@ -494,9 +519,9 @@
   .quiet {
     cursor: none;
   }
-  /* 字幕の持ち上げ (上の `lift`)。操作バーの出入りと同じ `--dp-duration` で動かす (動かさない設定では一緒に止まる) */
+  /* 字幕の持ち上げ (上の `lift`)。場所が動いて戻るので `--dp-duration-move` とばね (docs/design.md の「動き」。動きを減らす設定では止まる) */
   .stage :global(canvas[data-ink]) {
-    transition: translate var(--dp-duration);
+    transition: translate var(--dp-duration-move) var(--dp-ease-spring);
   }
   /* 通知の列。押せない (下の映像を押せるように)。押せる通知は自分で戻す */
   .notes {
@@ -509,17 +534,17 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
     /* 右端の縦の列 (`ControlBar`。右の余白 8px・48px の丸・間の 8px で 4rem) に掛けない。真ん中に置くので左も同じだけ空ける */
-    padding: 0.5rem 4rem;
+    padding: var(--dp-space-2) 4rem;
   }
   .notes:empty {
     display: none;
   }
   /*
-     * 縦に積む幅 (1000px 未満。横にしたスマホは下) では映像を画面の端から端まで (余白 `--dp-gutter` のぶんはみ出させる。
-     * スマホの 358px の枠では小さく、周りが黒く縁取られて見えた)。高さの下限も外して枠をちょうど 16:9 にする。全画面では UA が margin を消す
-     */
+   * 縦に積む幅 (1000px 未満。横にしたスマホは下) では映像を画面の端から端まで (余白 `--dp-gutter` のぶんはみ出させる。
+   * スマホの 358px の枠では小さく、周りが黒く縁取られて見えた)。高さの下限も外して枠をちょうど 16:9 にする。全画面では UA が margin を消す
+   */
   @media (max-width: 999.98px) and (not ((orientation: landscape) and (max-height: 500px) and (pointer: coarse))) {
     .stage {
       margin-inline: calc(-1 * var(--dp-gutter, 1rem));
@@ -527,9 +552,22 @@
     }
   }
   /*
-     * 横にしたスマホでは、枠を 16:9 にして真ん中に置く (画面の幅いっぱいだと左右の黒帯の上に操作バーの端が出て
-     * 潜って見えた)。条件は `PlayerLayout` の `PHONE_LANDSCAPE` と同じ
-     */
+   * 縦長の窓で縦に積むときは、枠を窓の上 (上の安全域のすぐ下) に留め、下の右の列を枠の裏へ流す (#2754)。
+   * 留まる範囲を外枠にする指定と、横長の窓を外す理由は `PlayerLayout` (条件も同じ)。右の列 (位置を持つ。`AmbientGlow`) より
+   * 上に描くため、ページの中で貼り付くものの段 (`--dp-z-pagebar`) にする。広げた全画面 (下の `[data-pseudo]`) はこれより強く当たる。
+   * テーブルトップでは枠の置き場 (`.room`) が箱なので、貼り付いても動かない
+   */
+  @media (max-width: 999.98px) and (orientation: portrait) {
+    .stage {
+      position: sticky;
+      top: env(safe-area-inset-top, 0px);
+      z-index: var(--dp-z-pagebar);
+    }
+  }
+  /*
+   * 横にしたスマホでは、枠を 16:9 にして真ん中に置く (画面の幅いっぱいだと左右の黒帯の上に操作バーの端が出て
+   * 潜って見えた)。条件は `PlayerLayout` の `PHONE_LANDSCAPE` と同じ
+   */
   @media (orientation: landscape) and (max-height: 500px) and (pointer: coarse) {
     /* 二段組の置き場 (上) は使わない (箱を持たないまま)。枠は `PlayerLayout` の `.main` (画面の高さ) に直に置く */
     .stage:not([data-pseudo]) {
@@ -541,9 +579,9 @@
     }
   }
   /*
-     * 広げた全画面 (iPhone。`fullscreen.svelte.ts`)。画面いっぱいに被せ、縦横比・高さの上下限・余白は外す。
-     * 端は安全域の内側で止める (操作バーを指の届く所に置く)。外側は `html[data-stage-fullscreen]` の黒 (`app.css`)
-     */
+   * 広げた全画面 (iPhone。`fullscreen.svelte.ts`)。画面いっぱいに被せ、縦横比・高さの上下限・余白は外す。
+   * 端は安全域の内側で止める (操作バーを指の届く所に置く)。外側は `html[data-stage-fullscreen]` の黒 (`app.css`)
+   */
   .stage[data-pseudo] {
     position: fixed;
     top: env(safe-area-inset-top, 0px);

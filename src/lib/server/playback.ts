@@ -14,9 +14,17 @@
  * | 元の TS だけ | H.264 / AV1 | TS からその場で変換 (`stream`) |
  * | 元の TS | MPEG-2 | TS を飛び先から流す (`raw`。画面が自分で再生する) |
  * | エンコード済みだけ | MPEG-2 | 出さない |
- * | CM を切ってエンコードした録画 | MPEG-2 | 出さない (時刻が合わない) |
+ * | v2.37 までに CM を切ってエンコードした録画 | MPEG-2 | 出さない (時刻が合わない) |
  * | エンコード済みか元の TS | 段を下げる (`?rung=`) | 同じコーデックでも変換 (`stream`)。コーデックはサーバが選び、H.265 も GPU があれば作る |
  * | エンコード済みか元の TS | 音声だけ (`?codec=audio`) | 音声だけを AAC にして流す (`stream`) |
+ * | 4K の局の元の録画 (`.mmts`) だけ | H.265 | 放送の HEVC と AAC を詰め替えて流す (`stream`。エンコードしない) |
+ * | 4K の局の元の録画 (`.mmts`) だけ | H.264 / AV1 | 詰め替えたものを縮めて SDR にして変換 (`stream`。ライブの `uhdVideoArgs` と同じ) |
+ * | 4K の局の元の録画 (`.mmts`) | MPEG-2 | 出さない (MPEG-2 の TS ではない) |
+ * | TS で送る 4K の局の元の TS だけ | H.265 | 映像を写して音声を AAC にして流す (`stream`。エンコードしない) |
+ * | TS で送る 4K の局の元の TS だけ | H.264 / AV1 | 縮めて SDR にして変換 (`stream`。ライブの `uhdVideoArgs` と同じ) |
+ * | TS で送る 4K の局の元の TS | MPEG-2 | 出さない (映像が HEVC) |
+ *
+ * TS で送る 4K の局の録画は、拡張子では分からないので元の TS の PMT を読んで決める (`recorded-broadcast.ts`)。
  *
  * 時刻の物差しは 1 ページで 1 つ (`PlayAxis`)。エンコード済みがあればその時刻、無ければ元の TS の先頭を 0 にする。
  * どの出し方でもストリームの時刻はこの物差しに乗せる。字幕・チャプター・データ放送・続きの位置を
@@ -26,7 +34,9 @@
  *
  * - **エンコード済みが元** … `-ss <from> -copyts`。ファイルの時刻のまま出す (詰め替えの話は `copyArgs`)
  * - **TS が元** … 時刻からバイトの位置を引いて (`ts/seek.ts` の二分探索)、そこから ffmpeg の標準入力へ
- *   流し込む。出口の時刻は `-copyts` と `-output_ts_offset` で物差しに合わせる (`tsOffset`)
+ *   流し込む。出力の時刻は `-copyts` と `-output_ts_offset` で物差しに合わせる (`tsOffset`)
+ * - **4K の局の録画 (`.mmts`) が元** … バイト比例で当たりを付けて読み (`mmts.mmtsOffset`)、denpa が物差しの時刻の fMP4 に詰め替える
+ *   (`mmts.mmtsFmp4`)。変換するときは、それを ffmpeg の標準入力へ流し込んで `-copyts` で時刻を運ぶ
  *
  * ## 枠
  *
@@ -35,7 +45,7 @@
  * 5 分で畳む** (止めたまま放っておかれた画面のぶんの枠を返すため)
  */
 
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 import { CLOCK, WRAP } from "@danything/arib/pes";
 import { error } from "@sveltejs/kit";
@@ -48,9 +58,10 @@ import {
 } from "#lib/arib.js";
 import { encodedCodec } from "#lib/encoded-codec.js";
 import type { HwCodec } from "#lib/hw.js";
-import { codecsFor, type LiveCodec } from "#lib/live.js";
+import type { BroadcastCodec } from "#lib/live-choice.js";
+import { BROADCAST_HEVC, codecsFor, type LiveCodec } from "#lib/live.js";
 import { LOWEST_RUNG, parseRung, type Rung } from "#lib/rungs.js";
-import { type FileSource, tsPathOf } from "#lib/source.js";
+import { type FileSource, recordedTransport, tsPathOf } from "#lib/source.js";
 import {
   BUSY,
   CODEC_HEADER,
@@ -77,21 +88,31 @@ import type { Recording } from "#lib/types.js";
 import { programSpec } from "./captions";
 import { chapterList } from "./cm";
 import { config } from "./config";
+import { aribServiceId } from "./encoder";
 import { type LiveHw, nvencBusy } from "./hwenc";
 import { type EncodedColumns, encodedFile, encodedFiles } from "./library";
 import {
-  aribServiceId,
   audioArgs,
   blameLiveHw,
+  liveRungCodec,
   panArgs,
   parsePlayable,
   pickLiveHw,
   rungCodec,
   softwareEncodes,
+  uhdVideoArgs,
   videoArgs,
 } from "./live";
+import { sidecarPaths } from "./metadata";
+import { LEAD, type MmtsFile, mmtsFmp4, mmtsOffset, probeMmts } from "./mmts";
 import { openPace, StreamPace } from "./pace";
-import { settings } from "./settings";
+import { recordedBroadcast } from "./recorded-broadcast";
+import {
+  readRecording,
+  recordingInput,
+  recordingProbeInput,
+  recordingStream,
+} from "./recording-io";
 import { endInput, run } from "./stream";
 import { holdTranscode } from "./transcode";
 
@@ -108,6 +129,11 @@ interface MediaFile {
   duration: number | null;
   /** 映像のコマ数 (毎秒)。段を下げた変換で、30 コマ以下ならそのままのコマ数で縮める (`live.videoArgs`)。読めなければ null */
   fps: number | null;
+  /**
+   * HLG (4K の局の録画を AV1 にエンコードしたもの。`encoder.ts`) か。変換するときは縮めて SDR に直す
+   * (`live.uhdVideoArgs`。ライブの 4K の局と同じ)
+   */
+  hlg: boolean;
 }
 
 interface ProbedStream {
@@ -118,6 +144,8 @@ interface ProbedStream {
   pix_fmt?: string;
   /** 平均のコマ数 (`30000/1001`。読めなければ `0/0`) */
   avg_frame_rate?: string;
+  /** 映像の伝達特性 (`arib-std-b67` が HLG) */
+  color_transfer?: string;
   tags?: { title?: string; TITLE?: string };
 }
 
@@ -207,6 +235,7 @@ export function mediaInfo(source: EncodedSource, json: string): MediaFile {
     ),
     duration: Number.isFinite(duration) && duration > 0 ? duration : null,
     fps: frameRate(video),
+    hlg: video?.color_transfer === "arib-std-b67",
   };
 }
 
@@ -248,7 +277,7 @@ async function probeMedia(
       "-show_format",
       "-print_format",
       "json",
-      path,
+      ...recordingProbeInput(path),
     ],
     { timeoutMs: PROBE_TIMEOUT, stdout: true },
   );
@@ -285,12 +314,19 @@ interface PlaybackPlan {
   encoded: EncodedFile[];
   /** 元の TS。録り終えていて読めて、時刻を物差しに乗せられるときだけ */
   ts: TsFile | null;
+  /** 4K の局の元の録画 (`.mmts`)。録り終えていて読めて、エンコード済みが無いときだけ (物差しは録画の先頭) */
+  mmts: MmtsFile | null;
   /** 物差しの 0 が、TS の先頭から何秒か (`encode_skip`)。TS が物差しなら 0 */
   skip: number;
   /** TS の音声 (`arib.audioTracks`)。TS から変換するときに使う */
   tracks: AudioTrack[];
   /** ffmpeg に名指しさせる放送の番号 */
   program: number;
+  /**
+   * 元の録画の放送のコーデック (`recorded-broadcast.ts`)。4K の局の録画 (`.mmts`) と、PMT の映像が HEVC の TS
+   * (TS で送る 4K の局) は `hevc`。元の録画が無ければ `mpeg2`
+   */
+  broadcast: BroadcastCodec;
 }
 
 /** 中身の codecs (映像) からコーデックを読む */
@@ -317,12 +353,7 @@ function transcodedCodecs(codec: LiveCodec): string {
 
 /** ファイルを少しずつ読むリーダー (`ts/seek.ts`) */
 function reader(path: string): ReadAt {
-  return async (offset, length) =>
-    new Uint8Array(
-      await Bun.file(path)
-        .slice(offset, offset + length)
-        .arrayBuffer(),
-    );
+  return (offset, length) => readRecording(path, offset, length);
 }
 
 /** 尺を出すのに末尾から読む量。最後の映像の PES が入る長さ */
@@ -365,6 +396,25 @@ async function probeTs(path: string): Promise<TsFile | null> {
   return ts;
 }
 
+/** 4K の局の元の録画 (`.mmts`) の先頭と尺 (`mmts.probeMmts`)。読めなければ null */
+async function probeMmtsFile(
+  path: string,
+  serviceId: number,
+): Promise<MmtsFile | null> {
+  try {
+    const stat = statSync(path);
+    if (stat.size === 0) return null;
+    return await probeMmts(
+      path,
+      stat.size,
+      `${stat.size}:${stat.mtimeMs}`,
+      serviceId,
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** 録画の尺 (秒)。番組表の尺ではなく録れた長さで、エンコードし終えたら出来上がりの長さ (`encoder.ts`)。古い行は予定の長さ */
 function recordedSec(recording: Recording): number {
   return (
@@ -390,12 +440,27 @@ export async function playbackPlan(
 
   // エンコードせずに置いた録画 (「エンコードしない」) は、置き場の TS が元の TS そのもの
   const tsPath = tsPathOf(recording);
+  const program = aribServiceId(recording.service_id);
+  /*
+   * 4K の局の録画 (`.mmts`) は MPEG-2 の TS ではないので、TS としては読まない。エンコード済みがあればそちらだけを出し
+   * (物差しもそちら)、無いときだけ元の録画を詰め替えて出す
+   */
+  const uhd = tsPath !== null && recordedTransport(tsPath) === "tlv";
   // 録っている最中の TS は伸びている。追っかけ再生 (`/chase`) の受け持ち
-  const ts =
-    tsPath !== null && recording.finished_at !== null
-      ? await probeTs(tsPath)
+  const done = tsPath !== null && recording.finished_at !== null;
+  const ts = done && !uhd ? await probeTs(tsPath) : null;
+  const mmts =
+    done && uhd && encoded.length === 0
+      ? await probeMmtsFile(tsPath, program)
       : null;
-  if (encoded.length === 0 && ts === null) return null;
+  if (encoded.length === 0 && ts === null && mmts === null) return null;
+  /*
+   * TS で送る 4K の局の録画は、拡張子では分からないので PMT を読む。MPEG-2 の TS としては出さず (画面の MPEG-2 のデコーダは
+   * HEVC をデコードできない)、エンコード済みが無ければ 4K の局の元の録画 (`.mmts`) と同じ形式を出す
+   */
+  const broadcast =
+    tsPath === null ? "mpeg2" : recordedBroadcast(tsPath, program);
+  const hevcTs = ts !== null && broadcast === "hevc" && encoded.length === 0;
 
   const axis = encoded.length > 0 ? "encoded" : "ts";
   const skip = axis === "encoded" ? (recording.encode_skip ?? 0) : 0;
@@ -431,6 +496,17 @@ export async function playbackPlan(
       codecs: `${hevc.media.video},${streamAudio("hevc")}`,
     });
   }
+  /*
+   * 4K の局の元の録画は、放送の HEVC と AAC の詰め替え (ライブの 4K の局の「放送のまま」と同じ。`BROADCAST_HEVC`)。
+   * TS で送る 4K の局の録画は、ffmpeg で映像を写して音声を AAC にする (`tsTranscodeArgs`)
+   */
+  if (mmts !== null || hevcTs) {
+    offers.push({
+      codec: "hevc",
+      way: "stream",
+      codecs: /codecs="([^"]+)"/.exec(BROADCAST_HEVC)?.[1] ?? "",
+    });
+  }
   for (const codec of ["h264", "av1"] as const) {
     const same = known.find((file) => file.codec === codec);
     if (same !== undefined) {
@@ -439,16 +515,20 @@ export async function playbackPlan(
         way: "stream",
         codecs: `${same.media.video},${streamAudio(codec)}`,
       });
-    } else if (known.length > 0 || (encoded.length === 0 && ts !== null)) {
+    } else if (
+      known.length > 0 ||
+      (encoded.length === 0 && (ts !== null || mmts !== null))
+    ) {
       offers.push({ codec, way: "stream", codecs: transcodedCodecs(codec) });
     }
   }
   /*
-   * MPEG-2 は元の TS の時刻をそのまま運ぶので、物差しに乗せられるときだけ。CM を切ったものは
+   * MPEG-2 は元の TS の時刻をそのまま運ぶので、物差しに乗せられるときだけ。v2.37 までに CM を切ったものは
    * 途中が詰まっていて合わない。捨てた先頭を覚えていない古い録画も合わせようがない
    */
   if (
     ts !== null &&
+    broadcast === "mpeg2" &&
     recording.cm_kept === null &&
     (axis === "ts" || recording.encode_skip !== null)
   ) {
@@ -465,9 +545,9 @@ export async function playbackPlan(
       : tracks.map((track) => ({ id: track.id, label: track.label }));
   const duration =
     axis === "encoded"
-      ? // エンコードし終えた行の `duration_ms` は出来上がりの長さ (頭を捨て、CM を切ったあと) なので、skip は引かない
+      ? // エンコードし終えた行の `duration_ms` は出来上がりの長さ (先頭を捨てたあと) なので、skip は引かない
         (encoded[0]?.media.duration ?? recordedSec(recording))
-      : (ts?.duration ?? recordedSec(recording));
+      : (ts?.duration ?? mmts?.duration ?? recordedSec(recording));
 
   return {
     info: {
@@ -475,6 +555,8 @@ export async function playbackPlan(
       axis,
       audios,
       offers,
+      // 放送のままが HEVC の録画 (4K の局) だけ。自動の順で MPEG-2 の場所に HEVC を入れる (`ts/playback.ts` の `pickOffer`)
+      ...(mmts === null && !hevcTs ? {} : { broadcast: "hevc" as const }),
       // 物差しの時刻を元の TS の時刻に戻すための情報。エンコードしたものの物差しのときだけ (`rulerOf` と同じ中身)
       ...(axis === "encoded"
         ? { ruler: { kept: recording.cm_kept, skip } }
@@ -483,23 +565,25 @@ export async function playbackPlan(
     encoded,
     /*
      * エンコードしたものの物差しで TS から変換するのは、TS の時刻を物差しに乗せられるときだけ (MPEG-2 と同じ条件)。
-     * CM を切ったものと、捨てた先頭を覚えていない古い録画は、字幕・チャプター・続きの位置とずれる
+     * v2.37 までに CM を切ったものと、捨てた先頭を覚えていない古い録画は、字幕・チャプター・続きの位置とずれる
      */
     ts:
       axis === "ts" ||
       (recording.cm_kept === null && recording.encode_skip !== null)
         ? ts
         : null,
+    mmts,
     skip,
     tracks,
-    program: aribServiceId(recording.service_id),
+    program,
+    broadcast,
   };
 }
 
 /** 失敗の理由だけ出させる (`transcodeBody` がログへ回す) */
 const QUIET = ["-hide_banner", "-nostats", "-loglevel", "error"];
 
-/** 詰め替えと変換で共通の出口。時刻はそのまま書かせる (`copyArgs` の説明) */
+/** 詰め替えと変換で共通の出力。時刻はそのまま書かせる (`copyArgs` の説明) */
 const FMP4_OUT = [
   "-f",
   "mp4",
@@ -521,7 +605,7 @@ const FMP4_OUT = [
  * ## 位置はファイルの時刻のまま出す
  *
  * - `-ss` を `-i` の前に置く。映像は写すので、`from` の手前のキーフレームから始まる
- * - `-copyts` で入口の時刻を出口まで運ぶ
+ * - `-copyts` で入力の時刻を出力まで運ぶ
  * - mp4 の muxer は既定で先頭を 0 に詰め直す。`frag_discont` で塊の時刻 (tfdt) を
  *   そのまま書かせ、`negative_cts_offsets` で B フレームのぶんを編集リストに逃がさせない
  *   (逃がすと先頭がずれる。ブラウザの MSE は編集リストを当てにできない)
@@ -547,8 +631,7 @@ export function copyArgs(
     ...QUIET,
     ...(from > 0 ? ["-ss", from.toFixed(3)] : []),
     "-copyts",
-    "-i",
-    path,
+    ...recordingInput(path),
     "-map",
     "0:v:0",
     "-map",
@@ -578,22 +661,25 @@ export function fileTranscodeArgs(
   hw: LiveHw | null,
   rung: Rung = 0,
   fps: number | null = null,
+  hlg = false,
 ): string[] {
-  const video = videoArgs(codec, hw, false, rung, fps);
+  // HLG (4K の局の録画を AV1 にしたもの) は、縮めて SDR に直す (ライブの 4K の局と同じ)
+  const video = hlg
+    ? uhdVideoArgs(codec, hw, rung, false)
+    : videoArgs(codec, hw, false, rung, fps);
   return [
     ...QUIET,
     ...video.input,
     ...(from > 0 ? ["-ss", from.toFixed(3)] : []),
     "-copyts",
-    "-i",
-    path,
+    ...recordingInput(path),
     "-map",
     "0:v:0",
     "-map",
     `0:a:${audio}?`,
     ...(video.filter === "" ? [] : ["-vf", video.filter]),
     ...video.encoder,
-    // 時刻を入口のまま運ぶ (`-copyts`)。既定 (mp4 は cfr) にコマを揃え直させない
+    // 時刻を入力のまま運ぶ (`-copyts`)。既定 (mp4 は cfr) にコマを揃え直させない
     "-fps_mode",
     "passthrough",
     ...audioArgs(codec, rung),
@@ -616,11 +702,11 @@ export function presented(pts: number): number {
 
 /**
  * **TS から変換するときの `-output_ts_offset`。** 流し込む最初の映像の PES の PTS (`pts`) が、物差しで
- * `at` 秒になるように。ffmpeg は `-copyts` で入口の時刻 (`presented`) をそのまま運ぶので、差を足せば
- * 出口が物差しの時刻になる。一周をまたいでも ffmpeg が増え続ける数にしてくれる。
+ * `at` 秒になるように。ffmpeg は `-copyts` で入力の時刻 (`presented`) をそのまま運ぶので、差を足せば
+ * 出力が物差しの時刻になる。一周をまたいでも ffmpeg が増え続ける数にしてくれる。
  *
  * **`-fps_mode passthrough` が要る。** 既定 (mp4 は cfr) は時刻が負のコマを捨てるので、一周の手前 60 秒から
- * 流し込むと (`presented` が負) 映像がまるごと消えた。`-t` を出口に置くと `-copyts` の絶対時刻で数えるので
+ * 流し込むと (`presented` が負) 映像がまるごと消えた。`-t` を出力に置くと `-copyts` の絶対時刻で数えるので
  * 置かない。
  *
  * ffmpeg 9.0.2 で、120 秒の MPEG-2 の TS (先頭の PTS が 1000 秒・一周の 30 秒前・40 秒前の 3 本) を
@@ -644,8 +730,12 @@ export function tsOffset(pts: number, at: number): number {
  * 見つからないことがあるので `?` を付ける。デュアルモノは選んだ側を両耳へ
  * (`live.encodeArgs` と同じ)。映像のエンコード方法とインタレ解除もライブと同じ (`live.videoArgs`)
  *
+ * TS で送る 4K の局の録画 (`broadcast` が `hevc`) は、ライブの TS で送る 4K の局と同じく、`hevc` なら映像を写し (`-c:v copy -tag:v hvc1`)、
+ * ほかのコーデックなら縮めて SDR にする (`live.uhdVideoArgs`。段 0 の `hevc` だけが写す。段を下げた H.265 は呼ぶ側が選ばない)
+ *
  * @param offset `tsOffset`
  * @param rung 回線に合わせて下げた段 (`#lib/rungs.ts`)
+ * @param broadcast 録画の放送のコーデック (`recorded-broadcast.ts`)
  */
 export function tsTranscodeArgs(
   program: number,
@@ -654,8 +744,14 @@ export function tsTranscodeArgs(
   hw: LiveHw | null,
   offset: number,
   rung: Rung = 0,
+  broadcast: BroadcastCodec = "mpeg2",
 ): string[] {
-  const video = videoArgs(codec, hw, true, rung);
+  const copy = broadcast === "hevc" && codec === "hevc" && rung === 0;
+  const video = copy
+    ? { input: [], filter: "", encoder: ["-c:v", "copy", "-tag:v", "hvc1"] }
+    : broadcast === "hevc"
+      ? uhdVideoArgs(codec, hw, rung, false)
+      : videoArgs(codec, hw, true, rung);
   const from = programSpec(program);
   return [
     ...QUIET,
@@ -669,19 +765,64 @@ export function tsTranscodeArgs(
     `${from}:v:0`,
     "-map",
     `${from}:a:${audio.stream}?`,
-    "-vf",
-    video.filter,
+    ...(video.filter === "" ? [] : ["-vf", video.filter]),
     ...video.encoder,
-    // 時刻を詰め直させない (`tsOffset` の説明)。既定 (mp4 は cfr) だと負の時刻のコマを捨てる。
-    // ライブのようにコマ数の上限 (`-fpsmax`) は付けられない。 passthrough と一緒だと ffmpeg が
-    // 「矛盾している」と断って変換が始まらない。探りは既定の大きさなのでコマ数を読み違えない
-    "-fps_mode",
-    "passthrough",
+    /*
+     * 時刻を詰め直させない (`tsOffset` の説明)。既定 (mp4 は cfr) だと負の時刻のコマを捨てる。
+     * ライブのようにコマ数の上限 (`-fpsmax`) は付けられない。 passthrough と一緒だと ffmpeg が
+     * 「矛盾している」と断って変換が始まらない。探りは既定の大きさなのでコマ数を読み違えない。
+     * 映像を写すときはエンコーダが無いので付けない
+     */
+    ...(copy ? [] : ["-fps_mode", "passthrough"]),
     ...panArgs(audio),
     ...audioArgs(codec, rung),
     "-output_ts_offset",
     offset.toFixed(6),
     // 先頭から観るときだけ、AAC の前置きのぶん負になる (`copyArgs` の説明)
+    "-avoid_negative_ts",
+    "make_non_negative",
+    /*
+     * 映像を写すときは、moov を最初の映像のパケットを見てから書く (ライブの `HEVC_COPY_PROBE` と同じ理由)。
+     * 飛び先から流し込むので、探りの間に VPS・SPS・PPS を読み切れないことがある (推定)
+     */
+    ...(copy
+      ? FMP4_OUT.map((flag) =>
+          flag.startsWith("+empty_moov") ? `${flag}+delay_moov` : flag,
+        )
+      : FMP4_OUT),
+  ];
+}
+
+/**
+ * **4K の局の元の録画を変換する引数。** 入力は denpa が物差しの時刻で詰め替えた fMP4 (`mmts.mmtsFmp4`。標準入力から)。
+ * `-copyts` で時刻をそのまま運ぶ。映像は縮めて SDR に直す (ライブの 4K の局と同じ `live.uhdVideoArgs`)。
+ * 局は 1 つ、音声は 1 本 (MPT の最初の音声のアセット) なので名指ししない
+ */
+export function mmtsTranscodeArgs(
+  codec: LiveCodec,
+  hw: LiveHw | null,
+  rung: Rung = 0,
+): string[] {
+  const video = uhdVideoArgs(codec, hw, rung, false);
+  return [
+    ...QUIET,
+    ...video.input,
+    "-copyts",
+    "-f",
+    "mp4",
+    "-i",
+    "pipe:0",
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
+    "-vf",
+    video.filter,
+    ...video.encoder,
+    // 時刻を詰め直させない (`tsTranscodeArgs` と同じ)
+    "-fps_mode",
+    "passthrough",
+    ...audioArgs(codec, rung),
     "-avoid_negative_ts",
     "make_non_negative",
     ...FMP4_OUT,
@@ -697,28 +838,31 @@ export function tsTranscodeArgs(
 export function audioOnlyArgs(
   source:
     | { path: string; from: number; audio: number }
-    | { program: number; audio: AudioTrack; offset: number },
+    | { program: number; audio: AudioTrack; offset: number }
+    | { fmp4: true },
 ): string[] {
   const input =
-    "path" in source
-      ? [
-          ...(source.from > 0 ? ["-ss", source.from.toFixed(3)] : []),
-          "-copyts",
-          "-i",
-          source.path,
-          "-map",
-          `0:a:${source.audio}?`,
-        ]
-      : [
-          "-copyts",
-          "-f",
-          "mpegts",
-          "-i",
-          "pipe:0",
-          "-map",
-          `${programSpec(source.program)}:a:${source.audio.stream}?`,
-          ...panArgs(source.audio),
-        ];
+    "fmp4" in source
+      ? // 4K の局の元の録画を詰め替えた fMP4 (`mmtsTranscodeArgs` と同じ。時刻は物差しのまま)
+        ["-copyts", "-f", "mp4", "-i", "pipe:0", "-map", "0:a:0?"]
+      : "path" in source
+        ? [
+            ...(source.from > 0 ? ["-ss", source.from.toFixed(3)] : []),
+            "-copyts",
+            ...recordingInput(source.path),
+            "-map",
+            `0:a:${source.audio}?`,
+          ]
+        : [
+            "-copyts",
+            "-f",
+            "mpegts",
+            "-i",
+            "pipe:0",
+            "-map",
+            `${programSpec(source.program)}:a:${source.audio.stream}?`,
+            ...panArgs(source.audio),
+          ];
   return [
     ...QUIET,
     ...input,
@@ -731,6 +875,52 @@ export function audioOnlyArgs(
     "make_non_negative",
     ...FMP4_OUT,
   ];
+}
+
+/**
+ * **録画ファイルの音声だけ** (`GET /api/recordings/<id>/file?audio=only`。スマートスピーカーへの Cast など)。
+ * 元がどれ (元の TS・4K の局の元の録画・AV1・H.265・H.264) でも同じ形式で出せるよう、主音声を AAC 192k に再エンコードして ADTS で流す。
+ * 4K の局の元の録画 (`.mmts`) は ffmpeg が読めないので、denpa が詰め替えた fMP4 を標準入力へ流す (`audioResponse` と同じ)。
+ * 読めなければ null。本文は `transcodeBody` で作る。止まった ffmpeg・読まれなくなった応答は、観る画面の変換と同じく畳む。
+ * 音声だけなので、その場で変換する本数の枠は使わない (`audioResponse` と同じ理由)
+ */
+export async function fileAudioBody(
+  path: string,
+  serviceId: number,
+  idle?: { limit: number; every: number },
+): Promise<ReadableStream<Uint8Array> | null> {
+  const output = ["-vn", "-c:a", "aac", "-b:a", "192k", "-f", "adts", "pipe:1"];
+  let attempt: Attempt;
+  if (recordedTransport(path) === "tlv") {
+    const mmts = await probeMmtsFile(path, serviceId);
+    if (mmts === null) return null;
+    attempt = {
+      argv: [
+        config.ffmpeg,
+        ...QUIET,
+        ...["-f", "mp4", "-i", "pipe:0", "-map", "0:a:0"],
+        ...output,
+      ],
+      input: () => mmtsFmp4(mmts, serviceId, 0),
+    };
+  } else {
+    attempt = {
+      argv: [
+        config.ffmpeg,
+        ...QUIET,
+        ...recordingInput(path),
+        "-map",
+        "0:a:0",
+        ...output,
+      ],
+    };
+  }
+  return transcodeBody(
+    [attempt],
+    `[audio] 音声だけの取り出し ${path}`,
+    () => undefined,
+    idle,
+  );
 }
 
 /** 読まれずに詰まった ffmpeg を畳むまで (ms) */
@@ -756,9 +946,10 @@ interface Attempt {
 }
 
 /**
- * **ffmpeg の出口を応答の本文にする** (`stream.ffmpegBody` に、降りたときの次の手と詰まりの検出を足したもの)。
+ * **ffmpeg の出力を応答の本文にする。** 録画をその場で変換・詰め替えして HTTP で流すものは全部これを通す
+ * (録画ファイルの音声だけ `fileAudioBody` も)。
  *
- * - 読まれたぶんしか読み出さない。相手が読まなければ出口が詰まり、ffmpeg も止まる
+ * - 読まれたぶんしか読み出さない。相手が読まなければ出力が詰まり、ffmpeg も止まる
  * - 1 バイトも出さずに降りたら、次の手 (GPU → ソフトウェア) で起こし直す。次で出せたら、降りた手の標準エラーを添えて `blame` を呼ぶ
  * - `IDLE_LIMIT` のあいだ読まれなければ畳む。閉じられた・読み切った・落ちたときも畳む
  * - **読みに来て ffmpeg が出すのを待っている間は、「読まれない」ではなく「ffmpeg が出さない」として数える。**
@@ -839,7 +1030,7 @@ export function transcodeBody(
     },
   });
 
-  /** ffmpeg の出口から 1 つ渡す (1 バイトも出さずに降りていたら次の手で起こし直す) */
+  /** ffmpeg の出力から 1 つ渡す (1 バイトも出さずに降りていたら次の手で起こし直す) */
   async function fill(
     controller: ReadableStreamDefaultController<Uint8Array>,
   ): Promise<void> {
@@ -863,9 +1054,12 @@ export function transcodeBody(
         return;
       }
       const why = await current.why();
+      if (finished) return;
       if (!sent && index + 1 < attempts.length) {
         console.warn(`${what}をやり直します (${code}): ${why}`);
         failed = await current.log();
+        // 待っている間に接続が切れた。ここで次を起こすと、その ffmpeg は止められずに残る
+        if (finished) return;
         index++;
         try {
           proc = spawnAttempt(attempts[index]!);
@@ -925,9 +1119,6 @@ function spawnAttempt(attempt: Attempt) {
     },
   };
 }
-
-/** TS を流しはじめる位置を、求められた時刻のこれだけ手前にする (秒)。キーフレームを 1 つ含めるため */
-const LEAD = 1;
 
 /** 物差しの `from` 秒を流すために、TS のどこから読むか (`ts/seek.ts`)。読めなければ null */
 function seekFrom(ts: TsFile, skip: number, from: number) {
@@ -991,8 +1182,36 @@ export async function streamResponse(
   const offered =
     rung === 0
       ? plan.info.offers.some((o) => o.codec === codec && o.way !== "file")
-      : source !== undefined || plan.ts !== null;
+      : source !== undefined || plan.ts !== null || plan.mmts !== null;
   if (!offered) error(404, "この形式では再生できません");
+
+  // 4K の局の元の録画の H.265 は、放送の HEVC と AAC の詰め替え (エンコードしない。枠も使わない)
+  if (plan.mmts !== null && codec === "hevc" && rung === 0)
+    return mmtsPassthrough(plan.mmts, plan.program, from);
+
+  // TS で送る 4K の局の元の録画の H.265 は、映像を写して音声を AAC にする (`tsTranscodeArgs`。エンコードしないので枠を使わない)
+  if (
+    source === undefined &&
+    plan.broadcast === "hevc" &&
+    plan.ts !== null &&
+    codec === "hevc" &&
+    rung === 0
+  ) {
+    const attempts = await tsAttempts(
+      plan,
+      from,
+      pickTrack(plan.tracks, query.get("audio") ?? undefined),
+      "hevc",
+      0,
+    );
+    if (attempts === null) error(404, "この形式では再生できません");
+    const pace = new StreamPace(false);
+    const opened = openPace(() => pace.read());
+    return new Response(
+      transcodeBody(attempts, `${label} の写し`, opened.close, undefined, pace),
+      { headers: mp4Headers("hevc", 0, opened.id) },
+    );
+  }
 
   const same = plan.encoded.find((file) => file.codec === codec);
   if (same !== undefined && rung === 0) {
@@ -1024,14 +1243,20 @@ export async function streamResponse(
   // 段を下げないなら H.265 は詰め替えだけ (`playbackPlan`)。offers にあればファイルがあるので、ここには来ない
   if (codec === "hevc" && rung === 0) error(404, "この形式では再生できません");
 
-  // 段を下げるならコーデックはサーバが選ぶ。H.265・AV1 は GPU があるときだけ選ばれる (`live.rungCodec`)
+  /*
+   * 段を下げるならコーデックはサーバが選ぶ。H.265・AV1 は GPU があるときだけ選ばれる (`live.rungCodec`)。
+   * 4K の局 (元の録画か、HLG のエンコード済み) は H.265 にエンコードしない (`live.liveRungCodec`。ライブと同じ)。
+   * 元の録画が TS で送る 4K の局のもの (`broadcast` が `hevc`) も同じ
+   */
+  const playable = parsePlayable(query.get("playable"), codec);
+  const uhd =
+    source === undefined ? plan.broadcast === "hevc" : source.media.hlg;
   const output =
     rung === 0
       ? codec
-      : rungCodec(
-          parsePlayable(query.get("playable"), codec),
-          source === undefined,
-        );
+      : uhd
+        ? liveRungCodec(playable, "hevc")
+        : rungCodec(playable, source === undefined);
 
   const held = holdTranscode();
   if (held === null) error(503, BUSY);
@@ -1052,13 +1277,15 @@ export async function streamResponse(
             output,
             rung,
           )
-        : await tsAttempts(
-            plan,
-            from,
-            pickTrack(plan.tracks, query.get("audio") ?? undefined),
-            output,
-            rung,
-          );
+        : plan.mmts !== null
+          ? mmtsAttempts(plan.mmts, plan.program, from, output, rung)
+          : await tsAttempts(
+              plan,
+              from,
+              pickTrack(plan.tracks, query.get("audio") ?? undefined),
+              output,
+              rung,
+            );
   } catch (failure) {
     // TS を読めなかった (消されたなど)。取った枠は返す
     release();
@@ -1114,6 +1341,12 @@ async function audioResponse(
         }),
       ],
     };
+  } else if (plan.mmts !== null) {
+    const mmts = plan.mmts;
+    attempt = {
+      argv: [config.ffmpeg, ...audioOnlyArgs({ fmp4: true })],
+      input: () => mmtsFmp4(mmts, plan.program, mmtsOffset(mmts, from)),
+    };
   } else if (plan.ts !== null) {
     const ts = plan.ts;
     const mark = await seekFrom(ts, plan.skip, from);
@@ -1130,7 +1363,7 @@ async function audioResponse(
             ),
           }),
         ],
-        input: () => Bun.file(ts.path).slice(mark.at).stream(),
+        input: () => recordingStream(ts.path, mark.at),
       };
     }
   }
@@ -1192,11 +1425,75 @@ function fileAttempts(
           hw,
           rung,
           source.media.fps,
+          source.media.hlg,
         ),
       ],
     }),
     rung,
   );
+}
+
+/** 4K の局の元の録画から変換する (`mmtsTranscodeArgs`)。プログレッシブなので GPU はインタレ解除の無いものを選ぶ */
+function mmtsAttempts(
+  mmts: MmtsFile,
+  program: number,
+  from: number,
+  codec: LiveCodec,
+  rung: Rung,
+): Attempt[] {
+  const offset = mmtsOffset(mmts, from);
+  return withFallback(
+    codec,
+    false,
+    (hw) => ({
+      argv: [config.ffmpeg, ...mmtsTranscodeArgs(codec, hw, rung)],
+      input: () => mmtsFmp4(mmts, program, offset),
+    }),
+    rung,
+  );
+}
+
+/**
+ * **4K の局の元の録画の H.265。** 放送の HEVC と AAC を物差しの時刻の fMP4 に詰め替えて流す (`mmts.mmtsFmp4`)。
+ * ffmpeg は起こさず、枠も使わない (エンコード済みの詰め替えと同じく軽い)。時刻は物差しの秒なので、`from` の手前の
+ * 頭出しできるコマから始まる
+ */
+function mmtsPassthrough(
+  mmts: MmtsFile,
+  program: number,
+  from: number,
+): Response {
+  const pace = new StreamPace(false);
+  const opened = openPace(() => pace.read());
+  const reader = mmtsFmp4(mmts, program, mmtsOffset(mmts, from)).getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const since = Date.now();
+      let read: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        read = await reader.read();
+      } catch (error) {
+        // 読んでいる途中で録画を消されたなど。送り出しの具合の登録を残さない
+        opened.close();
+        controller.error(error);
+        return;
+      }
+      const { done, value } = read;
+      pace.wait(Date.now() - since);
+      if (done) {
+        opened.close();
+        controller.close();
+        return;
+      }
+      pace.output(value);
+      controller.enqueue(value);
+    },
+    async cancel() {
+      opened.close();
+      await reader.cancel();
+    },
+  });
+  return new Response(body, { headers: mp4Headers("hevc", 0, opened.id) });
 }
 
 async function tsAttempts(
@@ -1211,19 +1508,27 @@ async function tsAttempts(
   const mark = await seekFrom(ts, plan.skip, from);
   if (mark === null) return null;
   const offset = tsOffset(mark.pts, sinceHead(mark.pts, ts.head) - plan.skip);
-  const input = () => Bun.file(ts.path).slice(mark.at).stream();
-  return withFallback(
-    codec,
-    true,
-    (hw) => ({
-      argv: [
-        config.ffmpeg,
-        ...tsTranscodeArgs(plan.program, audio, codec, hw, offset, rung),
-      ],
-      input,
-    }),
-    rung,
-  );
+  const input = () => recordingStream(ts.path, mark.at);
+  const build = (hw: LiveHw | null): Attempt => ({
+    argv: [
+      config.ffmpeg,
+      ...tsTranscodeArgs(
+        plan.program,
+        audio,
+        codec,
+        hw,
+        offset,
+        rung,
+        plan.broadcast,
+      ),
+    ],
+    input,
+  });
+  // TS で送る 4K の局の段 0 の H.265 は映像を写す。GPU は使わない
+  if (plan.broadcast === "hevc" && codec === "hevc" && rung === 0)
+    return [build(null)];
+  // 4K の局はプログレッシブなので、GPU はインタレ解除の無いものを選ぶ (`mmtsAttempts` と同じ)
+  return withFallback(codec, plan.broadcast !== "hevc", build, rung);
 }
 
 /**
@@ -1239,7 +1544,7 @@ async function rawResponse(
   const mark = await seekFrom(ts, plan.skip, from);
   if (mark === null) error(404, "この形式では再生できません");
   const origin = inWrap(ts.head + Math.round(plan.skip * CLOCK));
-  return new Response(Bun.file(ts.path).slice(mark.at).stream(), {
+  return new Response(recordingStream(ts.path, mark.at), {
     headers: {
       "Content-Type": "video/mp2t",
       "Cache-Control": "no-store",
@@ -1274,7 +1579,7 @@ export function rulerOf(
  * - 尺 (`duration_ms`) はエンコードし終えると出来上がりの長さに書き換わる (`encoder.ts`) ので、
  *   エンコードしたものがあれば、もうその物差し。無い (古い行) ときは番組表の尺を直して代わりにする
  *
- * 元の TS の位置のまま出来上がりの尺から引くと、CM を切ったものでは切った CM のぶん食い違う。
+ * 元の TS の位置のまま出来上がりの尺から引くと、捨てた先頭 (v2.37 までに CM を切ったものは切った CM も) のぶん食い違う。
  * 続きが無い・直すと先頭になる (捨てた先頭の中で止めた) ものは null
  */
 export function watchProgress(
@@ -1305,8 +1610,7 @@ export function watchProgress(
 
 /**
  * **エンコード済みが無い録画の、CM 飛ばしのチャプター。** 検出した CM の区間 (`cm_ranges`) は
- * 元の TS の先頭からの秒で持っている (`encoder.ts` の `runCmJob`) ので、物差し (`ts`) にそのまま乗る。
- * CM の扱いが「何もしない」なら、エンコード済みにチャプターを書かないのと揃えて出さない
+ * 元の TS の先頭からの秒で持っている (`encoder.ts` の `runCmJob`) ので、物差し (`ts`) にそのまま乗る
  */
 export async function tsChapters(
   recording: Recording,
@@ -1318,12 +1622,13 @@ export async function tsChapters(
     recording.cm_ranges.length === 0
   )
     return [];
-  if (settings().cmCut === "off") return [];
-  const ts = await probeTs(path);
-  return chapterList(
-    recording.cm_ranges,
-    ts?.duration ?? recordedSec(recording),
-  );
+  // 4K の局の録画 (`.mmts`) の物差しは録画の先頭 (`mmts.ts`)。CM の区間も同じ物差しで覚えている (`encoder.runCmJob`)
+  const duration =
+    recordedTransport(path) === "tlv"
+      ? (await probeMmtsFile(path, aribServiceId(recording.service_id)))
+          ?.duration
+      : (await probeTs(path))?.duration;
+  return chapterList(recording.cm_ranges, duration ?? recordedSec(recording));
 }
 
 /**
@@ -1341,20 +1646,30 @@ export async function captionArgs(recording: Recording): Promise<{
   const out = ["-c:s", "copy", "-f", "matroska", "pipe:1"];
   if (encoded !== null) {
     return {
-      argv: ["-v", "error", "-i", encoded, "-map", "0:s:0", ...out],
+      argv: [
+        "-v",
+        "error",
+        ...recordingInput(encoded),
+        "-map",
+        "0:s:0",
+        ...out,
+      ],
       path: encoded,
     };
   }
   const path = tsPathOf(recording);
-  const ts = path === null ? null : await probeTs(path);
+  // 4K の局の録画は TTML で、ffmpeg では抜けない (`uhdCaptionSource`)
+  const ts =
+    path === null || recordedTransport(path) === "tlv"
+      ? null
+      : await probeTs(path);
   if (ts === null) return null;
   return {
     argv: [
       "-v",
       "error",
       "-copyts",
-      "-i",
-      ts.path,
+      ...recordingInput(ts.path),
       "-map",
       `${programSpec(aribServiceId(recording.service_id))}:s:0`,
       "-output_ts_offset",
@@ -1363,4 +1678,33 @@ export async function captionArgs(recording: Recording): Promise<{
     ],
     path: null,
   };
+}
+
+/**
+ * **4K の局の録画の字幕の在り処** (`api/recordings/<id>/captions.json`)。TTML は ffmpeg では抜けないので (`captionArgs`)、
+ * エンコード済みがあればその隣の文字の配置 (`….captions.json`。`encoder.writeCaptions`)、無ければ元の録画 (`.mmts`) を読む
+ * (`mmts.mmtsCaptions`)。エンコード済みの隣に文字の配置が無いとき (TS の局の録画と、字幕の無い 4K の局の録画) と、
+ * 元の録画が TS のときは null (TS の局の字幕は `captionArgs`)
+ */
+export async function uhdCaptionSource(
+  recording: Recording,
+): Promise<
+  | { sidecar: string }
+  | { mmts: MmtsFile; serviceId: number }
+  | { missing: true }
+  | null
+> {
+  const encoded = encodedFile(recording);
+  if (encoded !== null) {
+    const sidecar = sidecarPaths(encoded).captions;
+    return existsSync(sidecar) ? { sidecar } : null;
+  }
+  const path = tsPathOf(recording);
+  if (path === null || recordedTransport(path) !== "tlv") return null;
+  const serviceId = aribServiceId(recording.service_id);
+  const mmts =
+    recording.finished_at === null
+      ? null
+      : await probeMmtsFile(path, serviceId);
+  return mmts === null ? { missing: true } : { mmts, serviceId };
 }

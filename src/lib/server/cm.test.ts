@@ -1,19 +1,23 @@
 import { describe, expect, test } from "bun:test";
 
-import { logoUnusable } from "../format";
+import { LOGO_OK, logoUnusable } from "../format";
 import {
+  chapterArgs,
   chapterMetadata,
   cmRatio,
+  decideFromMaterial,
   fields,
   firstFrameTime,
   invertRanges,
   leadIn,
   liveAudioIndexes,
+  logoDetail,
   parseFrameRate,
   parseRatio,
   shiftRanges,
   tooMuchCm,
 } from "./cm";
+import type { CmMaterial } from "./cm-material";
 
 describe("区間の裏返し", () => {
   test("CM を渡すと残す区間になる", () => {
@@ -43,7 +47,7 @@ describe("区間の裏返し", () => {
 });
 
 /**
- * エンコードは頭 (音声だけの区間) を捨てて 0 秒から始めるので、チャプターの
+ * エンコードは先頭 (音声だけの区間) を捨てて 0 秒から始めるので、チャプターの
  * 時刻も同じだけ詰める。そのままだと自動スキップが毎回そのぶん CM を見せていた
  */
 describe("チャプターの時刻を頭出しに合わせる", () => {
@@ -53,7 +57,7 @@ describe("チャプターの時刻を頭出しに合わせる", () => {
     ]);
   });
 
-  test("0 より前には行かない (頭が CM の録画)", () => {
+  test("0 より前には行かない (先頭が CM の録画)", () => {
     expect(shiftRanges([{ start: 0.2, end: 60 }], 0.9)).toEqual([
       { start: 0, end: 59.1 },
     ]);
@@ -101,11 +105,11 @@ describe("最初にデコードできたコマ", () => {
 });
 
 /**
- * TS の時刻は**放送の時刻そのもの** (PTS) で、頭からの秒数ではない。実機では
- * 62170 のような値が入る。引き算を忘れるとその値がそのまま頭捨ての長さになり、
+ * TS の時刻は**放送の時刻そのもの** (PTS) で、先頭からの秒数ではない。実機では
+ * 62170 のような値が入る。引き算を忘れるとその値がそのまま先頭捨ての長さになり、
  * 17 時間ぶん読み飛ばして中身の無いものができあがる
  */
-describe("頭から捨てる長さの上限", () => {
+describe("先頭から捨てる長さの上限", () => {
   test("入れ物の始まりから数える", () => {
     expect(leadIn(62170.583, 62169.916)).toBeCloseTo(0.667, 3);
   });
@@ -146,6 +150,17 @@ describe("chapterMetadata", () => {
     expect(meta).toContain("title=本編");
     // 本編 → CM → 本編 の 3 チャプター
     expect(meta.match(/\[CHAPTER\]/g)).toHaveLength(3);
+  });
+});
+
+describe("チャプターを書き直す", () => {
+  test("再エンコードせず、渡したチャプターに差し替える。null なら外す", () => {
+    expect(chapterArgs("/a.mkv", "/c.txt", "/o.mkv").join(" ")).toContain(
+      "-i /c.txt -map 0 -map_chapters 1 -c copy",
+    );
+    expect(chapterArgs("/a.mkv", null, "/o.mkv").join(" ")).toContain(
+      "-map 0 -map_chapters -1 -c copy",
+    );
   });
 });
 
@@ -196,7 +211,7 @@ describe("ffprobe の読み取り", () => {
 
 describe("CM 判定が多すぎないか", () => {
   test("番組の半分以上が CM になったら信じない", () => {
-    // ロゴを覚えたての回で「頭の 2 秒だけ本編」になり、30 分アニメが丸ごと CM 扱いになる
+    // ロゴを覚えたての回で「先頭の 2 秒だけ本編」になり、30 分アニメが丸ごと CM 扱いになる
     const whole = invertRanges([{ start: 0, end: 2 }], 1802);
     expect(cmRatio(whole, 1802)).toBe(100);
     expect(tooMuchCm(whole, 1802)).toBe(true);
@@ -214,6 +229,44 @@ describe("CM 判定が多すぎないか", () => {
   test("ちょうど半分から捨てる (丸めた % では比べない)", () => {
     expect(tooMuchCm([{ start: 0, end: 900 }], 1800)).toBe(true);
     expect(tooMuchCm([{ start: 0, end: 899 }], 1800)).toBe(false);
+  });
+});
+
+describe("ロゴの結果を捨てたときの覚え書き", () => {
+  /** 100 秒 (30 コマ/秒)。前半はロゴがはっきり見え、続く 25 秒は点が出たとみなすところに届かず、最後の 25 秒は 0 近く */
+  function material(logo = true): CmMaterial {
+    const frames = 3000;
+    return {
+      offset: 0,
+      duration: 100,
+      fps: 30,
+      silences: [],
+      times: Float64Array.from({ length: frames }, (_, i) => i / 30),
+      cuts: new Float32Array(frames),
+      logo: logo
+        ? {
+            spans: [{ start: 0, end: 1499 }],
+            scores: Float32Array.from({ length: frames }, (_, i) =>
+              i < 1500 ? 0.7 : i < 2250 ? 0.18 : 0.02,
+            ),
+          }
+        : null,
+      logoModel: "枠 1290,30,92,67、型 312 画素",
+      why: "",
+    };
+  }
+
+  test("型の在り処、ロゴの写っていた割合、点の分布、CM とした区間と区間の中の点を書く", () => {
+    expect(logoDetail(material(), [{ start: 50, end: 100 }])).toBe(
+      "。ロゴ: 枠 1290,30,92,67、型 312 画素、写っていたコマ 50%。" +
+        "ロゴの点: 0.25 以上 50%、0.12〜0.25 25%、0.12 未満 25%。" +
+        "ロゴで CM とした区間: 0:50〜1:40 (点 0.18)",
+    );
+  });
+
+  test("CM が無ければ区間は書かない。ロゴが使えなければ何も足さない", () => {
+    expect(logoDetail(material(), [])).not.toContain("CM とした区間");
+    expect(logoDetail(material(false), [{ start: 50, end: 100 }])).toBe("");
   });
 });
 
@@ -261,5 +314,98 @@ describe("中身のある音声だけを選ぶ", () => {
     expect(liveAudioIndexes('{"streams":[]}')).toEqual([]);
     expect(liveAudioIndexes("{}")).toEqual([]);
     expect(liveAudioIndexes('{"streams":[{}]}')).toEqual([]);
+  });
+});
+
+/**
+ * 本番の録画 562 (TBS の 30 分、1080i 29.97 コマ/秒) の形を合成したもの。尺は 1791.8 秒なのに、コマは 1130 秒 (18 分 50 秒) で止まり、
+ * その前にも 2〜3 秒ずつ欠けた所が散らばる。ロゴは本編で十分に当たっていて、区間は 40-129 151-490 539-775 783-949 1019-1043 秒
+ */
+describe("途中から映像が欠けた録画", () => {
+  const FPS = 29.97;
+  const DURATION = 1791.8;
+  const END = 1130;
+  const HOLES = [
+    [440, 442.5],
+    [800, 803],
+    [960, 962.5],
+    [1000, 1002],
+    [1120, 1123],
+  ] as const;
+  const SPANS = [
+    [40, 129],
+    [151, 490],
+    [539, 775],
+    [783, 949],
+    [1019, 1043],
+  ] as const;
+  /** CM の継ぎ目 (無音と強い切れ目)。無音は 1116 秒まで */
+  const JOINTS = [
+    10, 25, 40, 129, 144, 490, 505, 520, 535, 949, 964, 979, 994, 1009, 1043,
+    1058, 1073, 1088, 1103,
+  ];
+
+  function material(): CmMaterial {
+    const times: number[] = [];
+    for (let i = 0; i / FPS < END; i++) {
+      const t = i / FPS;
+      if (HOLES.some(([from, to]) => t > from && t < to)) continue;
+      times.push(t);
+    }
+    const cuts = new Float32Array(times.length);
+    const frameAt = (t: number) => {
+      const i = times.findIndex((x) => x >= t);
+      return i < 0 ? times.length - 1 : i;
+    };
+    for (const t of JOINTS) cuts[frameAt(t)] = 30;
+    const lit = (t: number) => SPANS.some(([from, to]) => t >= from && t < to);
+    return {
+      offset: 0,
+      duration: DURATION,
+      fps: FPS,
+      programLength: 1800,
+      programStart: 10,
+      silences: JOINTS.map((t) => ({ start: t - 0.5, end: t + 0.5 })),
+      times: Float64Array.from(times),
+      cuts,
+      logo: {
+        spans: SPANS.map(([from, to]) => ({
+          start: frameAt(from),
+          end: frameAt(to) - 1,
+        })),
+        scores: Float32Array.from(times, (t) => (lit(t) ? 0.75 : 0.02)),
+      },
+      why: "",
+    };
+  }
+
+  test("映像の無い 11 分を CM と数えず、ロゴの結果を使う", () => {
+    const found = decideFromMaterial(material());
+    expect(found.note).toBe(LOGO_OK);
+    expect(found.cm.length).toBeGreaterThan(0);
+    // 映像が止まった後ろは CM にしない
+    for (const range of found.cm) expect(range.end).toBeLessThanOrEqual(END);
+    // 本編 (ロゴの区間) は CM にしない
+    for (const range of found.cm)
+      for (const [from, to] of SPANS)
+        expect(
+          Math.min(range.end, to - 8) - Math.max(range.start, from + 8),
+        ).toBeLessThanOrEqual(0);
+  });
+
+  test("CM の割合は、映像の欠けた所を分母からも分子からも外して数える", () => {
+    const missing = [{ start: 1130, end: 1791.8 }];
+    const cm = [{ start: 1043, end: 1791.8 }];
+    // 欠けた所を入れると 42%、外すと 1043〜1130 の 87 秒 / 1130 秒で 8%
+    expect(cmRatio(cm, 1791.8)).toBe(42);
+    expect(cmRatio(cm, 1791.8, missing)).toBe(8);
+    expect(tooMuchCm([{ start: 0, end: 1000 }], 1791.8)).toBe(true);
+    expect(tooMuchCm([{ start: 0, end: 1000 }], 1791.8, missing)).toBe(true);
+    expect(tooMuchCm([{ start: 500, end: 1791.8 }], 1791.8, missing)).toBe(
+      true,
+    );
+    expect(tooMuchCm([{ start: 700, end: 1791.8 }], 1791.8, missing)).toBe(
+      false,
+    );
   });
 });

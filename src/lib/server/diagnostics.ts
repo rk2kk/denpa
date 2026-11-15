@@ -2,7 +2,8 @@ import { arch, release, type } from "node:os";
 
 import { type AgentAbout, guessLevel, type LogLine } from "../issue-report";
 import { type Known, MASK, redact } from "../redact";
-import { agentFetch, agentHostname, agentSecrets } from "./agent-client";
+import { fetchAgent } from "./agent-client";
+import { type Agent, agentHostnames, agentSecrets } from "./agents";
 import { config } from "./config";
 import { orm } from "./db";
 import { serverLogs } from "./log-buffer";
@@ -13,7 +14,7 @@ import { webhooks } from "./schema";
  * **設定の「その他」の「バージョンと環境」と「ログ」に出すもの。** サーバとエージェントのログ、動いている環境。
  *
  * エージェントのログは `GET /denpa/logs` (`{"lines":[{"at":<epoch ms>,"text":"…"}]}`。新しいほうから 2000 行まで、古い順)。
- * エージェント自身のことは `GET /denpa/about` (`{"version","os","arch","runtime","ccidDriver"}`。agent/Denpa.Agent/About.cs)。
+ * エージェント自身のことは `GET /denpa/about` (`{"version","name","os","arch","runtime","ccidDriver"}`。agent/Denpa.Agent/About.cs)。
  * 取れなければ理由を返して画面は止めない
  */
 
@@ -45,9 +46,12 @@ function readAgentLogs(raw: unknown): LogLine[] {
   return out;
 }
 
-export async function agentLogs(known: Known): Promise<AgentLogs> {
+export async function agentLogs(
+  agent: Agent,
+  known: Known,
+): Promise<AgentLogs> {
   try {
-    const res = await agentFetch("/denpa/logs", {
+    const res = await fetchAgent(agent, "/denpa/logs", {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
@@ -100,9 +104,12 @@ function readAgentAbout(raw: unknown): AgentAbout {
 }
 
 /** エージェントのバージョン・OS・arch と、macOS なら CCID ドライバ (`GET /denpa/about`) */
-export async function agentAbout(known: Known): Promise<AgentAboutResult> {
+export async function agentAbout(
+  agent: Agent,
+  known: Known,
+): Promise<AgentAboutResult> {
   try {
-    const res = await agentFetch("/denpa/about", {
+    const res = await fetchAgent(agent, "/denpa/about", {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
@@ -122,7 +129,7 @@ export async function agentAbout(known: Known): Promise<AgentAboutResult> {
 
 /**
  * **サーバの設定と DB にある、形式では見分けられない値。** 画面に送る前にログから消す
- * (OIDC のクライアントシークレット・登録してある Webhook の URL は、画面にも出さない)。
+ * (OIDC のクライアントシークレット・登録してある Webhook の URL・エージェントと組む合言葉は、画面にも出さない)。
  * ホスト名は画面にはそのまま出し、Issue に貼るときに伏せる (`redact`)。
  * エージェントに繋がらないときの一言 (`agentLogs`・`agentAbout` の `error`) だけは、ホスト名ごと伏せて返す
  */
@@ -137,9 +144,7 @@ export function knownValues(requestHost: string): {
   } catch {
     // DB が読めなくても、形式で伏せるぶんは効く
   }
-  const hosts = [requestHost];
-  const agentHost = agentHostname();
-  if (agentHost !== null) hosts.push(agentHost);
+  const hosts = [requestHost, ...agentHostnames()];
   // 自分の名前として通すものと同じ読み方 (`manifest.pwaNames`。`=` の無いものは名前にしない)
   for (const { host } of pwaNames()) hosts.push(host);
   return { secrets: secrets.filter(Boolean), hosts: hosts.filter(Boolean) };

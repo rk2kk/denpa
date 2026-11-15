@@ -18,7 +18,8 @@ import { alias } from "drizzle-orm/sqlite-core";
 import { channelNotice } from "#lib/channel-notice.js";
 import { capacityLabel } from "#lib/format.js";
 import { GROUPED_COOKIE, storedGrouped } from "#lib/grouping.js";
-import { channelAlert } from "#lib/server/channel-alert.js";
+import { parseId } from "#lib/id.js";
+import { agentCount } from "#lib/server/agents.js";
 import { fileSize } from "#lib/server/chase.js";
 import { clipCountsByRecording } from "#lib/server/clips.js";
 import { now, orm } from "#lib/server/db.js";
@@ -28,15 +29,16 @@ import {
   CM_CUT_ALREADY,
   enqueue,
   isCanceling,
+  NO_CODEC,
   pump,
 } from "#lib/server/encoder.js";
-import { serviceCounts } from "#lib/server/epg.js";
+import { listedServices, serviceCounts } from "#lib/server/epg.js";
 import { emit } from "#lib/server/events.js";
-import { deleteRecordingFiles, reconcile } from "#lib/server/files.js";
+import { reconcile, removeRecording } from "#lib/server/files.js";
 import { seriesFolder } from "#lib/server/library.js";
 import { watchProgress } from "#lib/server/playback.js";
 import { recordingFromForm } from "#lib/server/recording.js";
-import { cancel, restore } from "#lib/server/reservations.js";
+import { cancelReservation, restore } from "#lib/server/reservations.js";
 import {
   activeEncodeJobId,
   encodeJobs,
@@ -106,7 +108,7 @@ interface RecordingRow extends Recording {
   has_logo: boolean | null;
   /**
    * 一覧の「残り」の位置と尺 (ms)。観る物差しに直したもの (`playback.watchProgress`)。続きが無ければ null。
-   * `resume_ms` は元の TS の物差しなので、エンコードしたものの尺と比べると CM を切ったものでは食い違う
+   * `resume_ms` は元の TS の物差しなので、エンコードしたものの尺とそのまま比べると、捨てた先頭 (v2.37 までに CM を切ったものは切った CM も) のぶん食い違う
    */
   progress: { at: number; length: number } | null;
   /** 「まとめて表示」でまとめるキーと見出し (`seriesGroup`) */
@@ -327,9 +329,11 @@ export function load({ url, cookies }) {
 
   return {
     /** 局が無いときに上に出す案内 (`#lib/channel-notice.ts`。出すのは `+layout.svelte`) */
-    channelNotice: channelNotice(serviceCounts()),
-    /** チャンネルのお知らせの 1 行 (`server/channel-alert.ts`) */
-    channelAlert: channelAlert(),
+    channelNotice: channelNotice(
+      serviceCounts(),
+      listedServices(),
+      agentCount(),
+    ),
     reservations,
     recordings,
     missed,
@@ -346,10 +350,9 @@ export function load({ url, cookies }) {
   };
 }
 
-/** フォームの `id`。数でなければ null */
+/** フォームの `id`。ID として読めなければ null (`parseId`) */
 async function formId(request: Request): Promise<number | null> {
-  const id = Number((await request.formData()).get("id"));
-  return Number.isFinite(id) ? id : null;
+  return parseId((await request.formData()).get("id"));
 }
 
 export const actions = {
@@ -357,7 +360,8 @@ export const actions = {
     const recording = recordingFromForm(await request.formData());
     if (recording === undefined)
       return fail(400, { message: "録画が見つかりません" });
-    deleteRecordingFiles(recording, "手動削除");
+    if (!removeRecording(recording, "手動削除"))
+      return fail(409, { message: "録画中は消せません" });
     return { success: true };
   },
 
@@ -378,7 +382,7 @@ export const actions = {
      */
     if (settings().codec === "none") {
       return fail(400, {
-        message: "映像コーデックが選ばれていません。設定で選んでください",
+        message: NO_CODEC,
       });
     }
     enqueue(recording.id);
@@ -443,7 +447,7 @@ export const actions = {
   reconcile: () => {
     // 「ファイルと照合」ボタン。外から消した分をすぐ一覧に反映したいとき用
     const result = reconcile();
-    // 押した本人以外の画面も更新する。同じものを見ている端末が食い違うのを防ぐ
+    // 何も変わらなくても知らせる。押した本人以外の画面も読み直し、同じものを見ている端末が食い違わない
     emit("recordings");
     return { success: true, reconcile: result };
   },
@@ -492,7 +496,8 @@ export const actions = {
   cancel: async ({ request }) => {
     const id = await formId(request);
     if (id === null) return fail(400, { message: "予約 ID が不正です" });
-    await cancel(id);
+    const result = await cancelReservation(id);
+    if (!result.ok) return fail(result.status, { message: result.message });
     return { success: true };
   },
 };

@@ -1,7 +1,8 @@
 import type { CaptionLanguage } from "@danything/arib/caption-text";
 
-import { type Step, stepLabel } from "#lib/adapt.js";
+import { autoValue, type Step } from "#lib/adapt.js";
 import {
+  type BroadcastCodec,
   formatLabel,
   type LiveChoice,
   type LiveFormat,
@@ -15,7 +16,7 @@ import type { IconShape } from "./icons";
  * 再生の設定 (⚙ `SettingsMenu`) に並べるもの。**3 画面 (ライブ・追っかけ・観る画面) で同じ形。**
  *
  * - 選ぶもの (`SettingChoice`) … 行にいまの値を出し、押すと選択肢の並びに入る (字幕・音声・コーデック)
- * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CM スキップ・データ放送・データ放送を常に受信・実況・
+ * - 切り替え (`SettingToggle`) … 行を押すとその場でオン/オフ (CM スキップ・データ放送・実況・
  *   アンビエントモード・バックグラウンド再生・互換モード。並べるのは `StageTail`)
  *
  * 何を覚えるか (端末ごと) は各画面と `ambient.svelte.ts`・`background.svelte.ts` が持つ。ここは並べ方だけ
@@ -55,6 +56,10 @@ export interface SettingToggle {
   note?: string | undefined;
   /** 並べるが押せない */
   disabled?: boolean;
+  /**
+   * 長押し (タッチ)・右クリック・Shift+D でする別の操作 (`hold.ts`)。観る画面の「データ放送」の行の、自動で受信するかの切り替え
+   */
+  hold?: (() => void) | undefined;
 }
 
 /** 押せない形式に添える注記 (docs/writing.md「同じ操作・状態の文言」) */
@@ -66,47 +71,41 @@ const MPEG2 = "mpeg2";
 const AUTO = "auto";
 
 /**
- * ライブと追っかけのコーデック。並びは **自動 → AV1 → H.265 → H.264 → MPEG-2** (`#lib/live.ts` の `LIVE_CODECS`。観る画面の `ts/playback.ts` の `MENU_ORDER` と同じ)。押すと再エンコードに
+ * ライブと追っかけのコーデック。並びは **自動 → エンコードするもの 1 つ → MPEG-2** (観る画面の `ts/playback.ts` の `MENU_ORDER` と同じ順)。押すと再エンコードに
  * なるので映像が一瞬止まるが、前の映像を貼ったまま差し替わる。自動の行の値には、いま決まっている形式を添える (「自動 (MPEG-2)」)。
  * 回線に合わせて段を下げていれば高さも添える (「自動 (H.264 540p)」「自動 (音声だけ)」)。
  *
  * 末尾に **MPEG-2** が並ぶ (ライブも追っかけも)。エンコードせずに放送そのままを
- * この端末でデコードする経路 (docs/stream.md#放送そのままmpeg-2を送る)。
- * H.265 は `hevc` を渡したときだけ並ぶ (ライブで、ライブのエンコーダが GPU のとき。`server/viewing.ts`)。
- * `hidden` (世帯の設定。H.264 と H.265 を出さない) なら H.264 と H.265 は並べない。自動でそれになっているのは値に出す。
- * `unavailable` に挙げた形式は、並べるが押せない (`live-player.svelte.ts` の `unavailable`)
+ * この端末でデコードする経路 (docs/stream.md#放送そのままmpeg-2を送る)。4K の局 (`broadcast` が `hevc`) では同じ場所が **H.265** で、
+ * 放送の HEVC をエンコードせずに詰め替えたもの (docs/stream.md「4K の局のライブ」)。
+ * **エンコードするものは `shown` の 1 つだけ並べる** (サーバがその場でエンコードできて、端末で再生できる先頭。`#lib/live-choice.ts` の `shownCodec`)。
+ * ほかは自動が選んだときに値に出す。`unavailable` に挙げた形式は、並べるが押せない (`live-player.svelte.ts` の `unavailable`)
  */
 export function liveCodecs(opts: {
   icon: IconShape;
   /** メニューで選んでいるもの */
   choice: LiveChoice;
+  /** 並べる、エンコードするもの (`live-player.svelte.ts` の `menuCodec`)。null なら並べない */
+  shown: LiveCodec | null;
   /** いま決まっている形式 (自動の行の値に添える) */
   format: LiveFormat;
   /** 回線に合わせて下げた段 (`live-player.svelte.ts` の `step`)。自動の行の値に高さを添える (「自動 (H.264 540p)」)。省くと 0 */
   step?: Step;
-  /** H.265 を並べるか (ライブで、ライブのエンコーダが GPU のときだけ。追っかけは出さない) */
-  hevc?: boolean;
-  hidden?: boolean;
+  /** いまの局の放送のコーデック。省くと MPEG-2 */
+  broadcast?: BroadcastCodec;
   unavailable: LiveCodec[];
   onselect: (choice: LiveChoice) => void;
-  /** チューナー側の画質 (DT295 のオンボード変換)。選局のときにだけ効く */
-  preset?: string;
-  presets?: { id: string; label: string }[];
-  onpreset?: (preset: string) => void;
 }): SettingChoice {
-  const codecs = LIVE_CODECS.filter((c) =>
-    c.id === "hevc"
-      ? opts.hevc === true && opts.hidden !== true
-      : !(opts.hidden === true && c.id === "h264"),
-  );
+  const broadcast = opts.broadcast ?? "mpeg2";
+  const codecs = LIVE_CODECS.filter((c) => c.id === opts.shown);
   return {
     id: "codec",
     label: "コーデック",
     icon: opts.icon,
     value:
       opts.choice === "auto"
-        ? `自動 (${stepLabel(opts.step ?? 0, formatLabel(opts.format))})`
-        : formatLabel(opts.choice),
+        ? autoValue(opts.step ?? 0, formatLabel(opts.format))
+        : formatLabel(opts.choice, broadcast),
     options: [
       { key: AUTO, label: "自動", active: opts.choice === "auto" },
       ...codecs.map((c) => {
@@ -118,21 +117,16 @@ export function liveCodecs(opts: {
           disabled: off,
         };
       }),
-      { key: MPEG2, label: "MPEG-2", active: opts.choice === "raw" },
-      ...(opts.onpreset
-        ? (opts.presets ?? []).map((p) => ({
-            key: `tuner:${p.id}`,
-            label: `チューナー: ${p.label}`,
-            active: p.id === opts.preset,
-          }))
-        : []),
+      {
+        key: MPEG2,
+        label: formatLabel("raw", broadcast),
+        active: opts.choice === "raw",
+      },
     ],
     pick: (key) => {
-      if (typeof key === "string" && key.startsWith("tuner:")) {
-        opts.onpreset?.(key.slice("tuner:".length));
-      } else if (key === MPEG2) opts.onselect("raw");
+      if (key === MPEG2) opts.onselect("raw");
       else if (key === AUTO) opts.onselect("auto");
-      else opts.onselect(key as LiveCodec);
+      else opts.onselect(key as LiveChoice);
     },
   };
 }

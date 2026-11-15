@@ -150,7 +150,7 @@ export interface EitEvent {
    */
   series?: EitSeries | null;
   /**
-   * CA契約情報記述子 (0xCB) の contract_verification_info。
+   * CA 契約情報記述子 (0xCB) の contract_verification_info。
    * 有料放送の契約確認・復号判定に使う (B-CAS の 0x90 0x3C コマンド)。
    * 載っていなければ null。詳細の表では言っていないので undefined。
    */
@@ -187,10 +187,10 @@ const TABLE_TOT = 0x73;
 /**
  * TDT / TOT のセクションから**放送の実時刻**を読む。別のテーブルなら null。
  *
- * 頭 3 バイトのあとに MJD + BCD が 5 バイト。**TOT も同じ並び**で、後ろに
+ * 先頭 3 バイトのあとに MJD + BCD が 5 バイト。**TOT も同じ並び**で、後ろに
  * 時差の記述子が付くだけなので同じに読める。
  *
- * データ放送 (`bml.ts` の `onTime`) が読み、BML の時計にします
+ * データ放送 (`bml.ts` の `onTime`) が読んで、BML の時計にする
  */
 export function parseTimeTable(section: Uint8Array): number | null {
   if (section[0] !== TABLE_TDT && section[0] !== TABLE_TOT) return null;
@@ -269,14 +269,14 @@ const lang = (data: Uint8Array, at: number) => ascii(data, at, 3).toLowerCase();
  * 「直前の項目の続き」という意味なので、そこにも繋ぐ。
  *
  * **繋ぐのはデコードする前、バイトのうちに。** 部分ごとにデコードして文字列を繋いで
- * いた頃は、続きが**別の文字で出て**いました (実機の「音楽制作ずはのづ ねふびどっ」。
+ * いた頃は、続きが**別の文字で出て**いた (実機の「音楽制作ずはのづ ねふびどっ」。
  * 正しくは「音楽制作:ONE MUSIC」)。分割点は
  *
  * - **二バイト文字の途中**に来ることがある (片割れだけでは字にならない)
  * - **文字集合の状態を持ち越す。** G0〜G3 の指示も GL/GR の呼び出しも、
  *   続きの側には書き直されない。前の状態のまま読む前提で送られてくる
  *
- * ので、部分だけを単独でデコードすると、そこから先が崩れます。
+ * ので、部分だけを単独でデコードすると、そこから先が崩れる。
  *
  * **ただし見出しのある項目は、同じ見出しでも別の項目として最初の状態から読む。** 見出しが同じ
  * 項目が 2 つ続けて来る局があり (BS日テレの「番組内容」)、2 つ目は最初の状態 (漢字) から読む前提で
@@ -295,10 +295,11 @@ function readDescriptors(event: EitEvent, body: Uint8Array): void {
   for (const [tag, data] of descriptors(body)) {
     switch (tag) {
       case DESC_SHORT_EVENT: {
+        if (data.length < 4) break;
         const nameLength = data[3]!;
         const textAt = 4 + nameLength;
         event.name = decodeAribText(data.subarray(4, textAt));
-        const textLength = data[textAt]!;
+        const textLength = data[textAt] ?? 0;
         event.description = decodeAribText(
           data.subarray(textAt + 1, textAt + 1 + textLength),
         );
@@ -337,6 +338,8 @@ function readDescriptors(event: EitEvent, body: Uint8Array): void {
         break;
       }
       case DESC_COMPONENT: {
+        // 短いものを読むと、種別 0 の「480i」と出る
+        if (data.length < 2) break;
         const streamContent = data[0]! & 0x0f;
         const componentType = data[1]!;
         event.video = {
@@ -359,6 +362,8 @@ function readDescriptors(event: EitEvent, body: Uint8Array): void {
        *     [残り]   text_char … **放送が付けた名前**
        */
       case DESC_AUDIO_COMPONENT: {
+        // 言語の符号まで無いものを読むと、言語が空の音声が 1 本増える
+        if (data.length < 9) break;
         const flags = data[5]!;
         const multiLingual = (flags & 0x80) !== 0;
         const langs = [lang(data, 6)];
@@ -383,7 +388,7 @@ function readDescriptors(event: EitEvent, body: Uint8Array): void {
       }
       case DESC_CA_CONTRACT_INFO: {
         if (data.length < 4) break;
-        const caSystemId = (data[0]! << 8) | data[1]!;
+        const caSystemId = u16(data, 0);
         const numOfComponent = data[2]! & 0x0f;
         let at = 3 + numOfComponent;
         if (at >= data.length) break;
@@ -391,7 +396,7 @@ function readDescriptors(event: EitEvent, body: Uint8Array): void {
         at++;
         if (at + cviLength <= data.length && cviLength > 0) {
           const cvi = data.subarray(at, at + cviLength);
-          // B-CAS (0x0005) を優先。まだ無ければ拾う
+          // B-CAS (0x0005) を優先。まだ無ければこれを使う
           if (
             caSystemId === 0x0005 ||
             event.contractVerification === undefined ||
@@ -582,13 +587,13 @@ export class ScheduleProgress {
    * **番号が飛ぶ。** 1 つの `table_id` が受け持つのは 4 日ぶんで、基本は
    * `0x50` から、詳細は `0x58` から始まる。日本の放送は 8 日ぶんなので、
    * 実際に流れてくるのは `0x50` `0x51` と `0x58` `0x59` あたりだけで、
-   * **`0x52`〜`0x57` は永久に来ません**。
+   * **`0x52`〜`0x57` は永久に来ない**。
    *
    * `0x50` から `last_table_id` まで全部を待っていた頃は、詳細を積んでいる局が
    * **一度も「揃った」にならず**、どのチャンネルも上限の 10 分 (denpa の `epgChannelTimeout`) まで開きっぱなしに
-   * なっていました (実機で、詳細の無い BS11 だけが早く閉じていた)。
+   * なっていた (実機で、詳細の無い BS11 だけが早く閉じていた)。
    *
-   * 見かけた表と、`last_table_id` が指す表だけを見ます。
+   * 見かけた表と、`last_table_id` が指す表だけを見る。
    */
   get complete(): boolean {
     if (this.seen.size === 0) return false;
@@ -600,7 +605,7 @@ export class ScheduleProgress {
     return true;
   }
 
-  /** その表でまだ来ていない節。セグメントの先頭すら来ていなければ、先頭の番号を数える */
+  /** その表でまだ来ていないセクション。セグメントの先頭すら来ていなければ、先頭の番号を数える */
   private holes(tableId: number): number[] {
     const numbers = this.seen.get(tableId) ?? new Set<number>();
     const last = this.lastSection.get(tableId) ?? 0;
@@ -622,10 +627,10 @@ export class ScheduleProgress {
   /**
    * そのセグメントの時間帯がもう過ぎているか。**過ぎたものは待たない。**
    *
-   * セグメントは 0:00 から 3 時間ずつの枠で、`table_id` と節番号から
+   * セグメントは 0:00 から 3 時間ずつの枠で、`table_id` とセクション番号から
    * それがいつの枠なのかが決まる。基本は `0x50` が当日 0:00 から 4 日ぶん、
    * `0x51` がその次の 4 日ぶん。詳細 (`0x58`〜) も同じ並びをもう一度たどる。
-   * 終わった枠は放送に乗らない (クラスの説明)。そのぶんの番組は、そこが未来だった数日前に取り込んである。
+   * 終わった枠は放送されない (クラスの説明)。そのぶんの番組は、そこが未来だった数日前に取り込んである。
    */
   private stale(tableId: number, start: number): boolean {
     const base =
@@ -648,7 +653,7 @@ export class ScheduleProgress {
    * こちらが来ない表を待っているのかで、直し方がまるで違う。
    */
   report(): string {
-    if (this.seen.size === 0) return "EIT[schedule] が1つも来ていない";
+    if (this.seen.size === 0) return "EIT[schedule] が 1 つも来ていない";
     if (!this.seen.has(this.lastTableId)) {
       const seen = [...this.seen.keys()].map(hex).join(",");
       return `最後の表 ${hex(this.lastTableId)} が一度も来ない (来たのは ${seen})`;
@@ -660,13 +665,13 @@ export class ScheduleProgress {
       if (holes.length > 0) {
         const head = holes.slice(0, 8).join(",");
         missing.push(
-          `${hex(tableId)} の ${head}${holes.length > 8 ? ` ほか${holes.length - 8}` : ""}`,
+          `${hex(tableId)} の ${head}${holes.length > 8 ? ` ほか ${holes.length - 8}` : ""}`,
         );
       }
     }
     return missing.length === 0
       ? "揃っている"
-      : `来ていない節: ${missing.join(" / ")}`;
+      : `来ていないセクション: ${missing.join(" / ")}`;
   }
 }
 
@@ -718,28 +723,33 @@ export class EpgReader {
     for (const packet of this.packets.feed(chunk)) {
       for (const raw of this.sections.feed(packet)) {
         const section = parseEit(raw, this.options);
-        if (section === null) continue;
-        if (section.tableId >= SCHEDULE_ACTUAL_MIN) {
-          if (!this.progress.has(section.serviceId))
-            this.lastNewService = this.now();
-          const progress =
-            this.progress.get(section.serviceId) ??
-            new ScheduleProgress(this.now);
-          progress.add(section);
-          this.progress.set(section.serviceId, progress);
-        }
-        for (const event of section.events) {
-          if (
-            section.tableId === TABLE_PF_ACTUAL &&
-            this.onAir(section, event)
-          ) {
-            this.present.set(event.serviceId, event);
-          }
-          if (event.startAt === null || event.duration === null) continue;
-          this.merge(event);
-          added = true;
-        }
+        if (section !== null && this.add(section)) added = true;
       }
+    }
+    return added;
+  }
+
+  /**
+   * 読んだセクションを 1 つ足す。番組が 1 つでも増えたら true。
+   * 4K の放送の番組表 (`mh-eit.ts` の `MmtEpgReader`) は、読み方だけを替えてここに渡す
+   */
+  protected add(section: EitSection): boolean {
+    let added = false;
+    if (section.tableId >= SCHEDULE_ACTUAL_MIN) {
+      if (!this.progress.has(section.serviceId))
+        this.lastNewService = this.now();
+      const progress =
+        this.progress.get(section.serviceId) ?? new ScheduleProgress(this.now);
+      progress.add(section);
+      this.progress.set(section.serviceId, progress);
+    }
+    for (const event of section.events) {
+      if (section.tableId === TABLE_PF_ACTUAL && this.onAir(section, event)) {
+        this.present.set(event.serviceId, event);
+      }
+      if (event.startAt === null || event.duration === null) continue;
+      this.merge(event);
+      added = true;
     }
     return added;
   }
@@ -796,11 +806,11 @@ export class EpgReader {
    * p/f で「いま流れている」と言えるか。
    *
    * **`running_status` を当てにしきれない。** 4 (放送中) を入れてくる局も
-   * あれば、**0 (未定義) しか入れてこない局もある。** 実機の NHK は 74 節
+   * あれば、**0 (未定義) しか入れてこない局もある。** 実機の NHK は 74 セクション
    * ぜんぶ 0 だった。4 だけを見ていると、そういう局では延長追従が丸ごと
    * 効かなくなる (denpa の docs/data.md)。
    *
-   * そこで 0 のときは**節の番号で決める**。p/f は仕様で
+   * そこで 0 のときは**セクションの番号で決める**。p/f は仕様で
    * **section 0 が現在・section 1 が次**と決まっていて、こちらは局の都合で
    * 変わらない。1 (まもなく) や 2 (停止中) は今までどおり入れない。
    */
@@ -901,7 +911,9 @@ export class EpgReader {
  *
  * **中身で比べる。** 書き換われば version が上がるはずだが、上げずに中身だけ替える
  * 送り手を当てにしないよう、番組の番号・時刻・尺・タイトルで比べる。p/f は 1 局ぶん数百バイトが
- * 数秒おきに来るだけなので、毎回読んでも軽い
+ * 数秒おきに来るだけなので、毎回読んでも軽い。
+ *
+ * 4K の放送 (MMT/TLV) の MH-EIT[p/f] は、読み方だけを替えた `mh-eit.ts` の `MmtPresentFollowing` で追う
  */
 export class PresentFollowing {
   private readonly sections = new SectionAssembler(PID_EIT);
@@ -911,7 +923,7 @@ export class PresentFollowing {
   private readonly marks: [string | null, string | null] = [null, null];
 
   /** @param serviceId 追う局 (放送が名乗っている service_id) */
-  constructor(private readonly serviceId: number) {}
+  constructor(protected readonly serviceId: number) {}
 
   /** いま流れている番組。まだ来ていない・放送が空けているなら null */
   get present(): EitEvent | null {
@@ -933,21 +945,28 @@ export class PresentFollowing {
       // 番組表 (schedule) と他局の p/f は読まずに捨てる。同じ PID に流れてくる
       if (raw[0] !== TABLE_PF_ACTUAL || raw.length < 18) continue;
       if (u16(raw, 3) !== this.serviceId) continue;
-      const section = parseEit(raw);
-      if (section === null || section.sectionNumber > 1) continue;
-      const slot = section.sectionNumber as 0 | 1;
-      const event = section.events[0] ?? null;
-      const mark = event === null ? "" : markOf(event);
-      if (this.marks[slot] === mark) continue;
-      this.marks[slot] = mark;
-      this.held[slot] = event;
-      changed = true;
+      if (this.hold(parseEit(raw))) changed = true;
     }
     return changed;
   }
+
+  /**
+   * 読んだ p/f[actual] のセクションを 1 本覚える。**いまか次のどちらかが変わったら true**。
+   * 渡すのは追う局のものだけ (table_id と service_id は呼ぶ側が確かめる)
+   */
+  protected hold(section: EitSection | null): boolean {
+    if (section === null || section.sectionNumber > 1) return false;
+    const slot = section.sectionNumber as 0 | 1;
+    const event = section.events[0] ?? null;
+    const mark = event === null ? "" : markOf(event);
+    if (this.marks[slot] === mark) return false;
+    this.marks[slot] = mark;
+    this.held[slot] = event;
+    return true;
+  }
 }
 
-/** 変わったかどうかを見る中身。**番号・時刻・尺・タイトルだけ** (番組表に写して画面に出るもの) */
+/** 変わったかどうかを見る中身。**番号・時刻・尺・タイトルだけ** (番組表に入れて画面に出るもの) */
 function markOf(event: EitEvent): string {
   return `${event.eventId}:${event.startAt}:${event.duration}:${event.name}`;
 }

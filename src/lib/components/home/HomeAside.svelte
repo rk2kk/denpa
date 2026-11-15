@@ -8,7 +8,7 @@
    * この形では操作の 1 行 (`TimelineBar`) は出さず、一覧はいちばん上から始まる。上から
    *
    * 1. カレンダー … 月の升目。行のある日を押すとその日の見出しへ。日ごとに並べているときだけ (`HomeCalendar`)
-   * 2. 状態 … エンコード・空き (どちらも無ければ出さない)。次の録画は「いま」の線に出す
+   * 2. 状態 … エンコード・空き (どちらも無ければ出さない)。次の録画は「いま」の行に出す
    * 3. 絞り込み … すべて・予約・録画中・未視聴 (件数付き)。続けて競合・失敗・録り逃し・CM の判定を、件数があるものだけ注意の色とアイコンで
    * 4. 表示 … まとめて表示・新しい順で表示・完了した予約も表示・削除済みも表示 (スイッチ)、ファイルと照合 (→)。いちばん下
    *
@@ -17,7 +17,7 @@
    * 中身はホームが読んだものから作る (問い合わせは足さない)。指を乗せたときだけ出るものは置かない
    */
   import Icon from "#lib/components/player/Icon.svelte";
-  import { ATTENTION_FILTERS, FILTERS } from "#lib/timeline.js";
+  import { FILTERS, shownAttention } from "#lib/timeline.js";
 
   import type { HomeControls } from "./context";
   import HomeCalendar from "./HomeCalendar.svelte";
@@ -42,9 +42,7 @@
     };
   } = $props();
 
-  const attention = $derived(
-    ATTENTION_FILTERS.filter((f) => counts[f.id] > 0 || filter === f.id),
-  );
+  const attention = $derived(shownAttention(counts, filter));
 </script>
 
 <aside

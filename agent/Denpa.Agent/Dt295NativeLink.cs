@@ -3,14 +3,14 @@ using System.Buffers.Binary;
 
 namespace Denpa.Agent;
 
-/// <summary>自前方式の PIX-DT295 が、機材に断られた・想定と違う値を返した・時間切れになった</summary>
+/// <summary>PIX-DT295 (dt295:) が、機材に断られた・想定と違う値を返した・時間切れになった</summary>
 public class Dt295NativeException(string message) : IOException(message);
 
 /// <summary>機材が起動直後の状態ではない。ポートの電源を入れ直すと戻る (Linux)。ほかの OS では挿し直しを求める</summary>
 public sealed class Dt295NativeWarmException(string message) : Dt295NativeException(message);
 
 /// <summary>
-/// 自前方式 (dt295:) の PIX-DT295 との制御転送。節の番号は仕様書 (dt295-resident/spec.md) のもの。
+/// PIX-DT295 (dt295:) との制御転送。節の番号は仕様書 (dt295-resident/spec.md) のもの。
 /// ベンダー要求 0xBC で 24 ビットのアドレスを読み書きする (仕様書 3.1)。
 ///
 /// <list type="bullet">
@@ -18,13 +18,13 @@ public sealed class Dt295NativeWarmException(string message) : Dt295NativeExcept
 /// <item>読む: 制御 IN で wLength バイト。書く: 制御 OUT で wLength バイト (32 ビット単位)</item>
 /// <item>マスク付きの書き込み: wValue 下位 = 1 の制御 OUT。データ [0..3] = 値、[4..7] = マスクで、*アドレス = (*アドレス &amp; ~マスク) | (値 &amp; マスク)</item>
 /// <item>0x1000000 以上: 0x80000〜0x9FFFF を窓にして、boot0 のコードの中の LDI:32 の即値 (書く側 0xEA3D8、読む側 0xE9EBC。既定 0x00F00000) を
-///   書き換えて 128 KiB ずつ見る。使い終わったら既定に戻す</item>
+///   書き換えて 128 KiB ずつ読み書きする。使い終わったら既定に戻す</item>
 /// </list>
 ///
 /// 16 ビットのレジスタ (仕様書が「16 ビット」と書いたもの) は 4 の倍数のアドレスの 32 ビットのうち上半分か下半分にあるものとして、
 /// 読むときは 32 ビットで読んで切り出し、書くときはマスク付きの書き込みを使う。**仕様書に無い。** 32 ビット単位でしか書けない
 /// 制御転送で、隣の 16 ビットを壊さずに 16 ビットだけ書くために決めた (隣は読んだ値のまま書き戻される)。
-/// 窓を通す読み書き (0x1000000 以上) は 1 つのスレッドから使う。0x1000000 未満の読み書きと <see cref="Pump"/>・<see cref="RunI2c"/> は、
+/// 窓を通す読み書き (0x1000000 以上) は 1 つのスレッドから使う。0x1000000 未満の読み書きと、機材のプログラムへの要求 (<see cref="Pump"/>・<see cref="RunI2c"/>・<see cref="CardSend"/>・<see cref="CardReceive"/>) は、
 /// ほかのスレッドが同時に使ってよい (制御転送と、機材のプログラムへの要求と応答の組は、<c>_gate</c> で 1 つずつ通す)
 /// </summary>
 public sealed class Dt295NativeLink
@@ -70,11 +70,11 @@ public sealed class Dt295NativeLink
     // --- 24 ビットの範囲 ---
 
     /// <summary>
-    /// 制御転送 1 回ごとと、機材のプログラムへの要求と応答の組 (<see cref="Pump"/>・<see cref="RunI2c"/>) を、1 つのスレッドずつ通す。
-    /// 書き込みのデータも、機材のプログラムの要求と応答も、同じ 64 バイトの場所 (0xC4620。仕様書 3.1) を通るので、要求と応答の読みの間に
-    /// 別のスレッドが書き込むと、応答が壊れる (受信中にカードや信号の読みが入るとき)。
+    /// 制御転送 1 回ごとと、機材のプログラムへの要求と応答の組 (<see cref="Pump"/>・<see cref="RunI2c"/>・<see cref="CardSend"/>・<see cref="CardReceive"/>) を、1 つのスレッドずつ通す。
+    /// 書き込みのデータも、機材のプログラムの要求と応答も、同じ 64 バイトの場所 (0xC4620。仕様書 3.1) を通るので、要求と応答の読み出しの間に
+    /// 別のスレッドが書き込むと、応答が壊れる (受信中にカードや信号の読み出しが入るとき)。
     /// <see cref="Pump"/> は、要求したパケットを送り終える (またはリングが空のまま待つ回数の限度に達する) まで、このロックを持つ。
-    /// 30 Mbps では 512 パケットで約 70 ms で、低いビットレートでは待つ回数の限度で先に戻る。その間、カードや C/N の読みは待たされる
+    /// 30 Mbps では 512 パケットで約 70 ms で、低いビットレートでは待つ回数の限度で先に戻る。その間、カードや C/N の読み出しは待たされる
     /// </summary>
     private readonly Lock _gate = new();
 
@@ -187,14 +187,7 @@ public sealed class Dt295NativeLink
     public uint Read32(uint address)
     {
         Span<byte> data = stackalloc byte[4];
-        if (address < DirectEnd)
-        {
-            DirectRead(address, data);
-        }
-        else
-        {
-            DirectRead(Alias(address, ReadWindow, ref _readBank), data);
-        }
+        DirectRead(address < DirectEnd ? address : Alias(address, ReadWindow, ref _readBank), data);
         var result = BinaryPrimitives.ReadUInt32BigEndian(data);
         _trace?.Invoke($"読む 0x{address:X8} = 0x{result:X8}");
         return result;
@@ -208,16 +201,18 @@ public sealed class Dt295NativeLink
     public HashSet<uint> AllowedCoreWrites { get; } = [];
 
     /// <summary>
-    /// true なら、カードの UART (0xFEA000〜0xFEA03F。仕様書 §10) に書ける。カードの電源投入・切断の表と ATR・T=1 の送受信だけが使う。
-    /// 空き (false) のままなら書けない (仕様書に無い。USB コアのレジスタと同じく、使う所だけ明示して許す)
+    /// true なら、カードの UART (0xFEA000〜0xFEA03F。仕様書 10 章) に書ける。カードの電源投入・切断の表と ATR・T=1 の送受信だけが使う。
+    /// false のままなら書けない (仕様書に無い。USB コアのレジスタと同じく、使う所だけ明示して許す)。
+    /// 機材のプログラムに UART へ書かせる送り (<see cref="CardSend"/>) も、これが立っていなければ例外にして要求を出さない
     /// </summary>
     public bool AllowCardUart { get; set; }
 
     private int _cardBusy;
 
     /// <summary>
-    /// カードが読み書きの途中か。TS を流している間、機材のプログラムへの要求は終わるまで制御転送が返らないので、
-    /// カードの UART (受信 FIFO は 32 バイト) の読みが遅れる。カードが使っている間は、要求を小さくして遅れを短くする (<see cref="Dt295NativeStream"/>)
+    /// カードが読み書きの途中か。TS を流している間、機材のプログラムへの TS の要求は終わるまで制御転送が返らないので、
+    /// カードの応答 (受信 FIFO は 32 バイト。19200 ボーで約 17 ms で埋まる) を読むのが遅れる。カードが使っている間は、
+    /// TS の要求を小さくして遅れを短くする (<see cref="Dt295NativeStream.CardKickPackets"/>)
     /// </summary>
     public bool CardBusy => Volatile.Read(ref _cardBusy) > 0;
 
@@ -228,7 +223,7 @@ public sealed class Dt295NativeLink
 
     private void Guard(uint address)
     {
-        // カードの端子の向き・極性 (0xF00222〜0xF0022E。仕様書 §10 の設定確認) は、仕様書の常駐イメージも読んで確かめるだけ。書かない
+        // カードの端子の向き・極性 (0xF00222〜0xF0022E。仕様書 10 章の設定確認) は、仕様書の常駐イメージも読んで確かめるだけ。書かない
         if (address is >= 0xF00200 and <= 0xF002FF)
         {
             throw new Dt295NativeException($"0x{address:X} はカードの端子の向きのレジスタで、読むだけです。書きません");
@@ -333,10 +328,10 @@ public sealed class Dt295NativeLink
         }
     }
 
-    // --- 自前のプログラムへの要求 ---
+    // --- 機材に置いたプログラムへの要求 ---
 
     /// <summary>
-    /// 自前の body に要求を渡す (Dt295NativePrograms の「要求」)。制御 OUT で 64 バイトを渡し、戻ってから 0xC4620 の応答を読む。
+    /// 機材に置いた body に要求を渡す (Dt295NativePrograms の「要求」)。制御 OUT で 64 バイトを渡し、戻ってから 0xC4620 の応答を読む。
     /// body がパケットを送り終えるまで制御 OUT が終わらないので、時間切れは長くとる
     /// </summary>
     public NativeReply Pump(uint packets, uint idleLimit, int timeoutMs)
@@ -350,30 +345,14 @@ public sealed class Dt295NativeLink
 
     private NativeReply PumpLocked(uint packets, uint idleLimit, int timeoutMs)
     {
-        var request = new byte[64];
-        BinaryPrimitives.WriteUInt32BigEndian(request, Dt295NativePrograms.Magic);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(4), 1);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(8), packets);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(12), idleLimit);
-        Controls++;
         _trace?.Invoke($"要求 パケット {packets}、待つ回数 {idleLimit}");
-        try
-        {
-            _usb.ControlOut(RequestOut, Request, Dt295NativePrograms.RequestValue, Dt295NativePrograms.RequestIndex, request, timeoutMs);
-        }
-        catch (IOException)
-        {
-            Dead = true;
-            throw;
-        }
-        var reply = new byte[64];
-        DirectRead(Dt295NativePrograms.Staging, reply);
+        var reply = Call(NewRequest(1, packets, idleLimit), timeoutMs);
         uint Word(int at) => BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(at));
         return new NativeReply(Word(4), Word(8), Word(12), Word(16), Word(20), Word(24), Word(28));
     }
 
     /// <summary>
-    /// 機材の中で I2C の転送を順に行わせる (Dt295NativePrograms の操作 2)。<paramref name="ops"/> は <see cref="Dt295I2cBatch.Encode"/> の形式。
+    /// 機材の中で I2C の転送を順に実行させる (Dt295NativePrograms の操作 2)。<paramref name="ops"/> は <see cref="Dt295I2cBatch.Encode"/> の形式。
     /// 短ければ (操作列 32 バイト・結果 16 バイトまで) 要求の中に入れて、制御転送は要求と応答の 2 回で済む。
     /// 長ければ操作列を SDRAM (0x380000) に書き、結果もそこから読む。機材のプログラムが触るのは I2C のブロック (0xFD8FE0〜0xFD8FF0) だけ
     /// </summary>
@@ -392,30 +371,16 @@ public sealed class Dt295NativeLink
             ops.CopyTo(padded);
             WriteBytes(Dt295NativePrograms.BatchPhysical, padded);
         }
-        var request = new byte[64];
-        BinaryPrimitives.WriteUInt32BigEndian(request, Dt295NativePrograms.Magic);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(4), 2);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(8), inline ? Dt295NativePrograms.InlineOps : Dt295NativePrograms.BatchCpu);
-        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(12), inline ? Dt295NativePrograms.InlineResults : Dt295NativePrograms.BatchCpu + Dt295NativePrograms.BatchResultOffset);
+        var request = NewRequest(2, inline ? Dt295NativePrograms.InlineOps : Dt295NativePrograms.BatchCpu,
+            inline ? Dt295NativePrograms.InlineResults : Dt295NativePrograms.BatchCpu + Dt295NativePrograms.BatchResultOffset);
         BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(16), (uint)transfers);
         if (inline) ops.CopyTo(request.AsSpan((int)(Dt295NativePrograms.InlineOps - Dt295NativePrograms.Staging)));
-        Controls++;
         _trace?.Invoke($"I2C の順次実行 転送 {transfers}、操作列 {ops.Length} バイト");
-        try
-        {
-            _usb.ControlOut(RequestOut, Request, Dt295NativePrograms.RequestValue, Dt295NativePrograms.RequestIndex, request, ControlTimeoutMs);
-        }
-        catch (IOException)
-        {
-            Dead = true;
-            throw;
-        }
-        var reply = new byte[64];
-        DirectRead(Dt295NativePrograms.Staging, reply);
+        var reply = Call(request, ControlTimeoutMs);
         var code = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4));
         var index = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(8));
         var count = (int)BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(12));
-        if (count < 0 || count > Math.Max(readBytes, 0)) throw new Dt295NativeException($"I2C の順次実行が返した読みの数 {count} が想定 ({readBytes}) を超えています");
+        if (count < 0 || count > Math.Max(readBytes, 0)) throw new Dt295NativeException($"I2C の順次実行が返した読み出しの数 {count} が想定 ({readBytes}) を超えています");
         byte[] read = [];
         if (count > 0)
         {
@@ -428,7 +393,7 @@ public sealed class Dt295NativeLink
 
     /// <summary>
     /// 機材の中の I2C の順次実行が使えるか。転送 0 個の要求が結果 0 で戻ることと、操作列の置き場 (SDRAM の 0x380000) に書いたものが読めることを確かめる。
-    /// 使えなければ false で、ホストが 1 つずつ行う。書くのは置き場だけ (I2C のレジスタには触れない)
+    /// 使えなければ false で、ホストが 1 つずつ実行する。書くのは置き場だけ (I2C のレジスタには触れない)
     /// </summary>
     public bool ProbeI2cSequencer()
     {
@@ -445,10 +410,122 @@ public sealed class Dt295NativeLink
             return false;
         }
     }
+
+    /// <summary>機材のプログラムに 64 バイトの要求を渡し、0xC4620 の応答 64 バイトを読む。<c>_gate</c> を持って呼ぶ</summary>
+    private byte[] Call(byte[] request, int timeoutMs)
+    {
+        Controls++;
+        try
+        {
+            _usb.ControlOut(RequestOut, Request, Dt295NativePrograms.RequestValue, Dt295NativePrograms.RequestIndex, request, timeoutMs);
+        }
+        catch (IOException)
+        {
+            Dead = true;
+            throw;
+        }
+        var reply = new byte[64];
+        DirectRead(Dt295NativePrograms.Staging, reply);
+        return reply;
+    }
+
+    /// <summary>機材のプログラムへの要求 64 バイト: +0 'DNT1'、+4 操作の番号、+8・+12 操作ごとの値 (Dt295NativePrograms の「要求」)</summary>
+    private static byte[] NewRequest(uint operation, uint first, uint second)
+    {
+        var request = new byte[64];
+        BinaryPrimitives.WriteUInt32BigEndian(request, Dt295NativePrograms.Magic);
+        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(4), operation);
+        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(8), first);
+        BinaryPrimitives.WriteUInt32BigEndian(request.AsSpan(12), second);
+        return request;
+    }
+
+    /// <summary>
+    /// true なら、カードの送受信を機材のプログラムに実行させる (<see cref="CardSend"/>・<see cref="CardReceive"/>)。
+    /// 機材を開くとき、<see cref="ProbeCardProgram"/> で使えると確かめたら立てる。false なら、ホストがカードの UART を 1 バイトずつ読み書きする (<see cref="CardUart"/>)
+    /// </summary>
+    public bool CardProgram { get; set; }
+
+    /// <summary>
+    /// T=1 のブロックを LRC まで含めて、機材のプログラムに UART へ書かせて送らせる (Dt295NativePrograms の操作 3。<see cref="CardUart.Send"/> と同じ順に書く)。
+    /// 48 バイトまでは要求の中に入れ (制御転送は要求と応答の 2 回)、長ければ SDRAM (0x380000) に書いてから渡す。
+    /// カードの UART に書くので、<see cref="AllowCardUart"/> が立っていなければ例外にして要求を出さない
+    /// </summary>
+    public void CardSend(ReadOnlySpan<byte> block)
+    {
+        if (!AllowCardUart) throw new Dt295NativeException("カードの UART を許可していないので、ブロックを送りません");
+        if (block.IsEmpty || block.Length > Dt295NativePrograms.BatchLimit) throw new ArgumentOutOfRangeException(nameof(block));
+        using (Enter())
+        {
+            var inline = block.Length <= Dt295NativePrograms.InlineCardBytes;
+            if (!inline)
+            {
+                var padded = new byte[(block.Length + 3) & ~3];
+                block.CopyTo(padded);
+                WriteBytes(Dt295NativePrograms.BatchPhysical, padded);
+            }
+            var request = NewRequest(3, inline ? Dt295NativePrograms.InlineCard : Dt295NativePrograms.BatchCpu, (uint)block.Length);
+            if (inline) block.CopyTo(request.AsSpan((int)(Dt295NativePrograms.InlineCard - Dt295NativePrograms.Staging)));
+            _trace?.Invoke($"カードへ送る {block.Length} バイト");
+            var reply = Call(request, ControlTimeoutMs);
+            var code = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4));
+            var sent = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(8));
+            if (code != Dt295NativePrograms.CardOk || sent != block.Length)
+            {
+                throw new Dt295NativeException($"機材のプログラムがカードへ {block.Length} バイトを送れませんでした (結果 {code}、{sent} バイト)");
+            }
+        }
+    }
+
+    /// <summary>
+    /// カードから受けて読まれていないバイトを、<paramref name="max"/> (48 バイトまで) だけ機材のプログラムに読ませる (Dt295NativePrograms の操作 4)。
+    /// 無ければ空。待たずに戻る (<see cref="CardUart.Read"/> と同じ)。制御転送は要求と応答の 2 回
+    /// </summary>
+    public byte[] CardReceive(int max)
+    {
+        var limit = (uint)Math.Clamp(max, 0, Dt295NativePrograms.InlineCardBytes);
+        using (Enter())
+        {
+            var reply = Call(NewRequest(4, limit, 0), ControlTimeoutMs);
+            var code = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4));
+            var count = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(8));
+            if (code != Dt295NativePrograms.CardOk || count > limit)
+            {
+                throw new Dt295NativeException($"機材のプログラムがカードから受けたバイトを読めませんでした (結果 {code}、{count} バイト、上限 {limit})");
+            }
+            return reply.AsSpan((int)(Dt295NativePrograms.InlineCard - Dt295NativePrograms.Staging), (int)count).ToArray();
+        }
+    }
+
+    /// <summary>
+    /// 機材のプログラムでカードを送受信できるか。長さ 0 の送り (UART に触れない) と上限 0 の受け (受けた数だけ読む) が、
+    /// 結果 0・0 バイトで戻ることを確かめる。プログラムが動かなければ、要求がそのまま 0xC4620 に書かれて応答の +4 が操作の番号のまま残るので、false になる。
+    /// 長いブロックの置き場 (SDRAM) は <see cref="ProbeI2cSequencer"/> が確かめる
+    /// </summary>
+    public bool ProbeCardProgram()
+    {
+        try
+        {
+            using (Enter())
+            {
+                foreach (var request in new[] { NewRequest(3, Dt295NativePrograms.InlineCard, 0), NewRequest(4, 0, 0) })
+                {
+                    var reply = Call(request, ControlTimeoutMs);
+                    if (BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4)) != Dt295NativePrograms.CardOk) return false;
+                    if (BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(8)) != 0) return false;
+                }
+                return true;
+            }
+        }
+        catch (Dt295NativeException)
+        {
+            return false;
+        }
+    }
 }
 
 /// <summary>機材の中の I2C の順次実行 (Dt295NativePrograms の操作 2) の応答: 結果・止まった転送の番号・読んだバイト</summary>
 public sealed record I2cReply(uint Code, uint Index, byte[] Read);
 
-/// <summary>自前の body の応答 (Dt295NativePrograms の「応答」)</summary>
+/// <summary>機材に置いた body の応答 (Dt295NativePrograms の「応答」)</summary>
 public sealed record NativeReply(uint Result, uint Sent, uint ReadPosition, uint Alignment, uint PacketPosition, uint WritePosition, uint Aligned);

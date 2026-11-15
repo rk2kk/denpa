@@ -8,21 +8,22 @@ namespace Denpa.Agent;
 /// 手元の B-CAS カード。**カードに送る APDU はここで組み立てる。**
 ///
 /// <para>
-/// 使うコマンドは 4 つ。初期設定条件 (INT, <c>90 30</c>) で鍵を作るための定数を、
+/// 使うコマンドは 5 つ。初期設定条件 (INT, <c>90 30</c>) で鍵を作るための定数を、
 /// カード ID 情報 (IDI, <c>90 32</c>) でカードの番号を、ECM 受信 (<c>90 34</c>) で
-/// スクランブル鍵を、契約確認 (<c>90 3C</c>) で有料放送の契約の有無を貰う。**応答の読み方は libaribb25 と同じにしてある。**
+/// スクランブル鍵を、契約確認 (<c>90 3C</c>) で有料放送の契約の有無を受け取り、EMM 受信 (<c>90 36</c>) で
+/// 契約の更新を渡す。**応答の読み方は libaribb25 と同じにしてある。**
 /// 番号の出し方も鍵の順も、前と同じ値が出ないと画面の番号が変わって見える。
 /// </para>
 ///
 /// <para>
 /// **1 枚のカードを全部のチューナーで使い回す。** カードに触るのは順番に
-/// (<see cref="_gate"/>)。カードに聞くのは ECM の中身が変わったとき (鍵が変わるとき) だけなので、待たされても僅か。
+/// (<see cref="_gate"/>)。カードに問い合わせるのは ECM の中身が変わったとき (鍵が変わるとき) だけなので、待たされても僅か。
 /// </para>
 ///
 /// <para>
-/// **接続が切れたら繋ぎ直す。** カードを抜き差しした・リーダーを挿し直した・
-/// px4d を起こし直した、のどれでも、次の ECM で探し直して INT からやり直す。
-/// 1 回繋ぎ直して駄目なら理由を添えて投げる。
+/// **接続が切れたら繋ぎ直す。** カードを抜き差ししても、リーダーを挿し直しても、
+/// 次の ECM で探し直して INT からやり直す。
+/// 1 回繋ぎ直して駄目なら理由を添えた例外を送出する。
 /// </para>
 /// </summary>
 public sealed class BCas : IKeySource, IDisposable
@@ -39,11 +40,14 @@ public sealed class BCas : IKeySource, IDisposable
     /// <summary>契約確認の応答の最短 (SW1 SW2 込み)</summary>
     private const int ConfirmLength = 8;
 
+    /// <summary>EMM 受信の応答の最短 (SW1 SW2 込み)</summary>
+    private const int EmmLength = 8;
+
     /// <summary>INT が「正常」のときの返り値</summary>
     private const int InitOk = 0x2100;
 
     /// <summary>
-    /// ECM の応答が短かったときに**同じ接続で**送り直す回数。libaribb25 と同じ 2 回。
+    /// ECM・契約確認・EMM の応答が短かったときに**同じ接続で**送り直す回数。libaribb25 と同じ 2 回。
     /// カードがたまに短く返すことがあり、繋ぎ直すまでもなく次は通る
     /// </summary>
     private const int ShortRetries = 2;
@@ -67,11 +71,11 @@ public sealed class BCas : IKeySource, IDisposable
     private readonly Lock _gate = new();
 
     /// <summary>
-    /// 同じ ECM には同じ鍵。**同じチャンネルを見ているストリームが多いほど効く。**
+    /// 同じ ECM には同じ鍵。**同じチャンネルを受信しているストリームが多いほど効く。**
     ///
     /// <para>
     /// 録画・ライブ・番組表が同じ局にいれば、同じ ECM が同じ時刻に何本も来る。
-    /// カードに聞くのは最初の 1 本だけで、残りはロックの外で答えを持っていく。
+    /// カードに問い合わせるのは最初の 1 本だけで、残りはロックの外でキャッシュした鍵を使う。
     /// </para>
     /// </summary>
     private readonly ConcurrentDictionary<string, (EcmAnswer Answer, DateTimeOffset At)> _cache = new();
@@ -88,8 +92,8 @@ public sealed class BCas : IKeySource, IDisposable
     }
 
     /// <summary>
-    /// 見つかったリーダーを順に試し、**カードが挿さっていて INT に答えた最初の 1 つ**で開く。
-    /// どれも駄目なら理由を並べて投げる。
+    /// 見つかったリーダーを順に試し、**カードが挿さっていて INT に応答した最初の 1 つ**で開く。
+    /// どれも駄目なら理由を並べた例外を送出する。
     /// </summary>
     /// <param name="find">
     /// リーダーを探す。**繋ぎ直すたびに呼び直す。** 挿し直した USB リーダーは
@@ -113,14 +117,21 @@ public sealed class BCas : IKeySource, IDisposable
 
     /// <summary>
     /// 使っているリーダーが <paramref name="names"/> にあれば手放し、**すぐに次のリーダーで繋ぎ直す**
-    /// (画面で使わない設定にしたとき。<see cref="CardChoice"/>)。繋ぎ直せなくても投げない。
+    /// (画面で使わない設定にしたとき。<see cref="CardChoice"/>)。繋ぎ直せなくても例外を送出しない。
     /// 次の ECM で、ふだんと同じく探し直す
     /// </summary>
     public void Release(IReadOnlySet<string> names)
     {
         lock (_gate)
         {
-            if (_disposed || _link is null || !names.Contains(_link.Name)) return;
+            if (_disposed) return;
+            // 繋ぎ直しに失敗したあとなら、その記録を消して次の ECM ですぐ探し直す (壊れたリーダーを外したばかりかもしれない)
+            if (_link is null)
+            {
+                _failed = null;
+                return;
+            }
+            if (!names.Contains(_link.Name)) return;
             var was = _link.Name;
             Drop();
             _failed = null;
@@ -138,8 +149,8 @@ public sealed class BCas : IKeySource, IDisposable
     }
 
     /// <summary>
-    /// **いまカードと話せるか**、INT を 1 回通して確かめる (画面の「カードリーダー」行)。
-    /// 切れていれば繋ぎ直し、駄目なら投げる
+    /// **いまカードとやり取りできるか**、INT を 1 回通して確かめる (画面の「カードリーダー」行)。
+    /// 切れていれば繋ぎ直し、駄目なら例外を送出する
     /// </summary>
     public CardInit Check()
     {
@@ -150,7 +161,7 @@ public sealed class BCas : IKeySource, IDisposable
         }
     }
 
-    /// <summary>最後に繋いだときに読んだカードの素。**カードに触らない**</summary>
+    /// <summary>最後に繋いだときに読んだカードの定数。**カードに触らない**</summary>
     public CardInit Init()
     {
         lock (_gate)
@@ -169,14 +180,14 @@ public sealed class BCas : IKeySource, IDisposable
     /// </para>
     ///
     /// <para>
-    /// 契約が無いなどでカードが断ったときは投げずに <see cref="EcmAnswer.Code"/> で返す。
-    /// 投げるのはカードと話せなかったときだけ。
+    /// 契約が無いなどでカードが断ったときは例外にせず、<see cref="EcmAnswer.Code"/> で返す。
+    /// 例外を送出するのはカードとやり取りできなかったときだけ。
     /// </para>
     /// </summary>
     public EcmAnswer Ecm(ReadOnlySpan<byte> ecm)
     {
         // Lc は 1 バイト。**切り詰めて送ると別の ECM になる**ので、送らずに断る
-        if (ecm.Length is < 1 or > 255) throw new IOException($"ECM の長さがおかしいです ({ecm.Length} バイト)");
+        if (ecm.Length is < 1 or > CardWire.MaxEcm) throw new IOException($"ECM の長さがおかしいです ({ecm.Length} バイト)");
 
         var name = Convert.ToBase64String(ecm);
         if (Cached(name) is { } hit) return hit with { Cached = true };
@@ -190,25 +201,15 @@ public sealed class BCas : IKeySource, IDisposable
         var queued = Stopwatch.GetTimestamp();
         lock (_gate)
         {
-            // 別のストリームがカードと話し終えるのを待った時間 (選局の内訳の記録に出す)
+            // 別のストリームがカードとのやり取りを終えるのを待った時間 (選局の内訳の記録に出す)
             var waited = (long)Stopwatch.GetElapsedTime(queued).TotalMilliseconds;
-            // 待っている間に、同じ ECM を先に聞いたストリームがあるかもしれない
+            // 待っている間に、同じ ECM を先に問い合わせたストリームがあるかもしれない
             if (Cached(name) is { } again) return again with { Cached = true, WaitedMs = waited };
 
             var answer = Run(link =>
             {
-                var response = link.Transmit(apdu);
-                for (var retry = 0; retry < ShortRetries && response.Length < EcmLength; retry++)
-                {
-                    response = link.Transmit(apdu);
-                }
-                if (response.Length < EcmLength)
-                {
-                    // **接続は生きている。** 繋ぎ直しても同じ ECM には同じ答えなので、繋ぎ直さない
-                    throw new CardRefusedException($"カードが ECM に応答しません (応答 {response.Length} バイト)");
-                }
-                return new EcmAnswer(
-                    response[6..14], response[14..22], BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(4)));
+                var response = Transmit(link, apdu, EcmLength, " ECM ");
+                return new EcmAnswer(response[6..14], response[14..22], Code(response));
             });
 
             if (_cache.Count > 256) _cache.Clear();  // 溜め込まない。ECM は数秒で入れ替わる
@@ -223,41 +224,70 @@ public sealed class BCas : IKeySource, IDisposable
     /// <para>
     /// EIT の CA 契約情報記述子 (0xCB) に載っている verificationData と
     /// 対象日時 (MJD) をカードに渡し、返り値コード (0x0800: ティア有効など) を返す。
-    /// 選局せずにカード単体でミリ秒で答えを返す。
+    /// 選局せずにカード単体でミリ秒で応答を返す。
     /// </para>
     /// </summary>
     public int Confirm(ReadOnlySpan<byte> verificationData, ushort dateMjd)
     {
-        if (verificationData.Length is < 1 or > 253)
-            throw new IOException($"契約確認データの長さがおかしいです ({verificationData.Length} バイト)");
-
+        CardWire.CheckConfirm(verificationData);
         var apdu = new byte[verificationData.Length + 8];
         apdu[0] = 0x90;
         apdu[1] = 0x3C;
-        apdu[2] = 0x00;
-        apdu[3] = 0x00;
         apdu[4] = (byte)(verificationData.Length + 2);
         BinaryPrimitives.WriteUInt16BigEndian(apdu.AsSpan(5), dateMjd);
         verificationData.CopyTo(apdu.AsSpan(7));
-        apdu[^1] = 0x00;
+
+        lock (_gate) return Run(link => Code(Transmit(link, apdu, ConfirmLength, "契約確認")));
+    }
+
+    /// <summary>
+    /// EMM 受信 (<c>90 36</c>)。契約の更新を 1 つカードに渡し、返り値 (<c>0x2100</c> が正常終了) を返す。
+    ///
+    /// <para>
+    /// 渡すのは EMM セクションの中のペイロード 1 つ (カード ID から MAC まで丸ごと。libaribb25 の
+    /// <c>setup_emm_receive_command</c> と同じ)。応答の返り値は ECM・契約確認と同じ 5〜6 バイト目にある。
+    /// </para>
+    ///
+    /// <para>
+    /// **受け入れたら、キャッシュした ECM の応答を捨てる。** 契約が変わると、同じ ECM でも応答が変わる
+    /// (libaribb25 も EMM のあとに全部の ECM を問い合わせ直す)。
+    /// </para>
+    /// </summary>
+    public int Emm(ReadOnlySpan<byte> payload)
+    {
+        // Lc は 1 バイト。切り詰めて送ると別の EMM になるので、送らずに断る
+        if (payload.Length is < Denpa.Agent.Emm.MinPayload or > Denpa.Agent.Emm.MaxPayload)
+            throw new IOException($"EMM の長さがおかしいです ({payload.Length} バイト)");
+
+        var apdu = new byte[payload.Length + 6];
+        apdu[0] = 0x90;
+        apdu[1] = 0x36;
+        apdu[4] = (byte)payload.Length;
+        payload.CopyTo(apdu.AsSpan(5));
 
         lock (_gate)
         {
-            return Run(link =>
-            {
-                var response = link.Transmit(apdu);
-                for (var retry = 0; retry < ShortRetries && response.Length < ConfirmLength; retry++)
-                {
-                    response = link.Transmit(apdu);
-                }
-                if (response.Length < ConfirmLength)
-                {
-                    throw new CardRefusedException($"カードが契約確認に応答しません (応答 {response.Length} バイト)");
-                }
-                return BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(4));
-            });
+            var code = Run(link => Code(Transmit(link, apdu, EmmLength, " EMM ")));
+            if (code == Denpa.Agent.Emm.Accepted) _cache.Clear();
+            return code;
         }
     }
+
+    /// <summary>
+    /// 送って応答を受ける。応答が <paramref name="least"/> バイトより短ければ、**同じ接続で**送り直す (<see cref="ShortRetries"/>)。
+    /// それでも短ければ断る。**接続は生きている**ので繋ぎ直さない (繋ぎ直しても同じ要求には同じ応答)
+    /// </summary>
+    /// <param name="what">「カードが…に応答しません」に入れる要求の名前</param>
+    private static byte[] Transmit(ICardLink link, byte[] apdu, int least, string what)
+    {
+        var response = link.Transmit(apdu);
+        for (var retry = 0; retry < ShortRetries && response.Length < least; retry++) response = link.Transmit(apdu);
+        if (response.Length < least) throw new CardRefusedException($"カードが{what}に応答しません (応答 {response.Length} バイト)");
+        return response;
+    }
+
+    /// <summary>ECM・契約確認・EMM の応答の返り値。どれも 5〜6 バイト目にある</summary>
+    private static int Code(byte[] response) => BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(4));
 
     private EcmAnswer? Cached(string name) =>
         _cache.TryGetValue(name, out var cached) && _clock.GetUtcNow() - cached.At < CacheFor ? cached.Answer : null;
@@ -293,7 +323,7 @@ public sealed class BCas : IKeySource, IDisposable
         }
     }
 
-    /// <summary>探し直す。**しくじったら <see cref="RetryAfter"/> のあいだは探さずに同じ理由で断る**</summary>
+    /// <summary>探し直す。**失敗したら <see cref="RetryAfter"/> のあいだは探さずに同じ理由で断る**</summary>
     private void Reconnect()
     {
         if (_failed is { } failed && _clock.GetUtcNow() - failed.At < RetryAfter) throw failed.Error;
@@ -310,7 +340,7 @@ public sealed class BCas : IKeySource, IDisposable
     }
 
     /// <summary>
-    /// リーダーを探して、カードが答えた最初の 1 つを使う。INT と IDI もここで読む。
+    /// リーダーを探して、カードが応答した最初の 1 つを使う。INT と IDI もここで読む。
     /// **駄目だったリーダーの理由は全部残す。** 1 つ目が空で 2 つ目が壊れている、を
     /// 「カードが読めません」の 1 行で済ませると、どこを見ればよいか分からない
     /// </summary>
@@ -341,8 +371,8 @@ public sealed class BCas : IKeySource, IDisposable
     }
 
     /// <summary>
-    /// 開いた接続でカードに電源を入れ、INT と IDI を読む。**B-CAS でなければ投げる。**
-    /// 予備のリーダーを覗くのにも使う (Card.cs の Peek と、Probe.cs の CECH-ZD1 J のカード)
+    /// 開いた接続でカードに電源を入れ、INT と IDI を読む。**B-CAS でなければ例外を送出する。**
+    /// 予備のリーダーを確かめるのにも使う (Card.cs の Peek、Probe.cs の `--card zd1j:`・`--card dt295:`・`--card it930x:`、Dt295NativeProbe.cs)
     /// </summary>
     internal static CardInit Read(ICardLink link)
     {
@@ -359,7 +389,7 @@ public sealed class BCas : IKeySource, IDisposable
         }
         catch (Exception error)
         {
-            // もう切れている接続を閉じようとして投げることがある。捨てるのが目的なので構わない
+            // もう切れている接続は、閉じるときに例外を送出することがある。捨てるのが目的なので構わない
             Log.Write($"カードリーダーを閉じられません: {error.Message}");
         }
         _link = null;
@@ -377,7 +407,7 @@ public sealed class BCas : IKeySource, IDisposable
     {
         var response = link.Transmit([0x90, 0x30, 0x00, 0x00, 0x00]);
         if (response.Length < InitLength) throw new IOException($"INT の応答が短すぎます ({response.Length} バイト)");
-        var code = BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(4));
+        var code = Code(response);
         if (code != InitOk) throw new IOException($"INT を拒否されました (返り値 0x{code:x4})。B-CAS カードか確かめてください");
         return (response[16..48], response[48..56], BinaryPrimitives.ReadUInt16BigEndian(response.AsSpan(6)));
     }
@@ -425,5 +455,5 @@ public sealed class BCas : IKeySource, IDisposable
     }
 }
 
-/// <summary>カードは答えたが、使える答えではなかった。**接続の故障ではない**ので繋ぎ直さない</summary>
+/// <summary>カードは応答したが、使える応答ではなかった。**接続の故障ではない**ので繋ぎ直さない</summary>
 public sealed class CardRefusedException(string message) : Exception(message);

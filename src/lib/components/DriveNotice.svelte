@@ -6,7 +6,7 @@
    * 端末 (テスラ) で初めて canvas で再生する前 (ライブ・録画・追っかけ。押すまで再生を始めない)。
    * 押したら覚えて、二度目からは出さない (`seeDriveNotice`。覚えるのは呼ぶ側)。
    *
-   * 窓は `<dialog>` を `showModal` で開く。後ろを押させない・Esc で閉じる (取消と同じ扱い)。
+   * 窓は `<dialog>` を `showModal` で開く。後ろを押させない。Esc は取消があれば取消と同じ扱いで、無ければ閉じない。
    * 見た目は番組の詳細と同じ浮かぶ箱 (`app.css` の `.modal-box`・`.modal-actions`)。
    * 開いたらフォーカスは箱に置く。最初のボタン (取消) に置くと、押していないのに枠が付いて見える。
    * Tab で次はボタンへ進み、後ろへは出ない (モーダルの dialog なので)
@@ -20,7 +20,7 @@
   }: {
     open: boolean;
     onaccept: () => void;
-    /** 渡すと「取消」を出す (再生の設定 ⚙ で入れたとき)。渡さなければ「わかりました」だけ (再生の前) */
+    /** 渡すと「取消」を出す (再生の設定 ⚙ で入れたとき)。渡さなければ「了解」だけ (再生の前) */
     oncancel?: () => void;
   } = $props();
 
@@ -61,7 +61,7 @@
         >
       {/if}
       <button type="button" onclick={onaccept} data-testid="drive-notice-accept"
-        >わかりました</button
+        >了解</button
       >
     </footer>
   </article>

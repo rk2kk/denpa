@@ -1,5 +1,5 @@
 /**
- * エージェントの適合テスト。**本物のエージェントを起こして、HTTP の API に直接当てる。**
+ * エージェントの適合テスト。**本物のエージェントを起動して、HTTP の API に直接当てる。**
  *
  * denpa の E2E は偽エージェント (`tests/fake/agent.ts`) を相手にしているので、
  * 本物の取り合いも総当たりも 1 行も通らない。ここがその穴を塞ぐ。
@@ -15,7 +15,7 @@
  * 混ぜていた頃は、ビルドする前の CI がここで ENOENT を出して落ちていた。
  *
  * チューナーの代わりは `tests/fake/tune.ts` (`FAKE_TUNE`)。エージェントから見れば
- * 「起こすと TS を流し続ける子プロセス」で、取り合いと配り方はそのまま通る。
+ * 「起動すると TS を流し続ける子プロセス」で、取り合いと配り方はそのまま通る。
  *
  * 普通のポートは HTTPS だけで、組んだ denpa しか通さない (docs/agent.md「denpa とは TLS で組む」)。
  * ここでも denpa と同じく、自分の証明書を作って `POST /denpa/pair` で組んでから当てる。
@@ -54,7 +54,12 @@ type ChannelEntry = { type: string; channel: string };
 const AGENT_CMD = (process.env.AGENT_CMD ?? "agent/publish/denpa-agent").split(
   " ",
 );
-const PORT = Number(process.env.AGENT_TEST_PORT ?? 40881);
+/**
+ * 試すエージェントは、ここから 6 つ先までのポートで待ち受ける。**Linux のエフェメラルポート (既定は 32768〜60999) より下に置く。**
+ * 範囲の中 (40881) にあった頃は、止まれの合図のテストで立てるエージェント (40882) が CI で 2 度応答しなかった (2026-11-08・11-14)。
+ * それまでのテストの接続がクライアント側で 40882 を使っていて、待ち受けられずに落ちたと推定している (エージェントの出力を捨てていたので残っていない)
+ */
+const PORT = Number(process.env.AGENT_TEST_PORT ?? 28881);
 /** 鍵を配るポート (CARD_SHARE_PORT)。普通の API とは別 (agent/Denpa.Agent/CardShareServer.cs) */
 const SHARE_PORT = PORT + 3;
 const SHARE_BASE = `http://127.0.0.1:${SHARE_PORT}`;
@@ -67,7 +72,7 @@ const ROOT = resolve(import.meta.dir, "..");
  * 「空きが無い」も「優先度の低い相手に譲らせる」も作れない。総当たりが少し遅くなるだけで
  * 済むほうを取る。
  *
- * 選局は `FAKE_TUNE` で偽物に差し替える (エージェントが `<種別> <チャンネル>` を足して起こす)。
+ * 選局は `FAKE_TUNE` で偽物に差し替える (エージェントが `<種別> <チャンネル>` を足して起動する)。
  * 設定ファイルにも画面にもコマンドを書く場所は無く、環境変数からだけ入る。
  */
 const TUNE = `bun ${ROOT}/tests/fake/tune.ts`;
@@ -163,7 +168,7 @@ function identity(name: string): Identity {
   }
 }
 
-/** 起こしたエージェント。証明書は tls/agent.crt から読む (denpa はこれを ca にする) */
+/** 起動したエージェント。証明書は tls/agent.crt から読む (denpa はこれを ca にする) */
 interface Agent {
   base: string;
   tlsDir: string;
@@ -196,7 +201,7 @@ function call(
 
 /**
  * 組む。`client` は名乗る指紋 (既定は `as` のもの)。**接続は使い回さない。**
- * 別の証明書で張った接続に乗ると、エージェントが見る相手が変わってしまう
+ * 別の証明書で張った接続を使い回すと、エージェントが見る相手が変わってしまう
  */
 function pair(
   agent: Agent,
@@ -220,7 +225,7 @@ function pair(
   );
 }
 
-/** 起こしたエージェントが証明書を作って待ち受けるまで待ち、denpa の代わりで組む */
+/** 起動したエージェントが証明書を作って待ち受けるまで待ち、denpa の代わりで組む */
 async function ready(
   port: number,
   tlsDir: string,
@@ -230,8 +235,11 @@ async function ready(
 ): Promise<Agent> {
   const until = Date.now() + ms;
   for (;;) {
-    if (child.exitCode !== null)
-      throw new Error(`:${port} のエージェントが起動直後に落ちました`);
+    // シグナルで落ちたときは exitCode が null のまま (signalCode に入る)。見ないと、落ちたのに応答を待ち続ける
+    if (child.exitCode !== null || child.signalCode !== null)
+      throw new Error(
+        `:${port} のエージェントが起動直後に落ちました (${child.signalCode ?? `終了コード ${child.exitCode}`})`,
+      );
     try {
       const ca = readFileSync(join(tlsDir, "agent.crt"), "utf8");
       const agent = {
@@ -286,12 +294,13 @@ interface TunerStatus {
   lnb: string | null;
   channel: { type: string; channel: string } | null;
   users: { use: string; priority: number }[];
-  /** 受信の状態と C/N。使用中で、機材が測れるときだけ (TunerSignal.cs) */
+  /** 受信の状態と C/N と強度。使用中で、機材が測れるときだけ (TunerSignal.cs) */
   signal: {
     locked: boolean;
     cn: number | null;
     unit: "dB" | "raw";
     atTune: boolean;
+    strengthDbm: number | null;
   } | null;
 }
 
@@ -315,7 +324,7 @@ interface Opened {
   close: () => void;
 }
 
-/** 開けたものは全部覚えておく。テストが途中で落ちても後片付けできるように */
+/** 開けたものは全部控えておく。テストが途中で落ちても後片付けできるように */
 const opened = new Set<() => void>();
 
 async function open(query: string): Promise<Opened> {
@@ -351,7 +360,7 @@ async function drain(
 
 beforeAll(async () => {
   /*
-   * ビルドしていないだけなら、そうと言う。素の ENOENT は spawn の行しか出さず、
+   * ビルドしていないだけなら、そう書いたエラーで止める。素の ENOENT は spawn の行しか出さず、
    * 「何をビルドすればいいのか」がどこにも書かれていない
    */
   if (AGENT_CMD[0].includes("/") && !existsSync(resolve(ROOT, AGENT_CMD[0]))) {
@@ -467,6 +476,7 @@ describe("denpa と組む", () => {
       ["GET", "/denpa/stream?type=GR&channel=T16"],
       ["GET", "/denpa/nope"],
       ["GET", "/denpa/pair"],
+      ["DELETE", "/denpa/pair"],
       ["PUT", "/denpa/tuners"],
     ]) {
       const res = await call(
@@ -505,7 +515,7 @@ describe("denpa と組む", () => {
     expect(await error(res)).toBe("証明書が名乗りと違います");
   });
 
-  test("合言葉から作った proof なら組めて、エージェントも合言葉を知っていると返す", async () => {
+  test("合言葉から作った proof なら組めて、エージェントも合言葉から作った proof を返す", async () => {
     const newcomer = identity("newcomer");
     const res = await pair(main, newcomer);
     expect(res.status).toBe(200);
@@ -527,6 +537,30 @@ describe("denpa と組む", () => {
     expect(log).toContain(
       `denpa (${newcomer.fingerprint.slice(0, 16)}) と組みました`,
     );
+    // 2 つ目の denpa と組んだことはログに出す (断りはしない)
+    expect(log).toContain("ほかの denpa とも組んでいます");
+  });
+
+  test("DELETE /denpa/pair で呼んだ denpa の登録だけを消す", async () => {
+    const leaver = identity("leaver");
+    expect((await pair(main, leaver)).status).toBe(200);
+    const res = await call(
+      main,
+      "/denpa/pair",
+      { method: "DELETE", keepalive: false },
+      leaver,
+    );
+    expect(res.status).toBe(204);
+    expect(
+      (await call(main, "/denpa/tuners", { keepalive: false }, leaver)).status,
+    ).toBe(403);
+    // ほかの denpa はそのまま
+    expect(
+      (await call(main, "/denpa/tuners", { keepalive: false })).status,
+    ).toBe(200);
+    expect(readFileSync(join(paths().tls, "clients"), "utf8")).not.toContain(
+      leaver.fingerprint,
+    );
   });
 
   test("組む URL は組む前の起動のときだけ標準出力に出し、/denpa/logs には載せない", async () => {
@@ -536,7 +570,7 @@ describe("denpa と組む", () => {
   });
 
   /*
-   * インストーラが動いているエージェントの様子を見る入口。自分の証明書 (agent.key) で繋ぐので組まなくてよい
+   * インストーラが動いているエージェントの様子を見るコマンド。自分の証明書 (agent.key) で繋ぐので組まなくてよい
    * (agent.key を読めるのはその機械の管理者だけ)
    */
   test("--status は自分の証明書で繋いで /denpa/tuners をそのまま出す。繋がらなければ 1", async () => {
@@ -598,7 +632,7 @@ describe("denpa と組む", () => {
       }
       expect(printed()).toBe(first);
 
-      // 起こしても同じ証明書のまま、ファイルの合言葉で組める
+      // 起動し直しても同じ証明書のまま、ファイルの合言葉で組める
       const { agent: other, stop } = await spawnAgent(
         PORT + 2,
         { AGENT_PAIR_TOKEN: "" },
@@ -636,7 +670,7 @@ describe("チューナー", () => {
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
     const { value } = await reader.read();
     const chunk = value as Uint8Array;
-    // 188 バイト区切りの頭は必ず 0x47。ここが崩れていたら誰も読めない
+    // 188 バイト区切りの先頭は必ず 0x47。ここが崩れていたら誰も読めない
     expect(chunk[0]).toBe(SYNC);
     expect(chunk.byteLength % 188).toBe(0);
     aborter.abort();
@@ -644,6 +678,34 @@ describe("チューナー", () => {
 
   test("type と channel が無ければ 400", async () => {
     expect((await get("/denpa/stream?type=GR")).status).toBe(400);
+  });
+
+  /*
+   * 観る局 (`service`) を渡しても同じように流れる。エージェントはその局の PMT と鍵がそろえば流し始め、
+   * PAT に無い局なら全部の局を待つ (docs/agent.md「B25 の復号もカードリーダーも自前」)。番組番号でなければ 400
+   */
+  test("観る局を渡しても素の TS が流れ、番組番号でなければ 400", async () => {
+    const aborter = new AbortController();
+    const res = await get(
+      "/denpa/stream?type=GR&channel=T16&use=live%20GR%2FT16&priority=5&service=1024",
+      aborter.signal,
+    );
+    expect(res.status).toBe(200);
+    const { value } = await (res.body as ReadableStream<Uint8Array>)
+      .getReader()
+      .read();
+    expect((value as Uint8Array)[0]).toBe(SYNC);
+    aborter.abort();
+
+    for (const service of ["0", "65536", "abc"]) {
+      const refused = await get(
+        `/denpa/stream?type=GR&channel=T16&use=live&priority=5&service=${service}`,
+      );
+      expect({ service, status: refused.status }).toEqual({
+        service,
+        status: 400,
+      });
+    }
   });
 
   test("用途と優先度がそのまま見える", async () => {
@@ -749,7 +811,7 @@ describe("チューナー", () => {
 describe("通知 (SSE)", () => {
   /**
    * **繋いだ時点で応答が返る。** 何も起きていなくてもヘッダは先に送る。最初の
-   * 通知まで黙っていると、denpa の fetch は応答待ちのまま 5 分で切られ、
+   * 通知まで何も送らずにいると、denpa の fetch は応答待ちのまま 5 分で切られ、
    * 静かな時間帯に「チューナーに繋がりません」が鳴る (実機で 1 時間おきに鳴った)
    */
   test("何も起きていなくても、繋いだ時点で応答が返る", async () => {
@@ -761,7 +823,7 @@ describe("通知 (SSE)", () => {
     aborter.abort();
   });
 
-  test("チューナーが動くと tuners が飛ぶ", async () => {
+  test("チューナーが動くと tuners の通知が届く", async () => {
     const aborter = new AbortController();
     const res = await get("/denpa/events", aborter.signal);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
@@ -854,7 +916,7 @@ describe("チャンネル", () => {
 type LogLines = { lines: { at: number; text: string }[] };
 
 describe("診断", () => {
-  test("直近のログを古い順に返す。頭の [agent] は付けない", async () => {
+  test("直近のログを古い順に返す。先頭の [agent] は付けない", async () => {
     const res = await get("/denpa/logs");
     expect(res.status).toBe(200);
     const { lines } = (await res.json()) as LogLines;
@@ -887,6 +949,9 @@ describe("診断", () => {
           : "linux",
     );
     expect(about["arch"]).toBe(process.arch === "arm64" ? "arm64" : "x64");
+    // 画面に出す名前の元。AGENT_NAME を渡していないので機械の名前
+    expect(typeof about["name"]).toBe("string");
+    expect((about["name"] as string).length).toBeGreaterThan(0);
     expect(typeof about["runtime"]).toBe("string");
     expect((about["runtime"] as string).length).toBeGreaterThan(0);
     if (process.platform === "darwin")
@@ -924,8 +989,8 @@ function expectReader(reader: CardReader) {
 }
 
 /**
- * 別のエージェントを起こして組み、`/denpa/card` を読む。止めるのは呼んだ側 (`stop`)。
- * `room` を渡せばその置き場で起こす (片付けはしない)。`token` が null なら tls/pair-token の合言葉で組む
+ * 別のエージェントを起動して組み、`/denpa/card` を読む。止めるのは呼んだ側 (`stop`)。
+ * `room` を渡せばその置き場で起動する (片付けはしない)。`token` が null なら tls/pair-token の合言葉で組む
  */
 async function spawnAgent(
   port: number,
@@ -951,8 +1016,16 @@ async function spawnAgent(
       ...env,
     },
     stdout: "pipe",
-    stderr: "ignore",
+    stderr: "pipe",
   });
+  // 出力は読み続ける (読まないとパイプが埋まってエージェントが止まる)。起動できなかったときに理由として添える
+  let output = "";
+  const drain = (stream: ReadableStream<Uint8Array>) =>
+    (async () => {
+      for await (const chunk of stream)
+        output += new TextDecoder().decode(chunk);
+    })();
+  const drained = Promise.all([drain(other.stdout), drain(other.stderr)]);
   const stop = async () => {
     other.kill("SIGKILL");
     await other.exited;
@@ -966,19 +1039,20 @@ async function spawnAgent(
     return { card, agent, other, stop };
   } catch (error) {
     await stop();
-    throw error;
+    await drained;
+    throw new Error(`${(error as Error).message}:\n${output}`);
   }
 }
 
 describe("カードとスクランブルの復号", () => {
   test("カードリーダーの様子を返す", async () => {
     const card = (await (await get("/denpa/card")).json()) as CardStatus;
-    // 手元にリーダーは無い。**それでも答えは返る**ことが大事
+    // 手元にリーダーは無い。**それでも応答は返る**ことが大事
     expect(typeof card.ok).toBe("boolean");
     expect(typeof card.message).toBe("string");
     expect(card.source).toBe("local");
     expect(Array.isArray(card.readers)).toBe(true);
-    // 読めていないときは理由を言う。読めているなら一言は空 (名前と番号は表に出る)
+    // 読めていないときは理由を返す。読めているなら一言は空 (名前と番号は表に出る)
     if (!card.ok) expect(card.message.length).toBeGreaterThan(0);
     for (const reader of card.readers) expectReader(reader);
     // 使うカードは 1 枚だけ
@@ -1008,15 +1082,15 @@ describe("カードとスクランブルの復号", () => {
       (await fetch(`http://[::1]:${SHARE_PORT}/denpa/card/init`)).status,
     ).toBe(503);
 
-    // 専用のポートでは、普通の API は答えない
+    // 専用のポートでは、普通の API は応答しない
     expect((await fetch(`${SHARE_BASE}/denpa/tuners`)).status).toBe(404);
     expect((await fetch(`${SHARE_BASE}/denpa/card`)).status).toBe(404);
   });
 
-  test("鍵を配る相手から貰うときは、その相手を返す", async () => {
+  test("鍵を配る相手から受け取るときは、その相手を返す", async () => {
     /*
-     * CARD_URL を立てたもう 1 つを起こし、こちら (カードの無いエージェント) の
-     * 鍵を配るポートを配り役にする。貰えなくても**形式は同じ**で、手元のリーダーは並べない
+     * CARD_URL を立てたもう 1 つを起動し、こちら (カードの無いエージェント) の
+     * 鍵を配るポートを配る側にする。受け取れなくても**形式は同じ**で、手元のリーダーは並べない
      */
     const { card, stop } = await spawnAgent(PORT + 2, { CARD_URL: SHARE_BASE });
     try {
@@ -1035,7 +1109,7 @@ describe("カードとスクランブルの復号", () => {
 
   test("鍵を配る範囲の外には 403 で断り、受け取る側は理由を出す", async () => {
     /*
-     * ループバックを範囲から外した配り役を起こす。ここから繋ぐと範囲の外になる。
+     * ループバックを範囲から外した配る側を起動する。ここから繋ぐと範囲の外になる。
      * それを CARD_URL にした受け取り役の画面には、断られた理由が出る
      */
     const sharePort = PORT + 4;
@@ -1071,7 +1145,7 @@ describe("カードとスクランブルの復号", () => {
   }, 30_000);
 
   test("往復時間の上限を付けても、近い相手には配る", async () => {
-    // 往復時間は受けた接続のソケットから OS に聞く。読めなければ 403 になるので、ここで届いていることを見る
+    // 往復時間は受けた接続のソケットから OS に問い合わせる。読めなければ 403 になるので、ここで届いていることを見る
     const sharePort = PORT + 4;
     const { stop } = await spawnAgent(PORT + 2, {
       CARD_SHARE_PORT: String(sharePort),
@@ -1098,7 +1172,7 @@ describe("カードとスクランブルの復号", () => {
   ])(
     "読めない設定や広すぎる設定なら起動しない (%s=%s)",
     async (name, value) => {
-      // 書き間違えた範囲を黙って既定に戻さない
+      // 書き間違えた範囲を、何も出さずに既定に戻さない
       const room = mkdtempSync(join(tmpdir(), "denpa-agent-bad-"));
       try {
         const bad = Bun.spawn(AGENT_CMD, {
@@ -1158,14 +1232,14 @@ describe("カードとスクランブルの復号", () => {
 
   /*
    * **カードが無ければ復号できない。** ここにリーダーは無いので、確かめるのは
-   * 「復号できたか」ではなく **黙って壊れないこと。** 復号できなければ理由が返り、
-   * 復号できたなら掛かっていない TS が出る。
+   * 「復号できたか」ではなく **理由を返さずに壊れないこと。** 復号できなければ理由が返り、
+   * 復号できたならスクランブルされていない TS が出る。
    *
    * 復号するのもカードを扱うのもエージェントの中なので、外から偽物を差し込めない
-   * (`recisdb` を起こしていた頃はそこを差し替えて試せた)。復号のしかたそのものは
+   * (`recisdb` を起動していた頃はそこを差し替えて試せた)。復号のしかたそのものは
    * 単体テスト (B25Tests / BCasTests) で、実際に復号できることは実機で確かめる (docs/agent.md)。
    */
-  test("掛かったままの TS は、復号できるか理由が返るかのどちらか", async () => {
+  test("スクランブルされたままの TS は、復号できるか理由が返るかのどちらか", async () => {
     const packet = new Uint8Array(188 * 2);
     for (let i = 0; i < 2; i++) {
       packet[i * 188] = SYNC;
@@ -1188,9 +1262,56 @@ describe("カードとスクランブルの復号", () => {
   });
 });
 
-test("知らないエンドポイントは 404", async () => {
+test("存在しないエンドポイントは 404", async () => {
   expect((await get("/denpa/nope")).status).toBe(404);
 });
+
+/*
+ * **待ち受けるポートが使われていたら、理由を出して 2 で終わる。** 例外のまま落ちていた頃は SIGABRT で終わり、
+ * 終了コードが残らなかった (立てた側は落ちたことに気づけない)
+ */
+test.each([
+  // どちらも上で立てたエージェントが使っている
+  ["AGENT_PORT", { AGENT_PORT: String(PORT) }, PORT],
+  [
+    "CARD_SHARE_PORT",
+    { AGENT_PORT: String(PORT + 2), CARD_SHARE_PORT: String(SHARE_PORT) },
+    SHARE_PORT,
+  ],
+] as const)(
+  "待ち受けるポートをほかのソフトが使っていれば、理由を出して 2 で終わる (%s)",
+  async (_, ports, busyPort) => {
+    const room = mkdtempSync(join(tmpdir(), "denpa-agent-busy-"));
+    try {
+      const busy = Bun.spawn(AGENT_CMD, {
+        cwd: ROOT,
+        env: {
+          ...process.env,
+          TUNERS_FILE: join(room, "tuners.json"),
+          CHANNELS_FILE: join(room, "channels.json"),
+          RAW_DIR: join(room, "recorded"),
+          FAKE_TUNE: TUNE,
+          AGENT_PAIR_TOKEN: TOKEN,
+          ...ports,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, out] = await Promise.all([
+        busy.exited,
+        new Response(busy.stdout).text(),
+        new Response(busy.stderr).text(),
+      ]);
+      expect(busy.signalCode).toBeNull();
+      expect(code).toBe(2);
+      expect(out).toContain("ほかのソフトが使っています");
+      expect(out).toContain(`:${busyPort}`);
+    } finally {
+      rmSync(room, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
 
 /*
  * **後ろのほうに置く。** 定義を書き換えると、前のテストが当てにしている
@@ -1269,7 +1390,7 @@ describe("機材の定義", () => {
       });
       expect(put.status).toBe(200);
       const ranks = new Map((await tuners()).map((t) => [t.name, t.rank]));
-      // 場面が前提にしている順位で返しているか。違えば、下の答えも当てにならない
+      // 場面が前提にしている順位で返しているか。違えば、下の結果も当てにならない
       expect(scene.tuners.map((t) => ranks.get(t.name))).toEqual(
         scene.tuners.map((t) => t.rank),
       );
@@ -1358,7 +1479,7 @@ describe("機材の定義", () => {
  * **別のエージェントを 1 つ立てて試す。** 上の一式を止めてしまうと、
  * 残りのテストが相手を失う。
  */
-describe("止まれと言われたとき", () => {
+describe("止まれの合図を受けたとき", () => {
   const PORT2 = PORT + 1;
   /** いま立てているほう (`spawnOther`) */
   let second: Agent;
@@ -1390,7 +1511,7 @@ describe("止まれと言われたとき", () => {
     return other.exitCode !== null;
   };
 
-  test("録画の選局が開いている間は生きていて、離すと落ちる", async () => {
+  test("録画の選局が開いている間は動き続け、離すと終わる", async () => {
     const { other, stop } = await spawnOther();
     try {
       const rec = await openOn(
@@ -1438,10 +1559,10 @@ describe("止まれと言われたとき", () => {
 
   /*
    * **止まる途中に来た選局も受ける** (Program.cs の Drain)。断っていた頃は、入れ替えの最中に始まる
-   * 録画の頭が欠けた。Recreate なので新しい Pod はこちらが終わるまで立たず、断っても誰も録れない。
+   * 録画の先頭が欠けた。Recreate なので新しい Pod はこちらが終わるまで立たず、断っても誰も録れない。
    * ライブは受けるが、それを理由には待たない
    */
-  test("止まる途中に来た録画の選局は受けて、録り終えるまで居座る", async () => {
+  test("止まる途中に来た録画の選局は受けて、録り終えるまで止まらない", async () => {
     const { other, stop } = await spawnOther();
     try {
       const first = await openOn(
@@ -1480,7 +1601,7 @@ describe("止まれと言われたとき", () => {
 
   /*
    * **録画が無ければすぐ落ちる。** 通知を開きっぱなしにされると、Kestrel が 30 秒 (既定の ShutdownTimeout)
-   * 待ち受けだけ閉じて待っていた。そのぶん入れ替えの隙間が伸び、実機では録画の頭が約 35 秒欠けた
+   * 待ち受けだけ閉じて待っていた。そのぶん入れ替えの隙間が伸び、実機では録画の先頭が約 35 秒欠けた
    */
   test("録画が無ければ、通知や番組表の選局が開いていてもすぐ落ちる", async () => {
     const { other, stop } = await spawnOther();

@@ -39,7 +39,7 @@ export function seriesFolder(series: string, name: string): string {
  * 保存先での相対パスを組む。`シリーズ名/シリーズ名 - YYYY-MM-DD - HHMM 副題{ext}`。
  *
  * シリーズ名のフォルダにまとめるのは**ディスク上で見やすくするため**。
- * 隣にはサムネ (`-poster.jpg`) を録画ごとに置く (metadata.ts)。
+ * 隣にはサムネイル (`-poster.jpg`) を録画ごとに置く (metadata.ts)。
  *
  * 日時はプロセスの TZ (compose・Helm・インストーラが Asia/Tokyo を渡す) のローカル時刻。放送日で並ぶのが期待値なので UTC にはしない。
  */
@@ -161,8 +161,8 @@ export function libraryFamily(rec: LibraryNameInput): string[] {
   return exts.map((ext) => join(config.encodedDir, libraryRelPath(rec, ext)));
 }
 
-/** 元の TS の置き場。保存先と違い人が見るものではないので平置きでよい */
-export function recordedPath(rec: LibraryNameInput, ext = ".m2ts"): string {
+/** 元の録画の置き場 (TS の局は `.m2ts`、4K の局は `.mmts`)。保存先と違い人が見るものではないので平置きでよい */
+export function recordedPath(rec: LibraryNameInput, ext: string): string {
   const d = new Date(rec.start_at);
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   return join(

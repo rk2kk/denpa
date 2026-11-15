@@ -1,8 +1,15 @@
 import { fail } from "@sveltejs/kit";
 
 import { channelNotice } from "#lib/channel-notice.js";
-import { channelAlert } from "#lib/server/channel-alert.js";
-import { serviceCounts, watchableServices } from "#lib/server/epg.js";
+import { parseId } from "#lib/id.js";
+import { agentCount } from "#lib/server/agents.js";
+import { reserveWarning } from "#lib/server/contracts.js";
+import {
+  listedServices,
+  serviceCounts,
+  unwatchableServices,
+  watchableServices,
+} from "#lib/server/epg.js";
 import {
   broadcastDayStart,
   daysOf,
@@ -13,10 +20,10 @@ import {
 } from "#lib/server/guide.js";
 import { cancelProgram, reserveFromForm } from "#lib/server/reservations.js";
 import { storedSubchannels, SUBCHANNELS_COOKIE } from "#lib/subchannels.js";
-import { CHANNEL_TYPES } from "#lib/types.js";
+import { GUIDE_TYPES, guideTabs } from "#lib/types.js";
 
 /**
- * 時間×チャンネルのグリッドの外枠。並びを眺めて選ぶとき用
+ * 時間×局のグリッドの外枠。並びを眺めて選ぶとき用
  * (言葉で探すのはサイト全体の検索 `/search` に寄せてある)。
  *
  * **番組 (マス) はここで返さない。** 画面が `/api/guide` から後で取る (`+page.ts`)。
@@ -25,7 +32,7 @@ import { CHANNEL_TYPES } from "#lib/types.js";
  */
 export function load({ url, cookies }) {
   const type =
-    CHANNEL_TYPES.find((t) => t === url.searchParams.get("type")) ?? "GR";
+    GUIDE_TYPES.find((t) => t === url.searchParams.get("type")) ?? "GR";
 
   // 既定は今日の放送日。めくるときだけ start が付く
   const start = requestedDay(url.searchParams.get("start"));
@@ -57,11 +64,16 @@ export function load({ url, cookies }) {
     split,
     // 詳細の「視聴」を出すかどうか。決め方はライブ画面と揃えてある (watchableServices)
     watchable: watchableServices(Date.now()),
+    /** 番組表に出すが観られない局と、そのわけ (`unwatchableServices`)。列の「観られません」と、詳細で予約とライブの代わりに出す */
+    unwatchable: unwatchableServices(),
     /** サブチャンネルも出すか (`#lib/subchannels.ts`)。端末ごとに覚える */
     subchannels: storedSubchannels(cookies.get(SUBCHANNELS_COOKIE)),
     typeEmpty,
-    channelNotice: typeEmpty ? null : channelNotice(counts),
-    channelAlert: channelAlert(),
+    /** 種別のタブ (`guideTabs`)。CATV と SKY は番組表に出す局があるときだけ */
+    types: guideTabs(counts, type),
+    channelNotice: typeEmpty
+      ? null
+      : channelNotice(counts, listedServices(), agentCount()),
   };
 }
 
@@ -69,9 +81,8 @@ export const actions = {
   /** 番組表から予約を止める。予約一覧まで行かずに済むように */
   cancel: async ({ request }) => {
     const form = await request.formData();
-    const programId = Number(form.get("programId"));
-    if (!Number.isSafeInteger(programId))
-      return fail(400, { message: "番組 ID が不正です" });
+    const programId = parseId(form.get("programId"));
+    if (programId === null) return fail(400, { message: "番組 ID が不正です" });
     // アプリの `DELETE /api/programs/<id>/record` と同じ処理
     const result = await cancelProgram(programId);
     if (!result.ok) return fail(result.status, { message: result.message });
@@ -81,14 +92,16 @@ export const actions = {
   /**
    * 番組表から予約する。
    *
-   * 録画のしかた(エンコードするか・元の TS を残すか)はここでは選ばせない。
+   * 録画のしかた (エンコードするか・元の TS を残すか) はここでは選ばせない。
    * 設定画面の 1 箇所で決める (docs/app.md)。番組ごとに変えたくなることが
    * 実際にはほとんど無いのに、同じ選択肢が予約・ルール・設定の 3 箇所にあると
    * 「どれで決まったのか」が分からなくなる
    */
   reserve: async ({ request }) => {
-    const refused = await reserveFromForm(await request.formData());
-    if (refused !== null) return fail(400, { message: refused });
-    return { success: true };
+    const form = await request.formData();
+    const reserved = await reserveFromForm(form);
+    if ("refused" in reserved) return fail(400, { message: reserved.refused });
+    // 有料の番組で、録ってよい局と確かめていなければ知らせる (予約はそのまま。`contracts.reserveWarning`)
+    return { success: true, warning: reserveWarning(reserved.programId) };
   },
 };

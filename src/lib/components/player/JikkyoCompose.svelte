@@ -17,6 +17,7 @@
     caughtUp,
     graphemes,
     MAX_LENGTH,
+    POST_GAP,
     refusal,
     SHOW_LEFT,
     spacing,
@@ -30,7 +31,7 @@
    * **実況に書き込む 1 行** (ライブだけ。決まりは docs/watch.md の「実況に書き込む」)。ニコニコと連携している世帯 (`official`) では
    * 公式のニコニコ実況へ (denpa のサーバ経由。`official.ts`)、ほかは NX-Jikkyo へ (`nx.ts`) 送る。書き先を選ぶ設定は無い
    *
-   * - 「ニコニコ実況に書きます」か「NX-Jikkyo に書きます」・入力欄・色などを選ぶボタン・「送る」・✕ を 1 つのカプセルに並べる。書けないときと失敗したときは、
+   * - 「ニコニコ実況に書きます」か「NX-Jikkyo に書きます」・入力欄・色などを選ぶボタン・「送信」・✕ を 1 つのカプセルに並べる。書けないときと失敗したときは、
    *   先頭の字をその理由 1 行に替える (トーストは出さない)
    * - Enter で送る (変換中は送らない)。Esc か ✕ で閉じる (一覧の下では一覧ごとしまう)。送れたら欄を空にし、失敗したら残す。自動で送り直さない
    * - 色・位置・大きさは、パレットのボタンで開く選択の行で選ぶ。端末ごとに覚える (`JIKKYO_STYLE_KEY`)
@@ -82,11 +83,12 @@
   const POSITION_NAMES = { ue: "上", naka: "流れる", shita: "下" } as const;
   const SIZE_NAMES = { big: "大", medium: "中", small: "小" } as const;
   /** 先頭の 1 行のいつもの表示と、書けない理由 (何か所かで出す) */
-  const IDLE = $derived(
+  const idle = $derived(
     official ? "ニコニコ実況に書きます" : "NX-Jikkyo に書きます",
   );
   const BEHIND = "ライブに戻ると書けます";
-  const CLOSED = "(いまは書けません)";
+  const WAIT = `${POST_GAP / 1000} 秒待ってください`;
+  const CLOSED = "実況に繋がっていないため、書けません";
   const UNLINKED =
     "ニコニコとの連携が切れました。設定の「連携」で連携し直してください";
 
@@ -150,9 +152,9 @@
             : CLOSED
           : why !== null && why !== ""
             ? why
-            : IDLE,
+            : idle,
   );
-  const warn = $derived(line !== IDLE);
+  const warn = $derived(line !== idle);
 
   function choose(next: Partial<PostStyle>): void {
     style = { ...style, ...next };
@@ -174,7 +176,7 @@
     }
     if (!caught) return tell(BEHIND);
     const now = Date.now();
-    if (spacing.left(now) > 0) return tell("3 秒待ってください");
+    if (spacing.left(now) > 0) return tell(WAIT);
     if (!writable()) return tell(unlinked ? UNLINKED : CLOSED);
     spacing.mark(now);
     busy = true;
@@ -209,7 +211,7 @@
         tell(UNLINKED);
         break;
       case "wait":
-        tell("3 秒待ってください");
+        tell(WAIT);
         break;
     }
   }
@@ -323,7 +325,7 @@
       class="send"
       disabled={busy || why !== null}
       onclick={() => void send()}
-      data-testid="jikkyo-compose-send">送る</button
+      data-testid="jikkyo-compose-send">送信</button
     >
     {#if !panel}
       <button
@@ -351,8 +353,10 @@
     --c-on: var(--dp-on-video-on);
     --c-hover: var(--dp-on-video-hover);
     --c-face: var(--dp-video-menu);
-    --c-field: rgb(255 255 255 / 0.12);
+    --c-field: color-mix(in srgb, var(--dp-on-video) 12%, transparent);
     --c-shadow: var(--dp-video-shadow);
+    /* 焦点の線。映像の上はテーマで変えない (`app.css` の `--dp-video-focus`) */
+    --c-focus: var(--dp-video-focus);
     display: flex;
     flex-direction: column;
     gap: var(--dp-space-1);
@@ -367,6 +371,7 @@
     --c-face: transparent;
     --c-field: var(--dp-field);
     --c-shadow: none;
+    --c-focus: var(--pico-primary);
     /* 選ぶ行と先頭の字の間も、選ぶ行のまとまりの間と同じくらい空ける (詰めると選ぶ行の続きに見えた) */
     gap: var(--dp-space-3);
     margin: var(--dp-space-2) 0 0;
@@ -467,8 +472,11 @@
     color: var(--c-muted);
   }
   input:focus-visible {
-    outline: 2px solid var(--c-on);
+    outline: 2px solid var(--c-focus);
     outline-offset: 0;
+  }
+  button:focus-visible {
+    outline-color: var(--c-focus);
   }
   .left {
     font-size: var(--dp-text-xs);
@@ -512,7 +520,7 @@
   }
   .tint {
     display: inline-flex;
-    filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.6));
+    filter: var(--dp-on-video-ink);
   }
   .choice {
     background: var(--pico-background-color);
@@ -525,6 +533,6 @@
     width: 1.25rem;
     height: 1.25rem;
     border-radius: 50%;
-    box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--dp-video) 50%, transparent);
   }
 </style>

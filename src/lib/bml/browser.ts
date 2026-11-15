@@ -1,11 +1,11 @@
 /**
  * `browser.*` (STD-B24 第二編 付属 2 7 章の拡張関数)。実際の放送が呼ぶもの (9 局 16 本で 53 種) を
  * 全部持ち、**動かせないものは規格どおり「失敗」を返す** (NaN・null・0)。呼ばれても例外は投げない。
- * 放送のアプリはその返事を見て「この機能はありません」と案内する。
+ * 放送のアプリはその戻り値を見て「この機能はありません」と案内する。
  *
  * 動かさないもの: 外のアプリ・予約・電話回線 (PPP)。選局 (epgTune) と Hybridcast の起動
  * (startAITControlledApp) は denpa の画面に任せる (エンジンは「この局へ」「アプリを」と知らせるだけ)。
- * Hybridcast を開けない (双方向がオフ・AIT にアプリが無い) ときは、AIT の問い合わせに 0 と答える。
+ * Hybridcast を開けない (双方向がオフ・データ放送を開いていない・AIT にアプリが無い) ときは、AIT の問い合わせに 0 と答える (XML の AIT を取得できるときは除く)。
  *
  * 通信の文書 (http・https から取った文書) からは、NVRAM の局の領域を読み書きさせない。使えるのは
  * 通信の文書向けの `nvram://local_web/` と、受信機の設定 (`nvram://receiverinfo/`) を読むことだけ
@@ -31,6 +31,7 @@ import {
   JSDate,
   JSFunction,
   JSObject,
+  MAX_ARRAY,
   type NativeResult,
   Suspend,
   toNumber,
@@ -57,7 +58,7 @@ export interface BmlIp {
   } | null>;
   /**
    * 通信の文書と、その中の画像・CSS・script を取る (`launchDocument("https://…")`)。相手の返した
-   * 符号と中身をそのまま返す。中継が断った (相手まで行けなかった) なら null
+   * ステータスコードと中身をそのまま返す。中継が断った (相手まで行けなかった) なら null
    */
   get(
     uri: string,
@@ -87,12 +88,14 @@ export interface BrowserHost {
   screen(locked: boolean): void;
   lock(module: string, kind: LockKind): number;
   unlock(module: string, kind?: LockKind): boolean;
+  /** 押さえたものを全部外す。名前を引き直さないので、通信の文書から呼んでも外れる */
+  unlockAll(): void;
   locked(): [string, boolean, boolean][];
   detect(component: string): number;
   loadDrcs(ref: string): NativeResult;
   binaryTable(ref: string): Promise<Uint8Array | null>;
   log(message: string): void;
-  /** Hybridcast のアプリを開けるか (双方向がオンで、AIT にアプリがある)。無ければ開けない */
+  /** Hybridcast のアプリを開けるか (双方向がオンで、データ放送を開いていて、AIT にアプリがある)。無ければ開けない */
   canStartApp?(): boolean;
   /**
    * Hybridcast のアプリを開く (startAITControlledApp)。`hint` は数の引数 (どのアプリかの手がかり。
@@ -100,7 +103,7 @@ export interface BrowserHost {
    */
   startApp?(hint: number[]): boolean;
   /**
-   * XML の AIT を取得できるか (双方向がオン)。**電波に AIT が無くても開ける局がある。** NHK は AIT を電波に載せず、
+   * XML の AIT を取得できるか (双方向がオンで、データ放送を開いている)。**電波に AIT が無くても開ける局がある。** NHK は AIT を電波に載せず、
    * 文書が XML の AIT の URL を渡してくる (`AITTransportMethod` の XML・HTTP を訊く)
    */
   canFetchAit?(): boolean;
@@ -111,7 +114,7 @@ export interface BrowserHost {
 /**
  * getBrowserSupport の APIGroup で「ある」と答えるもの。組の中身は STD-B24 第二編 付属 1 表 11-2 で、
  * **ここで動く関数の組だけ**を挙げる。無いと答えるもの: Com.IP.Connect・Com.IP.Params (PPP)・
- * Ctrl.AppVersion (getResidentAppVersion は null)・Ctrl.startExtraBrowser・EPG.Basic2 (epgTuneToComponent)。
+ * Ctrl.AppVersion (getResidentAppVersion は null)・Ctrl.NPT (NPT は無く、getNPT は NaN)・Ctrl.startExtraBrowser・EPG.Basic2 (epgTuneToComponent)。
  * EPG.Basic は epgTune が動くので「ある」(予約は失敗を返す。録画の再生中は epgTune も失敗)。
  * AITControlledApp.Start は Hybridcast を開けるときだけ「ある」(`browserSupport`)
  */
@@ -125,7 +128,6 @@ const API_GROUPS = new Set([
   "Com.IP.confirmIP",
   "Ctrl.Basic",
   "Ctrl.Basic2",
-  "Ctrl.NPT",
   "Ctrl.Time",
   "Ctrl.Cache",
   "Ctrl.Cache2",
@@ -376,7 +378,7 @@ export function defineBrowser(host: BrowserHost): HostObject {
     host.unlock(str(args, 0), "lockEx") ? 1 : Number.NaN,
   );
   fn("unlockAllModulesOnMemory", () => {
-    for (const [module] of host.locked()) host.unlock(module);
+    host.unlockAll();
     return 1;
   });
   fn("getLockedModuleInfo", () =>
@@ -650,7 +652,7 @@ export function defineBinaryTable(host: BrowserHost): JSFunction {
   method("toArray", (table, args) => {
     const start = toNumber(args[0]);
     const count = toNumber(args[1]);
-    if (!(start >= 0) || !(count >= 0) || count > 65536) return null;
+    if (!(start >= 0) || !(count >= 0) || count > MAX_ARRAY) return null;
     return array(
       Array.from({ length: count }, (_, i) => {
         const row = table.rows[start + i];

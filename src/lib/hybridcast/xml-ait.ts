@@ -1,8 +1,10 @@
 import type { HybridcastLink } from "#lib/live.js";
 
+import { decodeEntities } from "../bml/xml";
+
 /**
  * **XML の AIT を読む。** 電波に AIT を載せない局 (NHK) は、データ放送が XML の AIT の URL を渡してくる
- * (`browser.ts` の `startAITControlledApp`)。形式は ETSI TS 102 809 の XML AIT (ARIB STD-B24 第四編 6 章が引く):
+ * (`browser.ts` の `startAITControlledApp`)。形式は ETSI TS 102 809 の XML AIT (ARIB STD-B24 第四編 6 章が引く)。
  *
  * ```
  * ServiceDiscovery / ApplicationDiscovery / ApplicationList / Application
@@ -14,7 +16,7 @@ import type { HybridcastLink } from "#lib/live.js";
  * ```
  *
  * **名前空間の接頭辞は見ない** (`mhp:` のことも、無いこともある)。DOMParser は単体テスト (bun) に無いので、要素の名前で読む。
- * 開けるのは AUTOSTART と PRESENT だけで、 URL の先頭が http(s) でないものは出さない (電波の AIT と同じ。`@danything/arib/ait` の `parseAit`)
+ * 開けるのは AUTOSTART と PRESENT だけで、URL の先頭が http(s) でないものは出さない (電波の AIT と同じ。`@danything/arib/ait` の `parseAit`)
  */
 export function parseXmlAit(text: string): HybridcastLink[] {
   const apps: HybridcastLink[] = [];
@@ -56,24 +58,13 @@ function number(text: string | null): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-/** XML の文字参照。CDATA は中身をそのまま */
+/**
+ * XML の文字参照を 1 回だけ開く (開き方は文書と同じ `bml/xml.ts` の `decodeEntities`。`&#38;lt;` は `&lt;` のまま)。
+ * CDATA は中身をそのまま。範囲の外の参照は字のまま残し、1 つの壊れた参照で AIT ごと読めなくしない
+ */
 function decodeXml(text: string): string {
   return text
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
-      codePoint(Number.parseInt(hex, 16)),
-    )
-    .replace(/&#([0-9]+);/g, (_, dec: string) => codePoint(Number(dec)))
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, "&");
-}
-
-/** 文字参照の番号を文字に。**範囲の外は捨てる。** 1 つの壊れた参照で AIT ごと読めなくしない */
-function codePoint(n: number): string {
-  return Number.isInteger(n) && n >= 0 && n <= 0x10ffff
-    ? String.fromCodePoint(n)
-    : "";
+    .split(/<!\[CDATA\[([\s\S]*?)\]\]>/)
+    .map((part, i) => (i % 2 === 1 ? part : decodeEntities(part)))
+    .join("");
 }

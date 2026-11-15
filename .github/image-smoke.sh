@@ -92,12 +92,6 @@ denpa)
     for f in hwupload deinterlace_vaapi scale_vaapi; do
         grep -qw "$f" <<< "$filters" || { echo "フィルタがありません: $f" >&2; exit 1; }
     done
-    # CM を切る concat が H.265 の mkv に差し込む bsf (cm-cut.ts)。H.265 は GPU でしかエンコードしないので
-    # ランナーでは H.265 の mkv を作れず、下の H.264 のように繋いでは見られない。組み込まれているかだけ見る
-    bsfs=$(run /usr/local/bin/ffmpeg -hide_banner -bsfs)
-    for b in h264_mp4toannexb hevc_mp4toannexb; do
-        grep -qx "$b" <<< "$bsfs" || { echo "bsf がありません: $b" >&2; exit 1; }
-    done
     # GPU の試しのエンコードの素材 (hwenc.ts)。lavfi の nullsrc からインタレの MPEG-2 の TS を作る
     ff -f lavfi -i nullsrc=s=256x256:r=30:d=0.2 -vf format=nv12 \
         -c:v mpeg2video -flags +ilme+ildct -f mpegts probe.ts
@@ -118,6 +112,10 @@ denpa)
     # ライブと録画の変換 (live.ts・playback.ts)。fMP4、主音声だけ、H.264 の mkv の変換、音声だけ
     ff -i in.ts -vf bwdif=mode=send_frame -af "pan=stereo|c0=c0|c1=c0" -c:v libx264 -preset ultrafast -g 60 \
         -c:a aac -b:a 256k -ac 2 -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof live.mp4
+    # 4K の局のライブ (live.ts の uhdVideoArgs)。10 ビットの映像を縮めて、HLG を SDR に直す (HLG_TO_SDR)
+    ff -f lavfi -i testsrc2=size=640x360:rate=60000/1001:duration=1 \
+        -vf "format=yuv420p10le,scale=-2:180,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p" \
+        -c:v libx264 -preset ultrafast -f mp4 uhd.mp4
     ff -ss 0.5 -i h264.mkv -c:v libx264 -preset ultrafast -c:a aac -ac 2 \
         -f mp4 -movflags frag_keyframe+empty_moov stream.mp4
     ff -i h264.mkv -vn -c:a aac -f adts audio.aac
@@ -128,13 +126,11 @@ denpa)
     ff -skip_frame nokey -i in.ts -an \
         -vf "fps=1/0.5,split[a][b];[a]crop=iw:ih/5:0:0:exact=1,scale=480:216[t];[b]crop=iw:ih/5:0:ih*4/5:exact=1,scale=480:216[u];[t][u]vstack,format=gray" \
         -frames:v 2 -f rawvideo logo.raw
-    # CM を切る (cm-cut.ts)。H.264 の mkv を concat で繋ぎ (h264_mp4toannexb が差し込まれる)、チャプターを付け直す
+    # CM のチャプターを書き足す (cm.ts の chapterArgs)。H.264 の mkv にそのまま写して付ける
     run /usr/local/bin/bun -e '
-        await Bun.write("list.txt", "file h264.mkv\nfile h264.mkv\n");
         await Bun.write("chapters.txt", ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=A\n");
     '
-    ff -f concat -safe 0 -i list.txt -map 0 -c copy -f matroska cut.mkv
-    ff -i cut.mkv -i chapters.txt -map 0 -map_chapters 1 -c copy -f matroska chapters.mkv
+    ff -i h264.mkv -i chapters.txt -map 0 -map_chapters 1 -c copy -f matroska chapters.mkv
     # サムネイル (metadata.ts) と、それを切り抜きに見立てた AVIF (clips.ts)
     ff -ss 1 -i in.ts -vf field=top,thumbnail,scale=320:-2,setsar=1 -frames:v 1 thumb.jpg
     ff -i thumb.jpg -map_metadata -1 \
@@ -152,7 +148,7 @@ denpa)
     docker run --rm -v "$PWD:/src:ro" -v "$work:/work" -w /work --entrypoint /usr/local/bin/bun "$image" \
         /src/scripts/fps-smoke.ts /work
     run /usr/local/bin/bun -e '
-        for (const name of ["in.ts", "h264.mkv", "av1.mkv", "live.mp4", "stream.mp4", "audio.aac", "cuts.txt", "logo.raw", "cut.mkv", "chapters.mkv", "thumb.jpg", "full.avif", "small.avif", "layered.avif", "layered-small.avif"]) {
+        for (const name of ["in.ts", "h264.mkv", "av1.mkv", "live.mp4", "uhd.mp4", "stream.mp4", "audio.aac", "cuts.txt", "logo.raw", "chapters.mkv", "thumb.jpg", "full.avif", "small.avif", "layered.avif", "layered-small.avif"]) {
             const size = Bun.file(name).size;
             console.log(`${name}: ${size} バイト`);
             if (size === 0) process.exit(1);

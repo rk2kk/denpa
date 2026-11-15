@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { resolve } from "$app/paths";
   import { onMount, tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
 
@@ -48,6 +47,7 @@
   } from "#lib/components/player/PlayerLayout.svelte";
   import PlayerStage from "#lib/components/player/PlayerStage.svelte";
   import PlayerVeil from "#lib/components/player/PlayerVeil.svelte";
+  import { receiveNote } from "#lib/components/player/receive-note.svelte.js";
   import Remote from "#lib/components/player/Remote.svelte";
   import SeekBar from "#lib/components/player/SeekBar.svelte";
   import {
@@ -83,12 +83,12 @@
   import { jikkyoListSwitch, jikkyoSwitch } from "#lib/jikkyo/switch.svelte.js";
   import { livePlayer } from "#lib/live-player.svelte.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
-  import { LIVE_TUNER_PRESETS } from "#lib/live.js";
   import type { HybridcastLink } from "#lib/live.js";
   import { separateLiveAudio } from "#lib/native-audio-choice.js";
+  import { recordNotice } from "#lib/record-notice.js";
   import { reload } from "#lib/reload.svelte.js";
   import { FLOOR, stepSpeed } from "#lib/ts/pacing.js";
-  import { CHANNEL_TYPES } from "#lib/types.js";
+  import { GUIDE_TYPES } from "#lib/types.js";
 
   import type { LiveChannel } from "./+page.server";
 
@@ -126,10 +126,13 @@
   const player = livePlayer({
     confirm: drive.confirm,
     separateAudio: separateLiveAudio,
-    // 選んでいるもの (覚えている選択)、開いた名前が家の中か、H.265 を出せるか。どれもサーバが決める (`+page.server.ts`)
+    // 選んでいるもの (覚えている選択)、開いた名前が家の中か、H.265 を出せるか、その場でエンコードできるコーデック。どれもサーバが決める (`+page.server.ts`)
     choice: untrack(() => data.choice),
     indoor: untrack(() => data.indoor),
     hevc: untrack(() => data.hevc),
+    liveCodecs: untrack(() => data.liveCodecs),
+    // 最初の 1 回に繋ぐチケット。ページと一緒に受け取る (`+page.server.ts`)
+    ticket: untrack(() => data.ticket),
   });
   /** 映像と重ねもの (MediaStack が組む)。bind で受けるので開くまでは null */
   let video = $state<HTMLVideoElement | null>(null);
@@ -138,7 +141,16 @@
   let mediaBox = $state<HTMLElement | null>(null);
   /** リモコンのキーを渡す関数と、d を文書へ渡す関数 (`DataBroadcast` の press / pressD)。前者があれば指のリモコンを出す */
   let dataPress = $state<((code: number) => void) | null>(null);
+  /** データ放送の映像の上の通知 (`DataBroadcast` の `note`。舞台の通知の列に積む) */
+  let dataNote = $state("");
   let dataButton = $state<(() => boolean) | null>(null);
+  /** 自動で受信するかを切り替えたときの通知 (`receive-note.svelte.ts`) */
+  const dataReceive = receiveNote();
+  /** データ放送を自動で受信するかを切り替える (データ放送のボタンの長押し・Shift+D)。切り替えたら通知を出す */
+  function toggleDataAuto(): void {
+    player.toggleReceiveData();
+    dataReceive.show(player.receiveData);
+  }
 
   /**
    * サーバが決めた局で開く (`+page.server.ts` の `start`)。こちらでも同じ判断をしない。サーバは既に
@@ -153,7 +165,7 @@
     return () => player.stop();
   });
 
-  /** いま映している局。局で引く (物理チャンネルで引くと、1 本に複数の局が入っていると先頭が塗られた) */
+  /** いま映している局。局で引く (チャンネルで引くと、1 つのチャンネルに複数の局が入っているとき先頭の局に印が付いた) */
   const current = $derived(
     channels.find((c) => c.id === player.tuned?.serviceId),
   );
@@ -196,7 +208,7 @@
     data.jikkyo && jikkyoOn.on && channels.some((c) => c.jikkyo !== null),
   );
   const types = $derived([
-    ...CHANNEL_TYPES.filter((t) => channels.some((c) => c.type === t)),
+    ...GUIDE_TYPES.filter((t) => channels.some((c) => c.type === t)),
     ...(jikkyoTab ? [JIKKYO_TAB] : []),
   ]);
   /**
@@ -233,7 +245,7 @@
   });
 
   /**
-   * 局を選ぶ。エンコード方式は引き継ぐ (その端末で出るかの話)。音声は引き継がない (番組ごとに構成が変わる。
+   * 局を選ぶ。形式はメニューの選択から決め直す (`pickFormat`)。音声は引き継がない (番組ごとに構成が変わる。
    * サーバが主音声に落とす)
    */
   function select(channel: LiveChannel): boolean {
@@ -242,13 +254,15 @@
       channelType: channel.type,
       channel: channel.channel,
       serviceId: channel.id,
-      codec: player.codec,
+      ...(channel.broadcast === "mpeg2"
+        ? {}
+        : { broadcast: channel.broadcast }),
     });
     return true;
   }
 
   /**
-   * データ放送が「この局へ」と言ってきた (epgTune)。手で選んだのと同じ経路 (`select`) で切り替える。
+   * データ放送が「この局へ」と求めた (epgTune)。手で選んだのと同じ経路 (`select`) で切り替える。
    * original_network_id と service_id で探す (局の一覧は transport_stream_id を持っていない)。
    * 一覧に無い局なら false。文書には失敗が返り、文書が自分で案内する
    */
@@ -272,47 +286,15 @@
   }
 
   /** 一覧の各行。開いたときに、いま映している局まで送る (局が 100 を超えると画面の外のほうが普通) */
-  const rows: Record<number, HTMLElement | undefined> = $state({});
-
-  /** チューナー側の画質。選局したときにだけ効く (下の注記を読む) */
-  let tunerPresetId = $state("passthrough");
-
-  onMount(() => {
-    void loadTunerPreset();
-  });
-
-  async function loadTunerPreset() {
-    try {
-      const res = await fetch(resolve("api/tuner-preset"));
-      if (!res.ok) return;
-      const body = (await res.json()) as { active?: string };
-      if (body.active) tunerPresetId = body.active;
-    } catch {
-      /* チューナーが居ないだけ。既定のまま */
-    }
-  }
-
-  async function selectTunerPreset(name: string) {
-    tunerPresetId = name;
-    try {
-      const res = await fetch(resolve("api/tuner-preset"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ preset: name }),
-      });
-      if (!res.ok) await loadTunerPreset();
-    } catch {
-      await loadTunerPreset();
-    }
-  }
+  const rows: Record<number, HTMLElement | null | undefined> = $state({});
   /** 一覧そのもの。送るのはこの中だけ (下の説明) */
   let list = $state<HTMLElement | null>(null);
-  /** 一度送ったら、あとは触らない。見ている途中で勝手に動くと邪魔になる */
-  let scrolled = false;
+  /** 一度送った一覧は、あとは触らない。見ている途中で勝手に動くと邪魔になる (詳細を閉じるなどで作り直した一覧は先頭からなので、また送る) */
+  let scrolledList: HTMLElement | null = null;
   $effect(() => {
     const row = current === undefined ? undefined : rows[current.id];
-    if (scrolled || row === undefined || list === null) return;
-    scrolled = true;
+    if (list === scrolledList || row == null || list === null) return;
+    scrolledList = list;
     /*
      * `scrollIntoView` は使わない。動かせるものは何でも動かすので、縦に積む幅では窓ごと動いて、
      * 読み込み直したときに映像が画面から出ていた。動かすのは一覧の中身だけ (中で動けない幅では何もしない)
@@ -419,7 +401,7 @@
     if (canList) {
       jikkyoList.toggle();
       opened = jikkyoList.on;
-      // 出た 1 行が読んだら下ろす (列を入れ替えて一覧を描き直したときに、また取らない)
+      // 書き込む 1 行が受け取ったら下ろす (列を入れ替えて一覧を描き直したときに、またフォーカスを取らない)
       void tick().then(() => (opened = false));
     } else writing = !writing;
   }
@@ -455,7 +437,7 @@
     },
     resume: () => {
       if (wasLive) player.goLive();
-      // 戻る先がまだ無い (貯まりが空) と goLive は何もしないので、そのときは再開だけ
+      // 戻る先がまだ無い (バッファが空) と goLive は何もしないので、そのときは再開だけ
       if (player.paused) player.toggle();
     },
   });
@@ -465,18 +447,13 @@
 
   /** いまの 1 コマを字幕・コメントごと切り抜いてサーバに保存する (3 画面共通。`shot.svelte.ts`) */
   const shooter = snapshotter(controls);
+
   const notices = $derived<Notice[]>([
     ...shooter.notices,
     ...pip.notices,
-    // 録画ボタンの結果 (`?/record`)。押した本人へ、始まったか断られたかを言う
+    // 録画ボタンの結果 (`?/record`)。押した本人へ、始まったか、予約はしたが録らないか、断られたかを言う
     ...(form?.recorded
-      ? [
-          {
-            key: `record-${form.recorded}`,
-            kind: "info" as const,
-            text: `「${form.recorded}」の録画を始めます`,
-          },
-        ]
+      ? [recordNotice(form.recorded, form.state, form.reason)]
       : []),
     ...errorNotice(form, "record-error"),
   ]);
@@ -512,8 +489,11 @@
     stepSpeed: (by) => player.setSpeed(stepSpeed(player.speed, by)),
     toggleMute: player.toggleMute,
     stepVolume: volume.step,
+    toggleDataAuto: () => {
+      if (player.tuned !== null) toggleDataAuto();
+    },
   });
-  /** データ放送を出している間は、空白・十字キー・f はあちらのリモコン (`bml/engine.ts` の `aribKey`) */
+  /** データ放送を出している間は、空白・十字キーはあちらのリモコン (`bml/engine.ts` の `aribKey`) */
   function keys(event: KeyboardEvent): void {
     if (player.showData && dataRemoteKey(event)) return;
     playerKey(event);
@@ -541,6 +521,7 @@
     {controls}
     {fullscreen}
     {ambient}
+    pip={pip.active}
     testid="live-frame"
     bind:element={stageEl}
   >
@@ -570,17 +551,18 @@
       </MediaStack>
 
       <!-- データ放送。映像はここ (`media`) とだけ伝えて描くのはエンジンに任せる。局が変わったら作り直す -->
-      <!-- 常に受信する端末は、開く前から動かす (局を映している間だけ。`data-receive.ts`) -->
+      <!-- 自動で受信する端末は、入口に自動起動の指定のある局を映している間、開く前から動かす (`data-receive.ts`) -->
       <DataBroadcast
         on={player.showData}
-        receive={player.receiveData && player.tuned !== null}
-        channel={player.tuned === null
+        receive={player.receivingData}
+        channel={player.dataChannel === null
           ? null
-          : `${player.tuned.channelType}/${player.tuned.channel}/${player.tuned.serviceId}`}
+          : `${player.dataChannel.channelType}/${player.dataChannel.channel}/${player.dataChannel.serviceId}`}
         media={mediaBox}
         listen={player.listenData}
         bind:press={dataPress}
         bind:pressD={dataButton}
+        bind:note={dataNote}
         postal={data.postalCode}
         prefecture={data.prefecture}
         network={data.bmlNetwork}
@@ -620,9 +602,11 @@
             </form>
             <ControlButton
               icon={DATA}
-              label={player.showData ? "データ放送を消す" : "データ放送を出す"}
+              label={`${player.showData ? "データ放送を消す" : "データ放送を出す"}${player.receiveData ? " (自動で受信)" : ""}`}
               on={player.showData}
+              mark={player.receiveData ? "A" : undefined}
               testid="live-data-button"
+              onhold={toggleDataAuto}
               onclick={() =>
                 pressD(player.showData, dataButton, (on) => player.setData(on))}
             />
@@ -715,7 +699,7 @@
 
               <!--
                         Hybridcast は載っている番組でだけ出す。別のタブで開くだけ (受信機の API が無いので多くは
-                        動かない。[stream.md](../../../docs/stream.md#hybridcast))。できる顔をしないよう「外へ出ていく」印にする
+                        動かない。[stream.md](../../../docs/stream.md#hybridcast))。中で動くように見せないよう「外へ出ていく」印にする
                     -->
               {#if hybridcast !== undefined}
                 <ControlButton
@@ -754,8 +738,8 @@
               {#snippet status()}
                 <!--
                     項目は「・」で区切り、あいだに空白を入れない (docs/writing.md)。空白が入らないよう {#if} どうしを詰めて書く。
-                    放送からの遅れ (`live-player` の `fromAir`。隣のテレビとの差)。出るまでは貯まりだけ。
-                    手元の貯まり (`buffered.end - currentTime`)。上流は入っていない。
+                    放送からの遅れ (`live-player` の `fromAir`。隣のテレビとの差)。出るまではバッファだけを「遅延」として出す。
+                    手元のバッファ (`buffered.end - currentTime`)。上流は入っていない。
                     測り直す (`relearn`)。覚えているものがあるときだけ、遅延のすぐ隣に置く。
                     読みものの行なので丸いボタンにはしない (操作バーが厚くなる)。
                     途切れは止まったときだけ (`live-player` の `stalls`)。下限は、いま効いている下限と届く間隔のいちばん長いもの。
@@ -773,7 +757,7 @@
                     type="button"
                     class="relearn"
                     onclick={() => player.relearn()}
-                    data-testid="live-relearn">測り直す</button
+                    data-testid="live-relearn">再測定</button
                   >{/if}{#if player.stalls > 0}・<span data-testid="live-stalls"
                     >途切れ {player.stalls} 回</span
                   >{/if}{#if player.stalls > 0 || player.floor > FLOOR}・<span
@@ -787,9 +771,7 @@
                   >{/if}{#if player.dropped > 0}・<span
                     >コマ落ち {player.dropped}</span
                   >{/if}{#if player.slipMost > 0}・<span
-                    >映像の遅れ 最大 {Math.round(
-                      player.slipMost * 1000,
-                    )}ms</span
+                    >映像の遅れ 最大 {Math.round(player.slipMost * 1000)} ms</span
                   >{/if}{#if player.slips > 0}・<span
                     >映像の遅れを補正 {player.slips} 回</span
                   >{/if}{#if player.rateChanges > 0}・<span
@@ -799,7 +781,7 @@
                       : `速さ ${player.rate} 倍・`}速さを変えた回数 {player.rateChanges}
                     回</span
                   >{/if}{#if player.canvas && player.decodeMs > 0}・<span
-                    >デコード {player.decodeMs.toFixed(1)}ms{player.thinned
+                    >デコード {player.decodeMs.toFixed(1)} ms{player.thinned
                       ? " (コマを間引いています)"
                       : ""}</span
                   >{/if}
@@ -819,7 +801,7 @@
             {/if}
 
             <!--
-                            AV1 を受け取れなければ H.264 に戻して理由を出す (`live-player.svelte.ts` の `start`)。
+                            AV1 を受け取れなければ次の形式に切り替えて理由を出す (`live-player.svelte.ts` の `start`)。
                             末尾の MPEG-2 はエンコードせずに放送そのままをデコードする経路
                         -->
             <StageTail
@@ -854,10 +836,6 @@
               {pip}
               {fullscreen}
               {stage}
-              receive={{
-                on: player.receiveData,
-                toggle: () => player.toggleReceiveData(),
-              }}
               jikkyo={data.jikkyo
                 ? {
                     on: jikkyoOn.on,
@@ -869,19 +847,12 @@
               codec={liveCodecs({
                 icon: CODEC,
                 choice: player.choice,
+                shown: player.shown,
                 format: player.format,
                 step: player.step,
-                hevc: data.hevc,
-                hidden: data.hidden.length > 0,
+                broadcast: player.broadcast,
                 unavailable: player.unavailable,
                 onselect: (next) => player.setChoice(next),
-                preset: tunerPresetId,
-                presets: LIVE_TUNER_PRESETS,
-                onpreset: (id) => {
-                  void selectTunerPreset(id);
-                  if (id === "passthrough") player.setChoice("raw");
-                  else if (player.raw) player.setChoice("h264");
-                },
               })}
               audio={liveAudio(AUDIO, player)}
               subtitle={liveSubtitle(CAPTION, player)}
@@ -919,9 +890,9 @@
             {#if player.yielded === null}
               <button
                 type="button"
-                class="small secondary"
+                class="small"
                 onclick={() => current && select(current)}
-                data-testid="live-retry">やり直す</button
+                data-testid="live-retry">再試行</button
               >
             {/if}
           {/snippet}
@@ -931,6 +902,13 @@
 
     <!-- 映像の上の通知は舞台の列に積む (`PlayerStage` の `notes`)。幕 (`PlayerVeil`) の文言は真ん中なので重ならない -->
     {#snippet notes()}
+      {#if dataNote !== ""}
+        <StageNote testid="live-data-note">{dataNote}</StageNote>
+      {/if}
+      {#if dataReceive.text !== ""}
+        <StageNote testid="live-data-receive-note">{dataReceive.text}</StageNote
+        >
+      {/if}
       <!--
                     録画に譲った (`live-player` の `giveWay`)。「ライブに戻る」を置くので、この通知だけ押せる形で並べる
                     (見た目は StageNote と同じ。追っかけの「観る画面で」と同じ扱い)
@@ -960,7 +938,7 @@
           >
         {/if}
       {/if}
-      <!-- 指定されたとおりにできなかったときの断り書き (H.264 に戻した・ソフトウェアでエンコードしている) -->
+      <!-- 指定されたとおりにできなかったときの断り書き (次の形式に切り替えた・ソフトウェアでエンコードしている) -->
       {#if player.warning}
         <StageNote testid="live-warning">{player.warning}</StageNote>
       {/if}
@@ -990,6 +968,18 @@
         {/if}
       </JikkyoList>
     {/snippet}
+    <!--
+      列の先頭。データ放送を開いている間はリモコン (入れ替えない。押しながら局も変えたい。自動で受信していても、開くまでは出さない)、
+      その下に実況のコメントの一覧 (出している間)
+    -->
+    {#snippet asideTop()}
+      {#if dataPress !== null}
+        <Remote press={dataPress} />
+      {/if}
+      {#if jikkyoList.shown}
+        {@render commentList()}
+      {/if}
+    {/snippet}
     {#if detail.current}
       <!--
             番組の中身は、この列を入れ替えて出す (モーダルにしない。映像に被さると観ながら読めない)
@@ -1004,29 +994,14 @@
       >
         {#snippet top()}
           <!-- 番組の中身を開いていても、リモコンとコメントの一覧は列の先頭に残す (局の一覧のときと同じ) -->
-          {#if dataPress !== null}
-            <Remote press={dataPress} />
-          {/if}
-          {#if jikkyoList.shown}
-            {@render commentList()}
-          {/if}
+          {@render asideTop()}
         {/snippet}
         <ProgramFacts program={detail.current} />
       </FactsAside>
     {:else}
       <!-- 幅と高さ・サイドバーの形は FactsAside と同じ (PlayerLayout が持つ。一覧は中身が違うので列だけ揃える) -->
       <aside class="live-side">
-        <!--
-                データ放送を開いている間だけ、リモコンを一覧の上に出す (入れ替えない。押しながら局も変えたい)。
-                常に受信していても、開くまでは出さない
-            -->
-        {#if dataPress !== null}
-          <Remote press={dataPress} />
-        {/if}
-        <!-- 実況のコメントの一覧も、出している間は一覧の上 (リモコンの下) -->
-        {#if jikkyoList.shown}
-          {@render commentList()}
-        {/if}
+        {@render asideTop()}
 
         <!-- 番組表と同じ並び・同じ見た目。探す場所がずれないようにする -->
         <div role="group" class="type-tabs segmented">
@@ -1218,35 +1193,49 @@
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0.25rem 0.25rem 0.75rem;
+    gap: var(--dp-space-2);
+    padding: var(--dp-space-1) var(--dp-space-1) var(--dp-space-1)
+      var(--dp-space-3);
     pointer-events: auto;
   }
   .back-live {
     width: auto;
     margin: 0;
-    padding: 0.125rem 0.75rem;
+    padding: 0.125rem var(--dp-space-3);
     border: 0;
     background: transparent;
     color: var(--dp-on-video);
     font-weight: var(--dp-weight-bold);
     font-size: var(--dp-text-xs);
   }
-  .back-live:hover:not(:disabled) {
+  .back-live:is(:hover, :focus-visible):not(:disabled) {
     background: var(--dp-on-video-hover);
+  }
+  /* 映像の上の焦点の線はテーマで変えない (`app.css` の `--dp-video-focus`。操作バーのボタンと同じ) */
+  :is(.relearn, .back-live):focus-visible {
+    outline-color: var(--dp-video-focus);
   }
   /* 押すものなので操作バーのボタンと同じ段 (実況のコメントより上。`ControlBar`) */
   .unmute {
     --pico-background-color: var(--dp-video-veil);
     position: absolute;
-    top: 0.75rem;
-    left: 0.75rem;
+    top: var(--dp-space-3);
+    left: var(--dp-space-3);
     z-index: var(--dp-z-stage-controls);
   }
-  /* 列の幅いっぱいに伸びるので、タブを均等に広げる。左に寄せると右に溝だけが余った */
+  /*
+   * 列の幅いっぱいに伸びるので、タブを均等に広げる (左に寄せると右に溝だけが余った)。
+   * 入りきらない幅 (二段組にした直後の細い右の列で、ケーブルのタブがあるとき) は横に流す (流す印は出さない)。
+   * 番組表の操作の 1 行と同じ
+   */
   .type-tabs {
     display: flex;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--dp-space-2);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .type-tabs::-webkit-scrollbar {
+    display: none;
   }
   .type-tabs > button {
     flex: 1;
@@ -1287,9 +1276,9 @@
     min-width: 0;
     flex: 1;
     align-items: center;
-    gap: 0.75rem;
+    gap: var(--dp-space-3);
     margin: 0;
-    padding: 0.5rem 0.75rem;
+    padding: var(--dp-space-2) var(--dp-space-3);
     border: 0;
     border-radius: var(--dp-radius);
     background: transparent;

@@ -17,8 +17,8 @@ import type { ReservationState, Rule } from "../types";
 import { now, orm } from "./db";
 import { ANY_PAID, compile, haystack, matchesCompiled } from "./rules";
 import {
+  activeEncodeJobId,
   HELD_STATES,
-  latestRecordingId,
   latestReservationRecordingId,
   programs,
   recordings,
@@ -222,7 +222,7 @@ export function searchPrograms(q: string, options: SearchOptions) {
             r,
             and(eq(r.program_id, programs.id), inArray(r.state, HELD_STATES)),
           )
-          .leftJoin(rec, eq(rec.id, latestRecordingId(programs.id)))
+          .leftJoin(rec, eq(rec.id, latestReservationRecordingId(r.id)))
           .where(where)
           .orderBy(programs.start_at, programs.id)
           .limit(size)
@@ -292,6 +292,8 @@ export function searchRecordings(q: string, options: SearchOptions) {
             library_path: recordings.library_path,
             watched_at: recordings.watched_at,
             has_logo: services.has_logo,
+            // エンコード中か。動いている間は削除を出さない (ホームの行と同じ。裏の ffmpeg が元の TS を読んでいる)
+            job_id: activeEncodeJobId(recordings.id),
           })
           .from(recordings)
           .leftJoin(services, eq(services.id, recordings.service_id))
@@ -336,7 +338,7 @@ export function searchReservations(q: string, options: SearchOptions) {
   const where = and(
     or(
       and(inArray(r.state, TO_RECORD_STATES), isNull(r.started_at)),
-      // 録り始めてから同じ回と分かってやめたもの (`recorder.skipDuplicate`) は録り始めた時刻が入っている
+      // 録画しない予約 (コピー禁止の番組と、録り始めてから同じ回と分かってやめた `recorder.skipDuplicate`。後者は録り始めた時刻が入っている)
       eq(r.state, "skipped"),
       eq(rec.state, "recording"),
     ),

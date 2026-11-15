@@ -2,7 +2,7 @@
 /**
  * **エンコードしたもの (fMP4) を canvas に描く**、worker の中の半分 (`messages.ts` の `fmp4`)。
  *
- *     fMP4 ─→ 箱を読む (ts/fmp4.ts) ┬→ 映像: WebCodecs の VideoDecoder → 2D で描く
+ *     fMP4 ─→ ボックスを読む (ts/fmp4.ts) ┬→ 映像: WebCodecs の VideoDecoder → 2D で描く
  *                                   └→ 音声: AAC は ADTS のヘッダを付けて / Opus はそのまま → WASM (worker.ts)
  *
  * **<video> の再生が止まる端末のための経路。** テスラの車載ブラウザは停車中でも <video> を
@@ -39,8 +39,8 @@ import {
 import { downscale } from "./downscale";
 import type { GrabSize } from "./messages";
 
-/** 番のこれだけ前からデコードする (90kHz) */
-const AHEAD = 0.3 * CLOCK;
+/** 番のこれだけ前からデコードする (90kHz)。`worker.ts` の MPEG-2 も同じ (重いコマでもデコードは 10ms 近く) */
+export const AHEAD = 0.3 * CLOCK;
 /**
  * デコードできたフレームと、渡したまま出てきていないフレームを合わせてこれだけまで (VideoFrame は GPU の置き場を使う)。
  * **少なすぎても多すぎても止まる**。実測 (`tests/bench`。docs/stream.md#デコードしたフレームを持つ数) では、GPU で
@@ -49,10 +49,10 @@ const AHEAD = 0.3 * CLOCK;
  * 実際に抱えるのはこれより 2 枚ほど多い
  */
 const DECODED_MOST = 8;
-/** 圧縮のまま持っておく上限 (90kHz)。止めている間に溜め込まない */
-const PENDING_MOST = 8 * CLOCK;
-/** これだけ遅れたら、デコードしながら追いつくのをやめてキーフレームまで飛ぶ (90kHz) */
-const BEHIND_MOST = 0.5 * CLOCK;
+/** 圧縮のまま持っておく上限 (90kHz)。止めている間に溜め込まない。`worker.ts` の MPEG-2 も同じ */
+export const PENDING_MOST = 8 * CLOCK;
+/** これだけ遅れたら、デコードしながら追いつくのをやめてキーフレーム (MPEG-2 は I フレーム) まで飛ぶ (90kHz)。`worker.ts` も同じ */
+export const BEHIND_MOST = 0.5 * CLOCK;
 /** 1 コマの長さの目安 (90kHz)。59.94 コマ。実際の間隔が分かればそれを使う */
 const FRAME = 1501;
 /**
@@ -67,7 +67,7 @@ export const FOLLOW_BYTES_MOST = 120 * 1024 * 1024;
 const ERRORS_MOST = 3;
 
 /**
- * 音のトラックを WASM (`wasm-audio.ts`) で開くときの形式。Opus は OpusHead を添える (dOps から組む)。
+ * 音のトラックを WASM (`wasm-audio.ts`) で開くときの形式。Opus は OpusHead を添える (dOps なら組み直す。`opusHead`)。
  * **Opus でなければ AAC として開く。** OpusHead を組めなければ null
  */
 export function audioCodec(
@@ -125,6 +125,22 @@ export function jumped(
   duration: number,
 ): boolean {
   return Math.abs(dts - expected) > duration + 2;
+}
+
+/**
+ * 圧縮の待ち (デコードする順) のうち、dts が `target` までで、いちばん新しいキーフレーム (MPEG-2 は I フレーム) の位置。
+ * **先頭か、見つからなければ 0 以下** (飛ばなくてよい)。`worker.ts` の MPEG-2 も同じものを使う
+ */
+export function newestKey(
+  pending: readonly { dts: number; key: boolean }[],
+  target: number,
+): number {
+  let found = -1;
+  for (let i = 0; i < pending.length; i++) {
+    if (pending[i]!.dts > target) break;
+    if (pending[i]!.key) found = i;
+  }
+  return found;
 }
 
 /** 90kHz に直す */
@@ -194,7 +210,7 @@ export class Fmp4Video {
     return this.frames.length;
   }
 
-  /** 箱を 1 つぶん (init か媒体)。サーバは箱の切れ目で送ってくる */
+  /** ボックスを 1 つぶん (init か媒体)。サーバはボックスの切れ目で送ってくる */
   feed(bytes: Uint8Array): void {
     // init (ftyp + moov)。**来るたびに開き直す**。選局し直し・音声やコーデックの選び直しで中身が変わる
     if (hasBox(bytes, "moov")) {
@@ -285,7 +301,12 @@ export class Fmp4Video {
       this.host.fail("映像を再生できません");
       return;
     }
-    // 失敗したデコーダは閉じている。作り直す
+    /*
+     * 作り直す。`error` で来たときのデコーダは閉じているが、`decode` が投げたとき (`decode` の `catch`) は
+     * 開いたまま。閉じずに手放すと、GPU の置き場を持ったまま残り、渡してあったコマのフレームも `output` に出てくる
+     */
+    if (this.decoder !== null && this.decoder.state !== "closed")
+      this.decoder.close();
     this.decoder = null;
     this.open();
     /*
@@ -326,11 +347,7 @@ export class Fmp4Video {
    * 飛ばしたコマを参照するフレームを出させないため
    */
   private skipTo(target: number): void {
-    let found = -1;
-    for (let i = 0; i < this.pending.length; i++) {
-      if (this.pending[i]!.dts > target) break;
-      if (this.pending[i]!.key) found = i;
-    }
+    const found = newestKey(this.pending, target);
     if (found <= 0) return;
     this.keep(this.pending.slice(found));
     this.decoder?.reset();

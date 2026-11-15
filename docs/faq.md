@@ -6,7 +6,8 @@
 
 ### どのチューナーが使えますか
 
-PT3 (Linux DVB)、PX-Q3U4・PX-W3U4・PX-MLT 系など (px4-userland)、PX-S1UD (siano-userland)、Sony CECH-ZD1 J、PIXELA PIX-DT295 (試験的) です。
+PT3 (Linux DVB)、IT930x の機材 (PX-MLT5 系・PX-Q3・PX-W3 系など)、PX-S1UD、Sony CECH-ZD1 J、PIXELA PIX-DT295 です。
+PX-S1UD は Linux DVB では動きますが、DVB を使わずにエージェントが USB を直に持つ実装 (Mac・Windows はこれだけ) は実機で確かめていません ([tuner-px-s1ud.md](tuner-px-s1ud.md))。
 ほかに、PT1 / PT2・PX-BCUD・Friio (白) など、実機では確かめていないものの Linux DVB で動くはずの機材があります
 ([tuner-pt3.md](tuner-pt3.md#実機で確かめていない機材))。使ってみたら、動いたかどうかを [Issue](https://github.com/danything/denpa/issues) で教えてください。
 挿してあれば自動で見つけ、地上波か衛星かも見分けます。
@@ -15,7 +16,7 @@ PT3 (Linux DVB)、PX-Q3U4・PX-W3U4・PX-MLT 系など (px4-userland)、PX-S1UD 
 ### Mac や Windows でも動きますか
 
 Apple Silicon の Mac と x64 の Windows で動きます。どちらも denpa 本体とエージェントが OS の上で直接動きます (コンテナは使わない)。
-使えるチューナーは px4-userland と siano-userland の機材と Sony CECH-ZD1 J・PIXELA PIX-DT295 (試験的) です (DVB は Linux だけ)。
+使えるチューナーは IT930x の機材 (PX-MLT5 系・PX-Q3U4 など。エージェントが USB を直に持つ)・PX-S1UD・Sony CECH-ZD1 J・PIXELA PIX-DT295 です (DVB は Linux だけ)。
 [install-mac.md](install-mac.md)・[install-windows.md](install-windows.md)。
 
 ### arm64 でも動きますか
@@ -37,12 +38,18 @@ EDCB (EpgTimer) からは、ルール・手動予約・録画の履歴を EpgTim
 Windows ファイアウォールを確かめます ([EDCB からの引き継ぎ](migrate.md#edcb-からの引き継ぎ))。
 [switch.md](switch.md)・[migrate.md](migrate.md)。
 
+### Mirakurun や px4_drv を残したまま使えますか
+
+付属のエージェントは、px4_drv が使っている機材を開けません。Mirakurun と px4_drv を外さずに使うなら、エージェントの代わりに
+Mirakurun へ中継するブリッジを置きます。別の人が作っているもので、Doa では動作を確かめていません
+([switch.md](switch.md#いまの環境を残して-denpa-を足す))。
+
 ## チューナーとカード
 
 ### カードリーダーが NG のままです
 
 まず設定の「受信」の「チューナー」にある「カードリーダー」の表を見ます (中身はエージェントの `/denpa/card`)。
-リーダーが 1 つも無ければ `/dev/bus/usb` がコンテナに見えていません。「別のプロセスがカードリーダーを使用中です」と出たら、ホストの pcscd を止めます。
+リーダーが 1 つも無ければ `/dev/bus/usb` がコンテナに見えていません。「カードリーダーはほかのソフトが使っています」と出たら、ホストの pcscd を止めます。
 [tuners.md](tuners.md#直らないとき)。
 
 ### NG のまま録った録画はどうなりますか
@@ -79,7 +86,7 @@ Android TV と Fire TV は、専用のアプリ [denpa-tv](https://github.com/da
 実況をオンにしたときだけ、最後の「実況」タブで勢いの順に並べます。
 
 コメントは denpa のサーバを通さず、端末が NX-Jikkyo に直接繋いで受け取ります。相手には端末の IP とどの局をいつ観ているかが見えます。
-ライブでは、映像の右端の「コメントの一覧」で開く一覧の下 (全画面では同じボタンの「実況に書く」) から NX-Jikkyo に書き込めます。書いたものは公開され、消せません (アカウントは使わず匿名ですが、同じ端末から書いたものは結び付けられます)。
+ライブでは、映像の右端の「コメントの一覧」で開く一覧の下 (全画面では同じボタンの「実況に書く」) から実況に書き込めます。ニコニコと連携している世帯では公式のニコニコ実況へ (世帯のアカウントで、いつも匿名)、ほかは NX-Jikkyo へ送ります (アカウントは使わず匿名ですが、同じ端末から書いたものは結び付けられます)。書いたものは公開され、消せません。
 [watch.md](watch.md#実況のコメント)・[watch.md](watch.md#実況に書き込む)・[architecture.md](architecture.md#端末が外へ繋ぐもの-実況のコメント)。
 
 ### 録画はどこに置かれますか

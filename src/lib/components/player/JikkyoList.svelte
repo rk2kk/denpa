@@ -340,7 +340,6 @@
   }
   .row {
     margin: 0;
-    list-style: none;
   }
   /* この先の区切り。線も地も付けず、時刻と同じ控えた小さな字の一言だけ */
   .ahead {
@@ -376,8 +375,8 @@
   .jump {
     width: auto;
     height: auto;
-    margin: 0 -0.25rem;
-    padding: 0 0.25rem;
+    margin: 0 calc(-1 * var(--dp-space-1));
+    padding: 0 var(--dp-space-1);
     border: 0;
     border-radius: var(--dp-radius);
     background: none;

@@ -23,12 +23,12 @@
     display: flex;
     flex-wrap: nowrap;
     align-items: center;
-    gap: 0.25rem;
-    margin-top: 0.25rem;
+    gap: var(--dp-space-1);
+    margin-top: var(--dp-space-1);
     overflow-x: clip;
     color: var(--dp-on-video);
   }
-  /* 狭い枠では間を少し詰める (押す的の大きさは `ControlButton` が 40px で保つ) */
+  /* 狭い枠では間を少し詰める (押せる大きさは `ControlButton` が 40px で保つ) */
   :global(.stage[data-compact]) .row {
     gap: 0.125rem;
   }

@@ -16,13 +16,19 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
-import { and, asc, count, eq, gt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, or } from "drizzle-orm";
 
 import { pad, size as formatSize } from "../format";
 import { config } from "./config";
 import { bootstrap, closeDatabase, MIGRATIONS, orm } from "./db";
 import { freeBytes } from "./disk";
-import { recordedHistory, recordings, reservations, rules } from "./schema";
+import {
+  encodeJobs,
+  recordedHistory,
+  recordings,
+  reservations,
+  rules,
+} from "./schema";
 import { readTar, type TarSource, writeTar } from "./tar";
 
 /**
@@ -106,12 +112,11 @@ export interface CheckResult {
   manifest: Manifest | null;
   counts: Counts;
   files: FileCheck;
-  /** 無いものがあるか。あれば「取り込む」は 2 回押しにする */
+  /** 無いものがあるか。あれば「取り込み」は 2 回押しにする */
   blocked: boolean;
 }
 
 interface TransferStatus {
-  exporting: boolean;
   /** まだ使っていない denpa か (取り込めるのはこのときだけ) */
   empty: boolean;
   upload: (UploadMeta & { received: number }) | null;
@@ -121,6 +126,8 @@ interface TransferStatus {
   ready: boolean;
   /** いちばん近い予約の始まり。書き出したあと古い denpa を止めてもらうために出す */
   nextReservation: number | null;
+  /** 録画中か、エンコードを待っている・している録画の数 (`busyRecordings`)。0 でなければ書き出しの上に件数を出す (書き出しは止めない) */
+  working: number;
 }
 
 const root = () => join(config.dataDir, "transfer");
@@ -200,22 +207,45 @@ export function status(): TransferStatus {
     .limit(1)
     .get();
   return {
-    exporting,
     empty: isEmpty(),
     upload: meta === null ? null : { ...meta, received: received() },
     prepared: existsSync(prepared()),
     ready: existsSync(join(ready(), DB_ENTRY)),
     nextReservation: next?.start_at ?? null,
+    working: busyRecordings(),
   };
 }
 
 // ---- 書き出す ----
 
 /**
+ * **録画中か、エンコードを待っている・している録画の数。** エンコードには CM 検出・スクランブル復号も入る
+ * (どれも `encode_jobs` の待ち・実行中)。書き出したあとも、この録画のファイルは作り直されることがある。
+ * 再エンコードは置いてあるファイルを消してから書き直す (`encoder.ts` の `stalePaths`) ので、その間に録画の
+ * フォルダを写すと、移した先で「置き場に無い」になる。画面で知らせるだけで、書き出しは止めない
+ */
+function busyRecordings(): number {
+  const queued = orm()
+    .select({ id: encodeJobs.recording_id })
+    .from(encodeJobs)
+    .where(inArray(encodeJobs.state, ["queued", "running"]));
+  const row = orm()
+    .select({ n: count() })
+    .from(recordings)
+    .where(
+      or(eq(recordings.state, "recording"), inArray(recordings.id, queued)),
+    )
+    .get();
+  return row?.n ?? 0;
+}
+
+/**
  * **DB の写しを取る。** 動いているまま `VACUUM INTO` で、読み取りのトランザクション 1 つぶんの
  * 一貫した写しを取る (録画やエンコードの書き込みは止めない。bun:sqlite は backup API を出していない)。
  * 写しからログインの控え (`sessions`)・ペアリングの途中 (`device_codes`)・ニコニコとの連携 (`niconico_link`。
- * トークンを開く鍵は DB の隣のファイルで写しに入らないうえ、移した先では連携し直す) を消し、`secure_delete` と
+ * トークンを開く鍵は DB の隣のファイルで写しに入らないうえ、移した先では連携し直す)・
+ * つないだエージェント (`agents`。組んだ相手は `tls/denpa.key` に結び付いていて、移した先では組み直す) と、エージェントごとのチャンネルの写し (`agent_channels`)・
+ * 受信の記録 (`channel_reception`。移した先ではエージェントの行の ID が変わる) を消し、`secure_delete` と
  * `VACUUM` で消した行の中身もファイルに残さない。
  *
  * **別のプロセスで回す。** 数百 MB の DB だと数秒かかり、その間この (1 本しかない) スレッドが止まると
@@ -235,6 +265,9 @@ copy.exec("PRAGMA secure_delete = ON");
 copy.exec("DELETE FROM sessions");
 copy.exec("DELETE FROM device_codes");
 copy.exec("DELETE FROM niconico_link");
+copy.exec("DELETE FROM agents");
+copy.exec("DELETE FROM agent_channels");
+copy.exec("DELETE FROM channel_reception");
 copy.exec("VACUUM");
 copy.close();
 `;
@@ -307,7 +340,7 @@ function stamp(at: number, seconds = false): string {
 }
 
 /**
- * 書き出す。tar を zstd で縮めながら流す。受け手が読み終える (かやめる) と、写しを消す。
+ * 書き出す。tar を zstd で縮めながら流す。受け取る側が読み終える (かやめる) と、写しを消す。
  * 1 回に 1 つだけ。取り込みの途中も断る
  */
 export async function exportArchive(): Promise<{
@@ -807,7 +840,7 @@ function inspect(): CheckResult {
 
 /**
  * 確かめる。送り終えていれば、初めの 1 回だけ開いて migrate を当て (`prepare`)、
- * 毎回、置き場と突き合わせる (録画のフォルダを写したあとの「もう一度確かめる」は送り直さずに済む)。
+ * 毎回、置き場と突き合わせる (録画のフォルダを写したあとの「再確認」は送り直さずに済む)。
  * **使えないファイルなら、送ったものを消す**
  */
 export async function check(): Promise<CheckResult> {
@@ -880,8 +913,8 @@ export function cancel(): void {
 
 /**
  * プロセスを終える。compose (`restart: unless-stopped`)・Helm (Pod の再起動)・Mac (LaunchDaemon の KeepAlive)・Windows (install.ps1 が書く `denpa.cmd` の
- * ループ。Windows ではこの合図で待たずに終わる) が起こし直し、
- * 起動の最初で入れ替わる。いつもの止まり方 (SIGTERM。`runtime.ts` の drain) で降りる。
+ * ループ。Windows ではこの合図で待たずに終わる)・Android (アプリの常駐サービス) が起こし直し、
+ * 起動の最初で入れ替わる。いつもの止まり方 (SIGTERM。`runtime.ts` の drain) で終わる。
  * 空の denpa なので録画を待つことはない
  */
 export function restartSoon(): void {

@@ -3,16 +3,17 @@ using static Denpa.Agent.Fr30Reg;
 namespace Denpa.Agent;
 
 /*
- * PIX-DT295 の機材の中で動かす FR30 のプログラム (自前方式)。節の番号は
+ * PIX-DT295 の機材の中で動かす FR30 のプログラム。節の番号は
  * 仕様書 (dt295-resident/spec.md) のもの。常駐イメージは入れず、要求ごとに動く小さなプログラムだけを機材に置く。
- * 操作 1 は TS を取り込みのリングから USB の bulk IN へ送り、操作 2 は I2C の転送の並びを順に行う (<see cref="EmitI2c"/>)。
- * 機材の設定は、ホストが 0xBC のメモリ要求で行う (Dt295NativeBoard.cs・Dt295NativeFrontend.cs)。
+ * 操作 1 は TS を取り込みのリングから USB の bulk IN へ送り、操作 2 は I2C の転送の並びを順に実行する (<see cref="EmitI2c"/>)。
+ * 操作 3・4 はカードの UART に T=1 のブロックを書いて送らせ、受けたバイトを読む (<see cref="EmitCard"/>)。
+ * 機材の設定は、ホストが 0xBC のメモリ要求で書く (Dt295NativeBoard.cs・Dt295NativeFrontend.cs)。
  *
  * **ループは主 CPU の boot0 の hook に置く。補助 CPU には置かない。** 理由は 3 つ。
  * 1. ループが触るもの (リングの先頭 0x8138EC00、書き込み位置 0x1902028、読み出し位置 0x190202C、FIFO 0xFDBD84・0xFDBD0C、
  *    保護レジスタ 0xFD814C) は、仕様書 8.2・8.3 がすべて主 CPU から見たアドレスで書いている。補助 CPU から見た SDRAM とリングの
- *    アドレスは仕様書に無い。補助 CPU の USB レジスタは 0x1684000 台で、主 CPU の 0xFD8000 台と同じものと見るのは「推定」(仕様書 1.2・8 章冒頭)
- * 2. 補助 CPU を使うには、機材のメモリへ圧縮コードを伸長して起動する手順 (仕様書 6 章) が要る。起動後の郵便受けの応答や USB の割り込みの扱いは
+ *    アドレスは仕様書に無い。補助 CPU の USB レジスタは 0x1684000 台で、主 CPU の 0xFD8000 台と同じものとみなすのは「推定」(仕様書 1.2・8 章冒頭)
+ * 2. 補助 CPU を使うには、機材のメモリへ圧縮コードを伸長して起動する手順 (仕様書 6 章) が要る。起動後のメールボックスの応答や USB の割り込みの扱いは
  *    「未確認」(仕様書 11.1)。主 CPU に置けば、この手順を再現しなくて済む
  * 3. 主 CPU の hook (仕様書 3.2) は、書き込む場所・入口の条件・戻り先 (状態段 0xEA8C8) まで仕様書にある
  *
@@ -43,10 +44,10 @@ public static class Dt295NativePrograms
 
     private const int Target = 40, IdleLimit = 44;
 
-    /// <summary>I2C の順次実行 (操作 2) が作業域に持つもの。+48 直前の読みの先頭バイト、+52 結果の置き場の先頭、+56 転送の種類、+60 いまの転送の読みの置き場</summary>
+    /// <summary>I2C の順次実行 (操作 2) が作業域に持つもの。+48 直前の読み出しの先頭バイト、+52 結果の置き場の先頭、+56 転送の種類、+60 いまの転送の読み出しの置き場</summary>
     private const int LastRead = 48, ResultStart = 52, Kind = 56, ReadStart = 60;
 
-    /// <summary>操作 2 の操作列と結果の置き場 (SDRAM。常駐イメージを入れていた 0x80380000 台。ホストからは 0x380000 台)。長い操作列だけここに置き、短いものは要求の中に入れる</summary>
+    /// <summary>操作 2 の操作列と結果の置き場 (SDRAM の 0x80380000 台。仕様書で常駐イメージが置かれる場所で、常駐イメージを入れないいまは空いている。ホストからは 0x380000 台)。長い操作列だけここに置き、短いものは要求の中に入れる</summary>
     public const uint BatchCpu = 0x80380000, BatchPhysical = 0x380000, BatchResultOffset = 0x2000, BatchLimit = 0x2000;
 
     /// <summary>操作 2 の要求の中に操作列と結果を置くとき: 結果は +16〜+31、操作列は +32〜+63</summary>
@@ -56,6 +57,14 @@ public static class Dt295NativePrograms
 
     /// <summary>操作 2 の結果 (応答の +4)</summary>
     public const uint I2cOk = 0, I2cNack = 1, I2cBusError = 2, I2cTimeout = 3;
+
+    /// <summary>操作 3・4 の結果 (応答の +4)。プログラムは要求の +4 (操作の番号) をこれで書き換える</summary>
+    public const uint CardOk = 0;
+
+    /// <summary>操作 3 の要求の中に置くブロックと、操作 4 の応答の中に置く受けたバイトの場所: +16〜+63</summary>
+    public const uint InlineCard = Staging + 16;
+
+    public const int InlineCardBytes = 48;
 
     /// <summary>hook (仕様書 3.2)。元の 8 バイトを、飛び先を body の入口にした 8 バイトに置き換える</summary>
     public const uint Hook = 0xEA6FC;
@@ -134,11 +143,15 @@ public static class Dt295NativePrograms
         asm.StFp(R10, SavedR10);
         asm.StFp(R11, SavedR11);
         asm.StFp(R13, SavedR13);
-        // 操作 2 (I2C の順次実行) は別の経路へ。操作 1 (TS を送る) はそのまま下へ
+        // 操作 2 (I2C の順次実行)・3 (カードへ送る)・4 (カードから受ける) は別の経路へ。操作 1 (TS を送る) はそのまま下へ
         asm.Ldi20(Staging + 4, R12);
         asm.Ld(R12, R0);
         asm.CmpI(2, R0);
         asm.Far(Fr30Cond.Eq, "i2c", R12);
+        asm.CmpI(3, R0);
+        asm.Far(Fr30Cond.Eq, "card_send", R12);
+        asm.CmpI(4, R0);
+        asm.Far(Fr30Cond.Eq, "card_receive", R12);
         asm.Ldi32(RingCpu, R4);
         asm.Ldi32(RingLength, R5);
         asm.Ldi20(Staging + 8, R12);
@@ -342,10 +355,11 @@ public static class Dt295NativePrograms
         asm.Jmp(R12);
 
         EmitI2c(asm);
+        EmitCard(asm);
 
         var words = asm.Words32();
         var bytes = words.Length * 4;
-        if (bytes > Frame - BodyOrigin) throw new InvalidOperationException($"自前のプログラム ({bytes} バイト) が作業域の前に収まりません");
+        if (bytes > Frame - BodyOrigin) throw new InvalidOperationException($"機材に置くプログラム ({bytes} バイト) が作業域の前に収まりません");
 
         var hook = new Fr30Assembler(Hook);
         hook.Ldi20(BodyOrigin, R12);
@@ -356,13 +370,13 @@ public static class Dt295NativePrograms
     }
 
     /// <summary>
-    /// 操作 2: I2C の転送を、ホストが渡した操作列のとおりに順に行い、読んだバイトを結果の置き場に並べる。ホストが 1 バイトずつ制御転送で動かす
-    /// (Dt295NativeI2c の Transfer) のと同じ手順を、機材の中で行う (制御転送 1 回が約 60 µs で、1 バイトに 3 回要る)。
+    /// 操作 2: I2C の転送を、ホストが渡した操作列のとおりに順に実行し、読んだバイトを結果の置き場に並べる。ホストが 1 バイトずつ制御転送で動かす
+    /// (Dt295NativeI2c の Transfer) のと同じ手順を、機材の中で実行する (制御転送 1 回が約 60 µs で、1 バイトに 3 回要る)。
     /// 要求: +4 操作 2、+8 操作列のアドレス (CPU)、+12 結果の置き場のアドレス (CPU)、+16 転送の数。
     /// 操作列は転送ごとに [アドレス 7 ビット][書く数][読む数][種類] と書くバイト。種類 1 は、書く数のうち最後の 1 バイトを
-    /// 「直前の読みの先頭バイト &amp; keep | set」にして、書くバイトのあとに keep・set の 2 バイトが付く。
+    /// 「直前の読み出しの先頭バイト &amp; keep | set」にして、書くバイトのあとに keep・set の 2 バイトが付く。
     /// 応答: +4 結果 (I2cOk・I2cNack・I2cBusError・I2cTimeout)、+8 止まった転送の番号 (全部済めば転送の数)、+12 読んだバイト数。
-    /// 失敗したら STOP を出して戻る。待つ回数の限度は 1 バイトにつき 0x20000 回の読み
+    /// 失敗したら STOP を出して戻る。待つ回数の限度は 1 バイトにつき 0x20000 回の読み出し
     /// </summary>
     private static void EmitI2c(Fr30Assembler asm)
     {
@@ -435,7 +449,7 @@ public static class Dt295NativePrograms
         asm.LdFp(Kind, R0);
         asm.CmpI(1, R0);
         asm.B(Fr30Cond.Ne, "w_lit");
-        // 種類 1 の最後の 1 バイト: (直前の読み & keep) | set
+        // 種類 1 の最後の 1 バイト: (直前の読み出し & keep) | set
         asm.LdubAc(R4, R0);
         asm.AddI(1, R4);
         asm.LdubAc(R4, R11);
@@ -517,7 +531,7 @@ public static class Dt295NativePrograms
         asm.Add2(-1, R5);
         asm.Far(Fr30Cond.Ra, "t_loop", R12);
 
-        // 失敗: R0 = 結果 (2・3)。STOP を出して戻る
+        // 失敗: R0 = 結果 (1〜3)。STOP を出して戻る
         asm.Label("i2c_nack");
         asm.Ldi8((uint)I2cNack, R0);
         asm.Label("i2c_fail");
@@ -546,8 +560,8 @@ public static class Dt295NativePrograms
 
         // 制御の bit0 (1 バイト終わった) が立つまで読む。R0 = 0 (済んだ)・2 (バスエラー、bit7)・3 (時間切れ)。済んだときの制御の値は R10
         asm.Label("wait_byte");
-        // 先に、制御の bit0 が 0 になっているのを少しの間 (64 回の読みまで) 見る。書いた値が効いて、前の転送の「終わった」の印が消えたことの確認で、
-        // 見ずに bit0 が立つのを待つと、書いた直後の古い bit0 を「終わった」と読み違えるおそれがある。0 が見えなくても (書いた直後にもう終わった)
+        // 先に、制御の bit0 が 0 になっているのを少しの間 (64 回の読み出しまで) 確かめる。書いた値が効いて、前の転送の「終わった」の印が消えたことの確認で、
+        // 確かめずに bit0 が立つのを待つと、書いた直後の古い bit0 を「終わった」と読み違えるおそれがある。0 が読めなくても (書いた直後にもう終わった)
         // 先へ進む。0 の間に「終わった」の印が立つのを待つのは、次の wb_loop
         asm.Ldi8(64, R12);
         asm.Label("wb_clear");
@@ -580,6 +594,94 @@ public static class Dt295NativePrograms
         asm.Label("wb_ok");
         asm.Ldi8(0, R0);
         asm.Ret();
+    }
+
+    /// <summary>
+    /// 操作 3・4: カードの UART (0xFEA000〜。<see cref="CardUart"/> と同じレジスタ) で T=1 のブロックを送り、受けたバイトを読む。
+    /// ホストが 1 バイトごとに制御転送で書き読みする (<see cref="CardUart.Send"/>・<see cref="CardUart.Read"/>) のと同じ手順を機材の中で実行し、
+    /// ECM 1 回で百数十回あった制御転送を数回にする。
+    /// **カードの応答は機材の中で待たない。** 待つ間は TS の要求 (操作 1) が通らず、取り込みのリング (192 KiB) が溢れるため。
+    /// 応答を待つのはホストで、操作 4 を繰り返し呼んで受けたバイトを読み出す。
+    /// <list type="bullet">
+    /// <item>操作 3 の要求: +8 ブロックのアドレス (CPU)、+12 長さ。<see cref="CardUart.Send"/> と同じ順に、受けの LRC = 0、送りの LRC = 0、
+    ///   各バイトを送りのレジスタへ、状態 = 0x3FF、制御 = 0x200 (256 バイト以上は 0x280)、開始 = 1 と書いて戻る。
+    ///   長さ 0 なら UART に触れずに戻る (開くときの確認に使う)。応答: +4 結果 (<see cref="CardOk"/>)、+8 送りのレジスタに書いたバイト数</item>
+    /// <item>操作 4 の要求: +8 読む数の上限。受けた数 (0xFEA014 の上位 16 ビット)・上限・<see cref="InlineCardBytes"/> のいちばん小さい数だけ
+    ///   受けのレジスタを読み、応答の +16 から並べる。上限 0 なら受けのレジスタを読まない。応答: +4 結果 (<see cref="CardOk"/>)、+8 読んだバイト数</item>
+    /// </list>
+    /// </summary>
+    private static void EmitCard(Fr30Assembler asm)
+    {
+        asm.Label("card_send");
+        asm.Ldi20(Staging + 8, R12);
+        asm.Ld(R12, R13);                    // R13 = ブロック (これを基底に、バイトの位置 R4 で読む)
+        asm.AddI(4, R12);
+        asm.Ld(R12, R5);                     // R5 = 長さ
+        asm.Ldi8(0, R4);                     // R4 = 書いたバイト数
+        asm.CmpI(0, R5);
+        asm.B(Fr30Cond.Eq, "card_reply");
+        asm.Ldi8(0, R0);
+        asm.Ldi32(CardUart.RxLrc, R12);
+        asm.St(R0, R12);
+        asm.Ldi32(CardUart.TxLrc, R12);
+        asm.St(R0, R12);
+        asm.Ldi32(CardUart.Tx, R7);
+        asm.Label("cs_byte");
+        asm.LdubAc(R4, R0);
+        asm.St(R0, R7);
+        asm.AddI(1, R4);
+        asm.Cmp(R5, R4);
+        asm.B(Fr30Cond.Ne, "cs_byte");
+        asm.Ldi32(CardUart.Status, R12);
+        asm.Ldi(0x3FF, R0);
+        asm.St(R0, R12);
+        asm.Ldi(0x200, R0);
+        asm.Ldi(0x100, R1);
+        asm.Cmp(R1, R5);
+        asm.B(Fr30Cond.C, "cs_control");     // 256 バイト未満は 0x200
+        asm.Ldi(0x280, R0);
+        asm.Label("cs_control");
+        asm.Ldi32(CardUart.Control, R12);
+        asm.St(R0, R12);
+        asm.Ldi8(1, R0);
+        asm.Ldi32(CardUart.Start, R12);
+        asm.St(R0, R12);
+        asm.Bra("card_reply");
+
+        asm.Label("card_receive");
+        asm.Ldi20(Staging + 8, R12);
+        asm.Ld(R12, R5);                     // R5 = 読む数の上限
+        asm.Ldi8((uint)InlineCardBytes, R1);
+        asm.Cmp(R1, R5);
+        asm.B(Fr30Cond.C, "cr_limit");
+        asm.Mov(R1, R5);                     // 応答に入る数まで
+        asm.Label("cr_limit");
+        asm.Ldi32(CardUart.Count, R12);
+        asm.Ld(R12, R0);
+        asm.Lsr(16, R0);                     // R0 = 受けて読まれていないバイトの数
+        asm.Cmp(R5, R0);
+        asm.B(Fr30Cond.Nc, "cr_count");
+        asm.Mov(R0, R5);
+        asm.Label("cr_count");
+        asm.Ldi20(InlineCard, R13);          // R13 = 応答の +16 (これを基底に、バイトの位置 R4 で書く)
+        asm.Ldi32(CardUart.Rx, R7);
+        asm.Ldi8(0, R4);                     // R4 = 読んだバイト数
+        asm.Label("cr_byte");
+        asm.Cmp(R5, R4);
+        asm.B(Fr30Cond.Eq, "card_reply");
+        asm.Ld(R7, R0);
+        asm.StbAc(R0, R4);
+        asm.AddI(1, R4);
+        asm.Bra("cr_byte");
+
+        // 応答: +4 結果、+8 書いた・読んだバイト数
+        asm.Label("card_reply");
+        asm.Ldi8(CardOk, R0);
+        asm.Ldi20(Staging + 4, R12);
+        asm.St(R0, R12);
+        asm.AddI(4, R12);
+        asm.St(R4, R12);
+        asm.Far(Fr30Cond.Ra, "leave", R12);
     }
 
     /// <summary>[address] を size バイトで読み、expected と違えば "orig" へ。R0 と R12 だけを使う</summary>

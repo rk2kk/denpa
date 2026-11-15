@@ -43,8 +43,10 @@
     shotName,
   } from "#lib/components/player/snapshot.js";
   import Toasts, { type Notice } from "#lib/components/Toasts.svelte";
+  import { Feed } from "#lib/feed.js";
   import { dateTime, fullDate, size, time } from "#lib/format.js";
   import { liveUpdates } from "#lib/live-updates.svelte.js";
+  import { minuteClock } from "#lib/minute-clock.svelte.js";
   import { sentinel } from "#lib/paging.svelte.js";
   import { dayName, dayStart } from "#lib/timeline.js";
 
@@ -74,59 +76,36 @@
   let more = $state<Clip[]>([]);
   // svelte-ignore state_referenced_locally
   let next = $state<number | null>(data.next);
-  /** 読み直しの世代。古い世代で取った続きは足さない (取っている間に読み直したとき) */
-  let generation = 0;
+  /** 続きの取得と読み直しの決まり (`#lib/feed.ts`)。変わったら上の 2 つに写す */
+  // svelte-ignore state_referenced_locally
+  const feed = new Feed<Clip>(
+    data.next,
+    async (before) => {
+      const params = clipSearch(data.query);
+      params.set("before", String(before));
+      const res = await fetch(`${resolve("api/clips")}?${params}`);
+      if (!res.ok) return null;
+      const body = (await res.json()) as {
+        clips: Clip[];
+        next: number | null;
+      };
+      return { items: body.clips, next: body.next };
+    },
+    () => {
+      more = feed.items;
+      next = feed.next;
+    },
+  );
   let shownQuery = "";
   $effect(() => {
     void data.clips;
     const query = String(clipSearch(data.query));
     const keep = query === shownQuery ? untrack(() => more.length) : 0;
     shownQuery = query;
-    generation++;
-    more = [];
-    next = data.next;
-    if (keep > 0) untrack(() => void refill(keep));
+    const first = data.next;
+    untrack(() => void feed.reset(first, keep));
   });
   const clips = $derived([...data.clips, ...more]);
-
-  /** 続きを 1 ページ取る。世代が替わっていたら捨てる */
-  async function fetchMore(): Promise<boolean> {
-    if (next === null) return false;
-    const mine = generation;
-    const params = clipSearch(data.query);
-    params.set("before", String(next));
-    const res = await fetch(`${resolve("api/clips")}?${params}`);
-    if (!res.ok || mine !== generation) return false;
-    const body = (await res.json()) as {
-      clips: Clip[];
-      next: number | null;
-    };
-    if (mine !== generation) return false;
-    more = [...more, ...body.clips];
-    next = body.next;
-    return true;
-  }
-
-  let loading = false;
-  async function loadMore(): Promise<void> {
-    if (loading) return;
-    loading = true;
-    try {
-      await fetchMore();
-    } finally {
-      loading = false;
-    }
-  }
-
-  /** 読み直したあと、読み進めていたぶん (`count` 枚) まで続きを取り直す */
-  async function refill(count: number): Promise<void> {
-    loading = true;
-    try {
-      while (more.length < count && (await fetchMore()));
-    } finally {
-      loading = false;
-    }
-  }
 
   /** 撮った日ごとに分ける (新しい順のまま) */
   const days = $derived.by(() => {
@@ -139,9 +118,10 @@
     }
     return out;
   });
-  const now = Date.now();
+  /** 開いたまま日付をまたいでも、「今日」「昨日」の見出しを進める */
+  const clock = minuteClock();
   function dayLabel(day: number): string {
-    return dayName(day, now) ?? fullDate(day);
+    return dayName(day, clock.now) ?? fullDate(day);
   }
 
   /** 条件を替える。URL を書き換えて load を回し直す (戻るボタンの履歴は積まない) */
@@ -181,7 +161,7 @@
   function describeDay(day: number): string {
     const d = new Date(day);
     const count = marks.get(day) ?? 0;
-    return `${d.getMonth() + 1}月${d.getDate()}日、${count === 0 ? "なし" : `切り抜き ${count} 枚`}`;
+    return `${d.getMonth() + 1} 月 ${d.getDate()} 日、${count === 0 ? "なし" : `切り抜き ${count} 枚`}`;
   }
 
   const KINDS: { id: ClipKind | undefined; label: string }[] = [
@@ -189,11 +169,15 @@
     { id: "live", label: "ライブ" },
     { id: "recorded", label: "録画" },
   ];
-  const filtered = $derived(
-    data.query.q !== undefined ||
+  /** 絞り込みのメニューで選べる条件 (種類・局・日) のどれかで絞っている。メニューのボタンに印を付ける */
+  const narrowed = $derived(
+    data.query.kind !== undefined ||
       data.query.service !== undefined ||
-      data.query.day !== undefined ||
-      data.query.kind !== undefined ||
+      data.query.day !== undefined,
+  );
+  const filtered = $derived(
+    narrowed ||
+      data.query.q !== undefined ||
       data.query.recording !== undefined,
   );
 
@@ -329,7 +313,7 @@
         notice = {
           key: `clip-layer-${Date.now()}`,
           kind: "error",
-          text: "切り替えられませんでした",
+          text: `${layer === "captions" ? "字幕" : "コメント"}の表示を切り替えられませんでした`,
         };
       });
     sending.set(clip.id, task);
@@ -369,6 +353,17 @@
   const selected = new SvelteSet<number>();
   /** 選ぶ形。1 枚でも選んでいる間だけ (全部外したら抜ける) */
   const selecting = $derived(selected.size > 0);
+  /**
+   * 選ぶ形の 1 行 (広い形の `.c-select-wide`) がヘッダーの下に貼り付く間は、ヘッダーも近い影にそろえる
+   * (`+layout.svelte` の `html[data-page-bar]`。docs/design.md の「浮かせ方」)
+   */
+  $effect(() => {
+    if (!selecting) return;
+    document.documentElement.dataset["pageBar"] = "";
+    return () => {
+      delete document.documentElement.dataset["pageBar"];
+    };
+  });
   /** Shift でまとめて選ぶときの起点 (最後に押した 1 枚) */
   let anchor: number | null = null;
   function endSelecting(): void {
@@ -449,36 +444,41 @@
   const MANY = 0;
 
   let filterOpen = $state(false);
+
+  /**
+   * 絞り込みの 1 項目。サイドバーでは行 (`side-item`。選んでいるかは `aria-pressed`)、
+   * 「絞り込み」のメニューではほかのメニューと同じ項目 (`menu-item`。↑↓ で動き、押すと閉じる)
+   */
+  function filterItem(menu: boolean, selected: boolean) {
+    return menu
+      ? {
+          class: "menu-item",
+          role: "menuitemradio",
+          "aria-checked": selected,
+        }
+      : { class: "side-item", "aria-pressed": selected };
+  }
 </script>
 
-<svelte:head><title>切り抜き - denpa</title></svelte:head>
 <svelte:window onclick={deleting.stand} onkeydown={onkey} />
 
-{#snippet kinds(done?: () => void)}
+{#snippet kinds(menu = false)}
   {#each KINDS as kind (kind.label)}
     <button
       type="button"
-      class="side-item"
-      aria-pressed={data.query.kind === kind.id}
-      onclick={() => {
-        apply({ kind: kind.id });
-        done?.();
-      }}
+      {...filterItem(menu, data.query.kind === kind.id)}
+      onclick={() => apply({ kind: kind.id })}
       data-testid="clip-kind"
       data-kind={kind.id ?? "all"}>{kind.label}</button
     >
   {/each}
 {/snippet}
 
-{#snippet services(done?: () => void)}
+{#snippet services(menu = false)}
   <button
     type="button"
-    class="side-item"
-    aria-pressed={data.query.service === undefined}
-    onclick={() => {
-      apply({ service: undefined });
-      done?.();
-    }}
+    {...filterItem(menu, data.query.service === undefined)}
+    onclick={() => apply({ service: undefined })}
     data-testid="clip-service"
   >
     <span>すべての局</span>
@@ -487,12 +487,8 @@
   {#each data.facets.services as service (service.id)}
     <button
       type="button"
-      class="side-item"
-      aria-pressed={data.query.service === service.id}
-      onclick={() => {
-        apply({ service: service.id });
-        done?.();
-      }}
+      {...filterItem(menu, data.query.service === service.id)}
+      onclick={() => apply({ service: service.id })}
       data-testid="clip-service"
       data-service={service.id}
     >
@@ -573,7 +569,7 @@
         <h2 class="day-head" data-testid="clip-day">
           <span class="day-head-chip">
             <span class="day-head-name">{dayLabel(group.day)}</span>
-            {#if dayName(group.day, now) !== null}<span
+            {#if dayName(group.day, clock.now) !== null}<span
                 class="day-head-date num">{fullDate(group.day)}</span
               >{/if}
           </span>
@@ -612,7 +608,7 @@
                 <span class="c-name truncate broadcast" data-testid="clip-name"
                   >{title(clip)}</span
                 >
-                <span class="c-meta tiny muted num"
+                <span class="c-meta small muted num"
                   >{time(clip.takenAt)}{#if clip.programName !== ""}・<span
                       class="broadcast">{clip.serviceName}</span
                     >{/if}</span
@@ -639,7 +635,7 @@
       {#if next !== null}
         <div
           class="c-more small muted"
-          use:sentinel={() => void loadMore()}
+          use:sentinel={() => void feed.loadMore()}
           data-testid="clip-more"
         >
           読み込んでいます…
@@ -671,7 +667,7 @@
     >
       <HomeCalendar
         {marks}
-        today={dayStart(now)}
+        today={dayStart(clock.now)}
         pinned={picked}
         onpick={pickDay}
         describe={describeDay}
@@ -718,11 +714,7 @@
             type="button"
             class="ghost icon"
             title="絞り込み"
-            data-on={data.query.kind !== undefined ||
-            data.query.service !== undefined ||
-            data.query.day !== undefined
-              ? ""
-              : undefined}
+            data-on={narrowed ? "" : undefined}
             data-testid="clip-filter"
           >
             <Icon icon={ListFilter} size="size-5" /><span
@@ -731,26 +723,23 @@
           </button>
         {/snippet}
         <div class="c-menu-head small muted">種類</div>
-        <div class="side-list" role="group" aria-label="ライブか録画か">
-          {@render kinds(() => (filterOpen = false))}
+        <div class="c-menu-group" role="group" aria-label="ライブか録画か">
+          {@render kinds(true)}
         </div>
         {#if data.facets.services.length > 0}
           <div class="c-menu-head small muted">局</div>
-          <div class="side-list" role="group" aria-label="局">
-            {@render services(() => (filterOpen = false))}
+          <div class="c-menu-group" role="group" aria-label="局">
+            {@render services(true)}
           </div>
         {/if}
         {#if data.query.day !== undefined}
-          <div class="side-list">
-            <button
-              type="button"
-              class="side-item"
-              onclick={() => {
-                apply({ day: undefined });
-                filterOpen = false;
-              }}>{fullDate(dayOf(data.query.day))} の絞り込みを外す</button
-            >
-          </div>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            onclick={() => apply({ day: undefined })}
+            >{fullDate(dayOf(data.query.day))} の絞り込みを外す</button
+          >
         {/if}
         <div class="c-menu-head small muted num">
           {data.facets.count} 枚・{size(data.facets.bytes)}
@@ -902,7 +891,7 @@
 
 <style>
   /*
-   * 並べ方は録画の一覧 (`home.css` の `.board`) と同じ: ページごと巻き、広い形は右のサイドバーをヘッダーの下に貼り付ける。
+   * 並べ方は録画の一覧 (`home.css` の `.board`) と同じ。ページごと巻き、広い形は右のサイドバーをヘッダーの下に貼り付ける。
    * スマホの形は絞り込みの 1 行を下のタブのすぐ上に浮かせる (docs/design.md の「浮かせ方」)
    */
   .clips {
@@ -914,15 +903,15 @@
       margin: 0 calc(-1 * var(--dp-gutter)) calc(-1 * var(--dp-gutter));
     }
     .c-list {
-      padding: 0 calc(var(--dp-gutter) - 0.5rem) 1rem;
+      padding: 0 calc(var(--dp-gutter) - var(--dp-space-2)) var(--dp-space-4);
     }
   }
   .c-list {
     min-width: 0;
-    padding-bottom: 1rem;
+    padding-bottom: var(--dp-space-4);
   }
   .c-usage {
-    margin: 0.25rem 0 0.25rem 0.75rem;
+    margin: var(--dp-space-1) 0 var(--dp-space-1) var(--dp-space-3);
   }
 
   /* 日付の見出しは録画の一覧と同じ (`app.css` の `.day-head`)。下のグリッドとは少し離す */
@@ -934,14 +923,14 @@
   }
 
   /*
-     * 平らなグリッド。件の面には乗せず、画像と字だけ (docs/design.md の「ふだんは平らに」)。
-     * 1 枚の幅は 16rem から (11rem では何が写っているか読めなかった)。スマホの幅では 1 列に並ぶ
-     */
+   * 平らなグリッド。件の面には乗せず、画像と字だけ (docs/design.md の「ふだんは平らに」)。
+   * 1 枚の幅は 16rem から (11rem では何が写っているか読めなかった)。スマホの幅では 1 列に並ぶ
+   */
   .c-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
-    gap: 1rem 0.75rem;
-    margin: 0 0 1rem;
+    gap: var(--dp-space-4) var(--dp-space-3);
+    margin: 0 0 var(--dp-space-4);
     padding: 0;
     list-style: none;
   }
@@ -977,13 +966,14 @@
     width: 100%;
     height: auto;
     aspect-ratio: 16 / 9;
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--dp-space-1);
     border-radius: var(--dp-radius);
     background: var(--dp-video);
     object-fit: cover;
   }
+  /* 1 段目は本文、2 段目 (`.c-meta`) は控えた字 (`.small`)。どの一覧も同じ (docs/design.md) */
   .c-name {
-    font-size: var(--dp-text-sm);
+    font-size: var(--dp-text-base);
     font-weight: var(--dp-weight-bold);
   }
   .c-meta {
@@ -1045,30 +1035,34 @@
   .c-check:hover .c-check-mark {
     color: var(--dp-on-video);
   }
-  /* 選んだものも塗らない。輪とレ点を主の色にする (画像の上でも読めるよう、地の暗い円はそのまま) */
+  /*
+   * 選んだものも塗らない。輪とレ点を主の色にする (画像の上でも読めるよう、地の暗い円はそのまま)。
+   * 印はこの輪 1 つだけで、名前の字の色は変えない (同じものに印を 2 つ付けない。docs/design.md)
+   */
   .c-check[aria-pressed="true"] .c-check-mark {
     color: var(--pico-primary);
     box-shadow: inset 0 0 0 2px var(--pico-primary);
   }
-  .c-card[aria-pressed="true"] .c-name {
-    color: var(--dp-primary-text);
-  }
   .c-more {
-    padding: 1rem 0;
+    padding: var(--dp-space-4) 0;
     text-align: center;
   }
   .c-scope {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    margin: 0 0 0.5rem;
+    gap: var(--dp-space-2);
+    margin: 0 0 var(--dp-space-2);
   }
   .c-scope > button,
   .c-select-wide > :global(button) {
     width: auto;
     margin: 0;
   }
-  /* 浮いた 1 行なので、中の主のボタン (削除を確定) は浮かせず太字だけ (docs/design.md の「3 つの層」。`app.css` の `.dock` と同じ値) */
+  /*
+   * ヘッダーの下に貼り付く操作の 1 行。形はヘッダーと同じ (`--dp-bar-*`)、上端では平らで、巻いて中身が裏に入ると
+   * 面と近い影が出る (`app.css` の `dp-bar-float`。時間の軸はヘッダーと同じ窓の巻いた量)。
+   * 浮いた 1 行なので、中の主のボタン (削除を確定) は浮かせず太字だけ (docs/design.md の「3 つの層」。`app.css` の `.dock` と同じ値)
+   */
   .c-select-wide {
     --dp-btn-solid: transparent;
     --dp-btn-solid-hover: var(--dp-btn-tonal-hover);
@@ -1078,13 +1072,22 @@
     z-index: var(--dp-z-pagebar);
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    width: fit-content;
-    margin-bottom: 0.5rem;
-    padding: 0.25rem 0.5rem 0.25rem 1rem;
-    border-radius: var(--dp-radius-full);
+    gap: var(--dp-space-2);
+    margin-bottom: var(--dp-space-2);
+    padding: var(--dp-bar-pad) var(--dp-bar-pad) var(--dp-bar-pad)
+      var(--dp-space-3);
+    border-radius: var(--dp-bar-radius);
     background: var(--dp-float);
-    box-shadow: var(--dp-shadow-pop);
+    box-shadow: var(--dp-shadow-tight);
+  }
+  @supports (animation-timeline: scroll()) {
+    .c-select-wide {
+      background: transparent;
+      box-shadow: none;
+      animation: dp-bar-float linear both;
+      animation-timeline: scroll(root block);
+      animation-range: 0 1.5rem;
+    }
   }
   :global(html[data-phone]) .c-select-wide {
     display: none;
@@ -1099,13 +1102,13 @@
   :global(html[data-phone]) .c-bar {
     position: sticky;
     order: 2;
-    z-index: var(--dp-z-pagebar);
+    z-index: var(--dp-z-dock);
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
     height: 2.75rem;
     margin-inline: calc(var(--dp-dock-inset) - var(--dp-gutter, 1rem));
-    padding-inline: 0.5rem;
+    padding-inline: var(--dp-space-2);
   }
   /* ラベルのあるボタンは中身の幅。アイコンのボタン (絞り込み) は決まりの大きさのまま (auto にすると横に潰れる) */
   :global(html[data-phone]) .c-bar > :global(button) {
@@ -1137,7 +1140,13 @@
     margin-bottom: calc(-1 * var(--dp-gutter, 1rem));
   }
   .c-menu-head {
-    padding: 0.5rem 0.75rem 0.25rem;
+    padding: var(--dp-space-2) var(--dp-space-3) var(--dp-space-1);
+  }
+  /* 種類・局の束。項目の間はメニューと同じ (`app.css` の `.menu`) */
+  .c-menu-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
   }
   :global(.c-filter-menu) {
     width: 16rem;
@@ -1154,7 +1163,7 @@
    * 開き方もダイアログの箱と同じ (少し縮んだ姿からばねで。app.css の `dialog > article`)
    */
   .viewer {
-    padding: 1rem;
+    padding: var(--dp-space-4);
     color: var(--dp-on-video);
   }
   .v-stage {
@@ -1214,7 +1223,7 @@
   .v-info {
     position: absolute;
     inset: auto 5rem 0 0;
-    padding: 2.5rem 1rem 1rem;
+    padding: 2.5rem var(--dp-space-4) var(--dp-space-4);
     background: linear-gradient(
       to top,
       color-mix(in srgb, var(--dp-video) 82%, transparent),
@@ -1233,6 +1242,6 @@
     color: var(--dp-on-video-muted);
   }
   .v-captions {
-    margin-top: 0.25rem;
+    margin-top: var(--dp-space-1);
   }
 </style>

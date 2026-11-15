@@ -27,16 +27,28 @@
  *
  * **予約しか見ない。** ライブや番組表の取得の予定は読めないが、約束の 2 で録画には必ず譲るので、
  * 予約どうしの割り振りはそれらに左右されない。
+ *
+ * **エージェントが何台あっても 1 つの順で数える。** 組 (`Capacity`) は全部のエージェントの組を選ぶ順に並べたもの
+ * (`agent-order.orderGroups`。選局の振り分け `tuner.route` と同じ関数)。予約は局を受けられるエージェントの組にだけ入り、
+ * 共有するのは同じエージェントの同じチャンネルだけ (docs/agent.md「エージェントが何台もあるとき」)。
  */
+
+import { beforeJapanese, typeNames } from "../format";
+import { isSatellite } from "../types";
+import { orderGroups, parsePlaces, type TunerGroup } from "./agent-order";
 
 export interface Assignable {
   id: number;
   start_at: number;
   end_at: number;
   priority: number;
-  /** 局の種別 (GR/BS/CS)。受けられるかはチューナーごとに決まる (`Capacity`) */
+  /** 局の種別 (`ChannelType`)。受けられるかはチューナーごとに決まる (`Capacity`) */
   type: string;
-  /** 物理チャンネル。同じチャンネルなら 1 台のチューナーを共有できる */
+  /**
+   * 局を受けられる所 (エージェントとそのチャンネル。`agent-order.placesKey`・`agent-channels.shareKey`)。
+   * 同じ文字列なら同じ TS で、同じエージェントの同じチャンネルなら 1 台のチューナーを共有できる。
+   * エージェントを書かない名前だけのもの (`T16`) は、どのエージェントの組にも入る (単体テスト)
+   */
   channel: string;
 }
 
@@ -44,7 +56,7 @@ export interface Assignable {
  * 採用したもの。**使ってよい区間つき** (前後マージン込み)。
  *
  * 丸ごと入らないときは**入るところまで**にする (`assign` の「入るところまで録る」)。
- * `from`/`to` が番組の時刻を食っていれば、その録画は頭か尻が欠ける
+ * `from`/`to` が番組の時刻を食っていれば、その録画は先頭か末尾が欠ける
  */
 export interface Accepted<T extends Assignable> {
   reservation: T;
@@ -79,21 +91,15 @@ interface Margins {
 }
 
 /**
- * **チューナー不足の文言で使う単位。** BS と CS は同じ衛星チューナーで受けるので 1 つに言う
+ * **チューナー不足の文言で使う単位。** 画面の名前で言い、BS と CS は同じ衛星チューナーで受けるので 1 つに言う (「BS・CS」)
  */
 function poolOf(type: string): string {
-  return type === "BS" || type === "CS" ? "BS/CS" : type;
-}
-
-/** 同じ `rank` のチューナーの組。受けられる種別は同じ (エージェントとの約束) */
-interface TunerGroup {
-  rank: number;
-  types: ReadonlySet<string>;
-  count: number;
+  return typeNames(isSatellite(type) ? ["BS", "CS"] : [type]);
 }
 
 /**
- * 動いているチューナーを、**エージェントが選ぶ順** (`rank`) に組にして並べたもの。**空なら台数不明。**
+ * 動いているチューナーを、**選ぶ順** (`agent-order.orderGroups`。全部のエージェントの `rank` をまとめた順) に組にして並べたもの。
+ * **空なら台数不明。**
  *
  * 単位ごとの台数で持たないのは、PX-MLT のように**地上波も衛星も受ける 1 台**があるから。
  * 台数で持つと、その 1 台を地上波でも衛星でも 1 台ずつ数えてしまう
@@ -102,24 +108,16 @@ export type Capacity = readonly TunerGroup[];
 
 /**
  * エージェントの一覧から作る。**`rank` の無いチューナー (無効にしたもの) は数えない。**
- * エージェントもそれを選ばない
+ * エージェントもそれを選ばない。並べ方は選局の振り分け (`tuner.openChannel`) と同じ関数 (`orderGroups`)
  */
 export function capacityOf(
-  tuners: readonly { types: readonly string[]; rank: number | null }[],
+  tuners: readonly {
+    agent?: number;
+    types: readonly string[];
+    rank: number | null;
+  }[],
 ): Capacity {
-  const groups = new Map<number, TunerGroup>();
-  for (const tuner of tuners) {
-    if (tuner.rank === null) continue;
-    const group = groups.get(tuner.rank);
-    if (group === undefined)
-      groups.set(tuner.rank, {
-        rank: tuner.rank,
-        types: new Set(tuner.types),
-        count: 1,
-      });
-    else group.count++;
-  }
-  return [...groups.values()].sort((a, b) => a.rank - b.rank);
+  return orderGroups(tuners);
 }
 
 /**
@@ -129,7 +127,10 @@ export function capacityOf(
  * エージェントの一覧で分かる (`GET /denpa/tuners` の `users`。tuner.ts の `recordingHolds`)
  */
 export interface Busy {
+  /** 入っているエージェント (`agents.id`)。無ければどのエージェントのものとも決めない (単体テスト) */
+  agent?: number;
   type: string;
+  /** 入っているチューナーが選局しているチャンネル (そのエージェントの控えでの名前) */
   channel: string;
   /** 入っているチューナーの `rank` */
   rank: number;
@@ -142,9 +143,44 @@ function known(capacity: Capacity, type: string): boolean {
   return capacity.some((group) => group.types.has(type));
 }
 
-/** 1 台のチューナーで足りる単位。エージェントは種別とチャンネルが同じなら選局を共有させる */
+/**
+ * 予約や下見の 1 件が使うものの印 (種別と、受けられる所の文字列)。同じ印なら同じ TS で、1 台のチューナーを共有できる。
+ * チューナーの様子 (`Tuners`) は、これを実際に入った選局 (エージェントとそのチャンネル。`Spot`) に直して数える
+ */
 function keyOf(type: string, channel: string): string {
   return `${type}:${channel}`;
+}
+
+/** 受けられる所の 1 つ。`key` は実際に入った選局の印 (同じエージェントの同じチャンネルで同じ) */
+interface Spot {
+  agent: number | null;
+  key: string;
+}
+
+/** `keyOf` の印を受けられる所に分けたもの。同じ印を何度も読むので覚えておく */
+const spotsCache = new Map<string, readonly Spot[]>();
+
+function spotsOf(key: string): readonly Spot[] {
+  let spots = spotsCache.get(key);
+  if (spots === undefined) {
+    const colon = key.indexOf(":");
+    const type = key.slice(0, colon);
+    spots = parsePlaces(key.slice(colon + 1)).map((place) => ({
+      agent: place.agent,
+      key:
+        place.agent === null
+          ? `${type}:${place.channel}`
+          : `${type}:${place.agent}\t${place.channel}`,
+    }));
+    if (spotsCache.size > 100_000) spotsCache.clear();
+    spotsCache.set(key, spots);
+  }
+  return spots;
+}
+
+/** その所がその組のエージェントのものか。エージェントを決めていない所は、どの組にも入る */
+function fits(spot: Spot, group: TunerGroup): boolean {
+  return spot.agent === null || spot.agent === group.agent;
 }
 
 interface Hold {
@@ -161,54 +197,90 @@ interface Hold {
  */
 class Tuners {
   private readonly free: number[];
-  /** `keyOf` → 入っている組と、使っている数 */
+  /** 実際に入った選局の印 (`Spot.key`) → 入っている組と、使っている数 */
   private readonly held = new Map<string, { group: number; refs: number }>();
+  /**
+   * 使っている人 (`take` の `id`) → 入った選局の印 (`Spot.key`)。離すときはその選局を離す。
+   * 受けられる所は局ごとに違う (カードで絞る) ので、印から探し直すと、同じ TS のほかの人が入った選局を離すことがある
+   */
+  private readonly mine = new Map<unknown, string>();
 
   constructor(private readonly capacity: Capacity) {
     this.free = capacity.map((group) => group.count);
   }
 
-  /** 録画中のものを入れる。capacity に無い `rank` のチューナー (無効にしたものなど) は数えない */
+  /** 録画中のものを入れる。capacity に無い組のチューナー (無効にしたものなど) は数えない */
   place(busy: Busy): string | null {
-    const group = this.capacity.findIndex((g) => g.rank === busy.rank);
+    const group = this.capacity.findIndex(
+      (g) =>
+        g.rank === busy.rank &&
+        (busy.agent === undefined || g.agent === busy.agent),
+    );
     if (group < 0) return null;
-    const key = keyOf(busy.type, busy.channel);
-    this.hold(key, group);
+    const key = keyOf(
+      busy.type,
+      busy.agent === undefined
+        ? busy.channel
+        : `${busy.agent}\t${busy.channel}`,
+    );
+    this.hold(spotsOf(key)[0]!.key, group);
     return key;
   }
 
-  /** `key` に入る。もう入っていればそれを共有し、無ければ組 `group` から 1 台取る。入った組の番号 */
-  private hold(key: string, group: number): number {
-    const held = this.held.get(key);
+  /** 実際の選局 `spot` に入る。もう入っていればそれを共有し、無ければ組 `group` から 1 台取る。入った組の番号 */
+  private hold(spot: string, group: number): number {
+    const held = this.held.get(spot);
     if (held !== undefined) {
       held.refs++;
       return held.group;
     }
     this.free[group]!--;
-    this.held.set(key, { group, refs: 1 });
+    this.held.set(spot, { group, refs: 1 });
     return group;
   }
 
-  /**
-   * 使う。同じチャンネルが入っていればそれを共有し、無ければ**空いていて受けられる組の
-   * うち `rank` のいちばん小さい組**から 1 台取る (約束の 2)。取れた組の番号 (取れなければ -1)
-   */
-  take(type: string, channel: string): number {
-    const key = keyOf(type, channel);
-    const held = this.held.get(key);
-    if (held !== undefined) return this.hold(key, held.group);
-    const group = this.capacity.findIndex(
-      (g, i) => this.free[i]! > 0 && g.types.has(type),
-    );
-    return group < 0 ? -1 : this.hold(key, group);
+  /** 印 `key` の受けられる所のうち、もう入っている選局 (並びの前から) */
+  private heldSpot(key: string): string | undefined {
+    return spotsOf(key).find((spot) => this.held.has(spot.key))?.key;
   }
 
-  /** 離す。最後の 1 人が離れたらチューナーが空く (空いたら true) */
-  drop(key: string): boolean {
-    const held = this.held.get(key);
-    if (held === undefined) return false;
+  /**
+   * 使う。同じエージェントの同じチャンネルが入っていればそれを共有し、無ければ**空いていて受けられる組の
+   * うち選ぶ順のいちばん前の組**から 1 台取る (約束の 2。見るのは局を受けられるエージェントの組だけ)。
+   * 取れた組の番号 (取れなければ -1)
+   */
+  take(type: string, channel: string, id?: unknown): number {
+    const key = keyOf(type, channel);
+    const held = this.heldSpot(key);
+    if (held !== undefined) {
+      if (id !== undefined) this.mine.set(id, held);
+      return this.hold(held, this.held.get(held)!.group);
+    }
+    const spots = spotsOf(key);
+    const group = this.capacity.findIndex(
+      (g, i) =>
+        this.free[i]! > 0 &&
+        g.types.has(type) &&
+        spots.some((spot) => fits(spot, g)),
+    );
+    if (group < 0) return -1;
+    const spot = spots.find((s) => fits(s, this.capacity[group]!))!;
+    if (id !== undefined) this.mine.set(id, spot.key);
+    return this.hold(spot.key, group);
+  }
+
+  /**
+   * 離す。最後の 1 人が離れたらチューナーが空く (空いたら true)。
+   * `id` を渡せば、その人が `take` で入った選局を離す (渡さなければ、印の受けられる所のうち入っているもの。録画中のものは所が 1 つ)
+   */
+  drop(key: string, id?: unknown): boolean {
+    const own = id === undefined ? undefined : this.mine.get(id);
+    if (id !== undefined) this.mine.delete(id);
+    const spot = own ?? this.heldSpot(key);
+    if (spot === undefined) return false;
+    const held = this.held.get(spot)!;
     if (--held.refs > 0) return false;
-    this.held.delete(key);
+    this.held.delete(spot);
     this.free[held.group]!++;
     return true;
   }
@@ -219,12 +291,19 @@ class Tuners {
     copy.free.splice(0, copy.free.length, ...this.free);
     for (const [key, { group, refs }] of this.held)
       copy.held.set(key, { group, refs });
+    for (const [id, spot] of this.mine) copy.mine.set(id, spot);
     return copy;
   }
 
   /** 同じ様子か。同じなら、この先は同じように進む */
   same(other: Tuners): boolean {
-    if (this.held.size !== other.held.size) return false;
+    if (
+      this.held.size !== other.held.size ||
+      this.mine.size !== other.mine.size
+    )
+      return false;
+    for (const [id, spot] of this.mine)
+      if (other.mine.get(id) !== spot) return false;
     for (const [key, { group, refs }] of this.held) {
       const theirs = other.held.get(key);
       if (
@@ -239,18 +318,18 @@ class Tuners {
 }
 
 /**
- * 約束どおりに開始順になぞると、それぞれがどの `rank` のチューナーに入るか (入れなければ null)。
+ * 約束どおりに開始順になぞると、それぞれがどのエージェントのどの `rank` のチューナーに入るか (入れなければ null)。
  * 同じ時刻は**離すほうが先** (区間は半開。スケジューラも止めるほうを先にやる)。
  * 同じ時刻に使うものどうしは渡した順。
  *
- * **エージェントの適合テストと同じ場面を通すための入口** (`tests/fake/tuner-scenes.ts`)。
+ * **エージェントの適合テストと選局の振り分けのテストと同じ場面を通すための入口** (`tests/fake/tuner-scenes.ts`)。
  * 片方だけ直してずれたら、どちらかのテストが落ちる
  */
 export function placements(
   holds: readonly Hold[],
   capacity: Capacity,
   busy: readonly Busy[] = [],
-): (number | null)[] {
+): ({ agent: number; rank: number } | null)[] {
   const tuners = new Tuners(capacity);
   const events: { at: number; delta: 1 | -1; i: number; key: string | null }[] =
     [];
@@ -268,7 +347,9 @@ export function placements(
   });
   events.sort((a, b) => a.at - b.at || a.delta - b.delta || a.i - b.i);
 
-  const placed: (number | null)[] = holds.map(() => null);
+  const placed: ({ agent: number; rank: number } | null)[] = holds.map(
+    () => null,
+  );
   const keys: (string | null)[] = holds.map(() => null);
   for (const event of events) {
     if (event.i < 0) {
@@ -278,12 +359,15 @@ export function placements(
     const hold = holds[event.i]!;
     if (event.delta < 0) {
       const key = keys[event.i];
-      if (key !== null && key !== undefined) tuners.drop(key);
+      if (key !== null && key !== undefined) tuners.drop(key, event.i);
       continue;
     }
-    const group = tuners.take(hold.type, hold.channel);
+    const group = tuners.take(hold.type, hold.channel, event.i);
     if (group < 0) continue;
-    placed[event.i] = capacity[group]!.rank;
+    placed[event.i] = {
+      agent: capacity[group]!.agent,
+      rank: capacity[group]!.rank,
+    };
     keys[event.i] = keyOf(hold.type, hold.channel);
   }
   return placed;
@@ -305,7 +389,7 @@ export function placements(
  * **丸ごと入らないからといって、丸ごと捨てない。** 1 台のチューナーに最後まで収まる
  * 一番長い区間を見つけて、そこだけ使います。
  *
- * 取り合いは**番組まるごと**で起きるとは限りません。実機で出たのはこの例:
+ * 取り合いは**番組まるごと**で起きるとは限りません。実機で出たのは次の例です。
  *
  *     23:45 ────片田舎(テレ朝)──── 00:15
  *     00:00 ────落第賢者(MX)────────────── 00:30
@@ -372,7 +456,7 @@ export function assign<T extends Assignable>(
     if (found === null) {
       rejected.push({
         reservation: candidate,
-        reason: `${poolOf(candidate.type)} を受けられるチューナーが足りません (同時に ${worst(capacity, candidate, mine, rivals, busy)} チャンネル必要です)`,
+        reason: `${beforeJapanese(poolOf(candidate.type))}を受けられるチューナーが足りません (同時に ${worst(capacity, candidate, mine, rivals, busy)} チャンネル必要です)`,
       });
       continue;
     }
@@ -401,7 +485,7 @@ interface Mark {
 const byTime = (a: Mark, b: Mark) =>
   a.at - b.at || a.delta - b.delta || a.i - b.i;
 
-/** `before(i)` が真である頭の並びの長さ (二分探索。`before` は頭から一度だけ偽に変わる) */
+/** `before(i)` が真である先頭からの並びの長さ (二分探索。`before` は先頭から一度だけ偽に変わる) */
 function bound(length: number, before: (i: number) => boolean): number {
   let lo = 0;
   let hi = length;
@@ -422,7 +506,7 @@ function firstAt(marks: readonly Mark[], at: number): number {
  * **採用済みを開始順になぞった様子を、時刻ごとに覚えておいたもの。** 候補を足したら
  * どうなるかを、変わるところだけなぞり直して確かめる (`check`)。足したら覚え直す (`commit`)。
  *
- * 候補ごと・区間の候補ごとに頭から全部なぞっていた頃は、重なり続ける予約が千件あると
+ * 候補ごと・区間の候補ごとに先頭から全部なぞっていた頃は、重なり続ける予約が千件あると
  * 割り振りだけで秒に届いた。足したもの・削ったものより前は何も変わらないので、その時刻の
  * 様子から始める。後ろは、様子が足す前と同じに戻った時点で、その先も同じに進むので打ち切る
  */
@@ -477,14 +561,14 @@ class Timeline {
   /** 使う・離すを 1 つ反映する。使えなければ false */
   private apply(tuners: Tuners, mark: Mark, extra?: Hold): boolean {
     if (mark.delta < 0) {
-      tuners.drop(mark.key);
+      tuners.drop(mark.key, mark.i < 0 ? undefined : mark.i);
       return true;
     }
     const hold =
       mark.i === this.holds.length && extra !== undefined
         ? extra
         : this.holds[mark.i]!;
-    return tuners.take(hold.type, hold.channel) >= 0;
+    return tuners.take(hold.type, hold.channel, mark.i) >= 0;
   }
 
   /**
@@ -613,13 +697,13 @@ interface Trim<T extends Assignable> {
  * 1 台のチューナーに最後まで収まる、いちばん長い区間 (無ければ null)。`fails` は、候補をその区間で足し、
  * 相手をそう削ったら使えなくなる最初の時刻 (全員使えるなら null)。
  *
- * 区切りの候補は、相手が使いはじめる・離す・番組の頭と尻の時刻だけ (その間では
+ * 区切りの候補は、相手が使いはじめる・離す・番組の始まりと終わりの時刻だけ (その間では
  * 誰の出入りも無いので、入れるかどうかも変わらない)。
  * 相手のマージンを削らない場合と削る場合を両方試し、長いほうを採る (同じなら削らないほう)。
  *
- * **頭を決めたら、尻は使えなくなる時刻より前に限る。** 候補が `t` まで使い続けるなら、
- * そこまでのなぞり方は尻をもっと先にしたときと同じなので、そこで使えなくなった誰かは
- * やはり使えない。なので尻を 1 つずつ縮めて試さず、使えなくなった時刻まで一気に縮める
+ * **始まりを決めたら、終わりは使えなくなる時刻より前に限る。** 候補が `t` まで使い続けるなら、
+ * そこまでのなぞり方は終わりをもっと先にしたときと同じなので、そこで使えなくなった誰かは
+ * やはり使えない。なので終わりを 1 つずつ縮めて試さず、使えなくなった時刻まで一気に縮める
  */
 function room<T extends Assignable>(
   candidate: T,
@@ -693,7 +777,7 @@ function room<T extends Assignable>(
         }
         /*
          * 使えなくなった時刻までしか使えない (その時刻ちょうどなら、離すほうが先なので入る)。
-         * 尻を縮めると削り方も変わるが、変わるのは縮めた尻より後の出入りだけなので、
+         * 終わりを縮めると削り方も変わるが、変わるのは縮めた終わりより後の出入りだけなので、
          * それより前に使えなくなったものはやはり使えない
          */
         while (j > i && points[j]! > failed) j--;
@@ -914,7 +998,7 @@ function* sweep(
   const where = new Map<Occupant, number>();
   const waiting = new Set<Occupant>();
   const enter = (o: Occupant) => {
-    const group = tuners.take(o.type, o.channel);
+    const group = tuners.take(o.type, o.channel, o);
     where.set(o, group < 0 ? WAITING : group);
     return group >= 0;
   };
@@ -927,7 +1011,7 @@ function* sweep(
     for (const { o, delta } of batch) {
       if (delta > 0) continue;
       if (where.get(o) === WAITING) waiting.delete(o);
-      else freed = tuners.drop(keyOf(o.type, o.channel)) || freed;
+      else freed = tuners.drop(keyOf(o.type, o.channel), o) || freed;
       active.delete(o);
       where.delete(o);
     }

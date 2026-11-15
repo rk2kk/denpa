@@ -1,5 +1,6 @@
 import { type NetworkInterfaceInfo, networkInterfaces } from "node:os";
 
+import { localName } from "../host";
 import { inAny, networks, normalize, overlaps, unreadable } from "./address";
 import { config } from "./config";
 import { pwaNames } from "./manifest";
@@ -40,7 +41,7 @@ export const HC_TOKEN = "[0-9a-f]{32}";
  * - **ペアリングコードとアクセストークンの受け取り** (`/api/device/code`・`/api/device/token`)。テレビは
  *   まだ何の資格も持っていない。コードを出すだけでは入れず、許すのは `/device` (ここは守る)。
  *   誰でも呼べるので、有効なコードの数に上限がある (device-auth.ts の `MAX_PENDING`)
- * - **http の Hybridcast のアプリの中継** (`/api/bml/hc/<トークン>/…`)。アプリは使い捨てのオリジンの iframe にいて、
+ * - **Hybridcast のアプリの中継** (`/api/bml/hc/<トークン>/…`)。アプリは使い捨てのオリジンの iframe にいて、
  *   そこからの読み込みにはログインの cookie が付かない。推測できないトークンが許可証で、出すのはログインした人にだけ
  *   (`POST /api/bml/hc`。hc-relay.ts)
  */
@@ -123,6 +124,35 @@ export function needsPairing(): Response {
 }
 
 /**
+ * **同じサイトからの呼び出しか。** `Sec-Fetch-Site` を見て、付けない古いブラウザなら `Origin` を比べる。
+ * フォームの形でない送信 (JSON・`application/octet-stream`) には SvelteKit の Origin の確かめが掛からないので、
+ * そういうエンドポイントが自分で呼ぶ
+ */
+export function sameOrigin(request: Request, url: URL): boolean {
+  const site = request.headers.get("sec-fetch-site");
+  return site !== null
+    ? site === "same-origin"
+    : request.headers.get("origin") === url.origin;
+}
+
+/**
+ * **アクセストークン (テレビのアプリ) では使わせない操作を断る理由。** ブラウザの人 (信頼するネットワーク・OIDC) なら null。
+ * 呼ぶ側は 403 と、この文を `message` にして返す。端末に渡した資格で次のことをさせない (docs/auth.md「アプリのペアリング」)
+ *
+ * - DB を持ち出す・入れ替える (denpa を別の機械へ移す、EPGStation・EDCB からの引き継ぎ)
+ * - 録画の通知を送る先 (Webhook) を追加・切り替え・削除・テスト送信する
+ * - 世帯のニコニコのアカウントを差し替える
+ * - ほかのテレビのアプリのアクセストークンを取り消す
+ * - エージェントを登録・名前の変更・URL の変更・削除する (設定の「受信」)
+ * - チューナーの定義・カードリーダーを書き換える、カードの契約と復号を確かめる (設定の「受信」のチューナーの節)
+ */
+export function tokenRefusal(locals: { token?: number }): string | null {
+  return locals.token === undefined
+    ? null
+    : "アクセストークンでは使えません。ブラウザから操作してください";
+}
+
+/**
  * **何も聞かずに通す相手か。** 見るのはアドレス (`TRUSTED_NETWORKS`、CIDR の
  * カンマ区切り)。名前は `foreignHost` で別に確かめる (hooks が両方を見る)。
  *
@@ -132,15 +162,6 @@ export function needsPairing(): Response {
 export function trusted(address: string): boolean {
   return inAny(address, networks(config.trustedNetworks));
 }
-
-/** 名前の後ろがこれなら、外の DNS では引けない (家の中だけの名前。`.localhost` はブラウザが自分に向ける) */
-const LOCAL_SUFFIXES = [
-  ".localhost",
-  ".local",
-  ".lan",
-  ".home.arpa",
-  ".internal",
-];
 
 /**
  * **信頼するネットワークから、ログインなしで開いてよい名前か。**
@@ -152,7 +173,7 @@ const LOCAL_SUFFIXES = [
  * そこで、攻める側が自分の名前として用意できないものだけを通す。
  *
  * - IP の直書き (IPv4・IPv6)、`localhost`、ドットの無い名前
- * - 家の中だけの名前 (`LOCAL_SUFFIXES`)
+ * - 家の中だけの名前 (`#lib/host.ts` の `LOCAL_SUFFIXES`)
  * - 自分の名前として設定にあるもの (`ALLOWED_HOSTS`、`PWA_NAMES`)
  *
  * `host` は `Host` ヘッダの値 (ポート付きでよい)。読めない形なら通さない
@@ -163,7 +184,7 @@ export function knownHost(host: string): boolean {
   if (normalize(name) !== null) return true;
   if (!/^[a-z0-9_.-]+$/.test(name)) return false;
   if (name === "localhost" || !name.includes(".")) return true;
-  if (LOCAL_SUFFIXES.some((suffix) => name.endsWith(suffix))) return true;
+  if (localName(name)) return true;
   return ownNames().some((entry) =>
     entry.startsWith(".")
       ? name === entry.slice(1) || name.endsWith(entry)
@@ -204,7 +225,7 @@ const MAX_REPORTED = 64;
  * `Host` はブラウザのスクリプトから変えられないが、`X-Forwarded-Host` のようなヘッダは
  * 同じオリジンからなら付けられるので、どちらか片方だけでは足りない。
  *
- * 信頼するネットワークの中から知らない名前で来たときに呼ぶ。ログに理由を 1 度だけ出す
+ * 信頼するネットワークの中から来たときに呼ぶ (hooks)。知らない名前なら、ログに理由を 1 度だけ出す
  */
 export function foreignHost(headers: Headers, address: string): string | null {
   const names = [headers.get("host")];
@@ -259,11 +280,16 @@ export function sharedNetworks(
 
 /**
  * 前段と同じネットワークを信頼していそうなら (`sharedNetworks`)、起動ログに出す。
- * **Mac と Windows では見ない。** OS の上でそのまま動くので自分のインターフェースは LAN そのもので、
- * インストーラの既定の `TRUSTED_NETWORKS` と必ず重なる (前段を同じネットワークに置く構成ではない)
+ * **Mac・Windows・Android では見ない。** OS の上でそのまま動くので自分のインターフェースは LAN そのもので、
+ * インストーラ (Android はアプリの denpa.env) の既定の `TRUSTED_NETWORKS` と必ず重なる (前段を同じネットワークに置く構成ではない)
  */
 export function warnIfProxyHidden(): void {
-  if (process.platform === "win32" || process.platform === "darwin") return;
+  if (
+    process.platform === "win32" ||
+    process.platform === "darwin" ||
+    process.platform === "android"
+  )
+    return;
   const shared = sharedNetworks(
     config.trustedNetworks,
     config.trustedProxies,
@@ -294,9 +320,4 @@ export function clientAddress(event: { getClientAddress(): string }): string {
   } catch {
     return "";
   }
-}
-
-/** OIDC でログインを求めるか (素通しのエンドポイントは呼ぶ側 (hooks) が先に振り分ける) */
-export function needsLogin(): boolean {
-  return oidcEnabled();
 }

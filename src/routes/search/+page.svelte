@@ -11,8 +11,12 @@
   import ArmedDelete from "#lib/components/ArmedDelete.svelte";
   import ProgramActions from "#lib/components/ProgramActions.svelte";
   import ProgramDetail from "#lib/components/ProgramDetail.svelte";
+  import ProgramState from "#lib/components/ProgramState.svelte";
   import ServiceLogo from "#lib/components/ServiceLogo.svelte";
-  import Toasts, { errorNotice } from "#lib/components/Toasts.svelte";
+  import Toasts, {
+    errorNotice,
+    warningNotice,
+  } from "#lib/components/Toasts.svelte";
   import { type DetailSeed, programDetail } from "#lib/detail.svelte.js";
   import {
     badgeClass,
@@ -105,6 +109,12 @@
   const minute = minuteClock();
   const clock = $derived(minute.now);
   const watchable = $derived(new Set(data.watchable));
+  /** 番組表に出すが観られない局と、そのわけ (サーバの `unwatchable`。番組表と同じ) */
+  const unwatchable = $derived(
+    new Map(
+      Object.entries(data.unwatchable).map(([id, why]) => [Number(id), why]),
+    ),
+  );
   /** 切り抜きの節の行き先。同じ言葉のまま切り抜きの画面へ */
   const clipsHref = $derived(resolve(`clips?${new URLSearchParams({ q })}`));
 
@@ -228,7 +238,7 @@
   let preview = $state<Preview | null>(null);
   /** スマホの形で書く欄を下から出しているか */
   let sheetOpen = $state(false);
-  /** 「録るか」を聞く番組。結果の一覧に出しうる行 (「もっと見る」で広げるぶんまで) */
+  /** 「録るか」を問い合わせる番組。結果の一覧に出しうる行 (「もっと見る」で広げるぶんまで) */
   const programIds = $derived(data.programs.rows.map((row) => row.id));
   /** 一覧の行のうち、いまの条件で録るもの */
   const recordingCount = $derived(
@@ -261,6 +271,8 @@
   const notices = $derived.by(() => {
     // 詳細から送って断られた理由は、詳細の中にだけ出す (`fromDetail`)
     const list = errorNotice(fromDetail ? null : form, "search-error");
+    // 予約できたが、有料の番組がスクランブルのまま録れるかもしれない。詳細は閉じているので画面の通知に出す
+    list.push(...warningNotice(form, "reserve-warning"));
     if (form?.deletedRule !== undefined) {
       const { canceled } = form.deletedRule;
       list.push({
@@ -324,13 +336,14 @@
               data-testid="recent-clear">履歴を消す</button
             >
           </div>
-          <ul class="item-list" data-testid="recent-searches">
+          <!-- 1 行の並びなので件の面に乗せず、地に並べる (サイドバーと同じ行。docs/design.md の「3 つの層」) -->
+          <ul class="side-list recent-list" data-testid="recent-searches">
             {#each recent as word (word)}
-              <li class="hit item">
+              <li>
                 <a
-                  class="hit-main"
+                  class="side-item"
                   href={resolve(`search?q=${encodeURIComponent(word)}`)}
-                  >{word}</a
+                  ><span class="truncate">{word}</span></a
                 >
               </li>
             {/each}
@@ -421,7 +434,7 @@
                         取消
                       </ActionButton>
                     {/if}
-                  {:else if !program.copy_never}
+                  {:else if !program.copy_never && !unwatchable.has(program.service_id)}
                     <ActionButton
                       action="?/reserve"
                       fields={{ programId: program.id }}
@@ -482,7 +495,7 @@
                     >
                   </span>
                 </svelte:element>
-                {#if rec.state !== "recording"}
+                {#if rec.state !== "recording" && rec.job_id === null}
                   <div class="row-actions">
                     <ArmedDelete
                       {deleting}
@@ -586,7 +599,7 @@
                 <div class="row-actions">
                   {#if res.recording_id !== null}
                     <a
-                      class="button small ghost"
+                      class="button small"
                       href={resolve(`chase/${res.recording_id}`)}>追っかけ</a
                     >
                   {:else if rowCancelable(res.state, res.end_at)}
@@ -712,8 +725,8 @@
               </span>
               <!-- 録るかどうかは事実なので補足の字で (docs/design.md の「印の意味」)。録らない行は薄くもなる (`.dim`) -->
               <span class="hit-meta small muted">
-                <span class="broadcast">{row.service_name}</span>・<span
-                  class="num">{dateTime(row.start_at)}〜{time(row.end_at)}</span
+                {@render service(row)}<span class="num"
+                  >{dateTime(row.start_at)}〜{time(row.end_at)}</span
                 >{#if !row.matched}・録らない (条件から外れました){:else if row.skip !== null}・録らない
                   ({SKIP_LABEL[
                     row.skip.kind
@@ -759,7 +772,7 @@
   </section>
 {/snippet}
 
-<!-- 行の 2 段目の先頭 (局のロゴと名前) と、状態のバッジ -->
+<!-- 行の 2 段目の先頭 (局のロゴと名前。ロゴの大きさと間はホームの行の `RowMeta` と同じ) と、状態のバッジ -->
 {#snippet service(row: {
   service_id: number;
   has_logo: boolean | null;
@@ -768,9 +781,8 @@
   <ServiceLogo
     id={row.service_id}
     has={row.has_logo}
-    style="height: 0.875rem; vertical-align: -0.125rem"
-  />
-  <span class="broadcast">{row.service_name}</span>・
+    style="height: 1rem; margin-right: 0.375rem; vertical-align: -0.1875rem"
+  /><span class="broadcast">{row.service_name}</span>・
 {/snippet}
 {#snippet stateTag(state: string, testid?: string)}
   <span class="tag {badgeClass(state)}" data-testid={testid}
@@ -798,6 +810,14 @@
 
 {#if detail.current}
   <ProgramDetail program={detail.current} onclose={close}>
+    {#snippet status()}
+      {#if opened !== null}
+        <ProgramState
+          state={opened.reservation_state}
+          ended={opened.end_at <= clock}
+        />
+      {/if}
+    {/snippet}
     {#snippet actions()}
       <!-- 何を出すか・どれを主にするかは番組表の詳細と同じ (`ProgramActions`)。録画の再生は出さない (結果の録画の節から観る) -->
       {#if opened !== null}
@@ -807,6 +827,7 @@
             ? {}
             : { reservationId: opened.reservation_id }}
           watchable={watchable.has(opened.service_id)}
+          refusal={unwatchable.get(opened.service_id) ?? null}
           {clock}
           message={fromDetail && failedFor === opened.program_id
             ? (form?.message ?? null)
@@ -856,8 +877,8 @@
   }
   :global(:where(html[data-phone])) .sheet-bar {
     position: fixed;
-    inset-inline: 0.75rem;
-    bottom: calc(var(--dp-tabbar, 0px) + 0.375rem);
+    inset-inline: var(--dp-dock-inset);
+    bottom: calc(var(--dp-tabbar, 0px) + var(--dp-dock-gap));
     z-index: var(--dp-z-dock);
     transition: transform var(--dp-duration-move) var(--dp-ease-spring);
   }
@@ -869,7 +890,9 @@
   :global(:where(html[data-phone]))
     :global([data-retract])
     .sheet-bar:not(:has(:focus-visible)) {
-    transform: translateY(calc(var(--dp-tabbar, 0px) + 0.375rem + 100%));
+    transform: translateY(
+      calc(var(--dp-tabbar, 0px) + var(--dp-dock-gap) + 100%)
+    );
   }
   /* 書く欄の条件では録らない行。消さずに出すが、控えた字にして録るものより沈める (透かすと 4.5:1 を割る) */
   .hit.dim {
@@ -877,6 +900,10 @@
   }
   .summary {
     margin: 0;
+  }
+  /* 最近の検索は節の見出しと字の始まりをそろえる (サイドバーの行は見出しより深く始まるので、その分を外す) */
+  .recent-list {
+    padding-inline-start: 0;
   }
   /*
      * **節は見出しだけ** (カードで囲まず、線も引かない)。行は名前と小さな説明の 2 段で、
@@ -891,7 +918,7 @@
   .clip-strip {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -922,7 +949,7 @@
   }
   .hits-head h2 {
     margin: 0;
-    font-size: var(--dp-text-base);
+    font-size: var(--dp-text-lg);
     font-weight: var(--dp-weight-bold);
   }
   .count {
@@ -938,7 +965,7 @@
     gap: var(--dp-space-2);
     padding-inline-end: var(--dp-space-2);
   }
-  /* 2 段の件は `--dp-item-h` (docs/design.md の「何行かある一覧」。ホームの行と同じ)。1 段の最近の検索は除く */
+  /* 2 段の件は `--dp-item-h` (docs/design.md の「何行かある一覧」。ホームの行と同じ) */
   .hit:has(.hit-meta) {
     min-height: var(--dp-item-h);
   }

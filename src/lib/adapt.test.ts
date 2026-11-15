@@ -7,6 +7,7 @@ import {
   AUDIO_AFTER,
   AUDIO_SHARE,
   AUDIO_WINDOW,
+  autoValue,
   BASE_GUESS_KBPS,
   ENCODE_LAG,
   GRACE,
@@ -103,7 +104,7 @@ describe("下げる", () => {
     ).toBe(1);
   });
 
-  test("溜まりが 2 秒を切って減り続けたら、詰まる前に下げる", () => {
+  test("バッファが 2 秒を切って減り続けたら、詰まる前に下げる", () => {
     const a = new RungAdapter();
     // 1 秒に 0.5 秒ずつ減る。2 秒続いて 2 秒を切った 7 秒目に下げる
     const hit = first(a, 0, 20_000, (now) => ({
@@ -186,7 +187,7 @@ describe("下げる", () => {
 });
 
 describe("観る画面で速さが足りないとき", () => {
-  test("測った速さの 7 割がいまの段に足りない状態が 10 秒続いたら、溜まりがあっても下げる", () => {
+  test("測った速さの 7 割がいまの段に足りない状態が 10 秒続いたら、バッファがあっても下げる", () => {
     const a = new RungAdapter();
     // 16 Mbit/s の MPEG-2 に 20 Mbit/s × 0.7 = 14 Mbit/s では足りない
     expect(
@@ -327,7 +328,7 @@ describe("上げる", () => {
     ).toEqual({ step: 0, reason: "restored" });
   });
 
-  test("ライブは、溜まりが無い状態が 30 秒続き、測った回線の速さが次の段の 1.2 倍あれば 1 段上げる", () => {
+  test("ライブは、バッファが無い状態が 30 秒続き、測った回線の速さが次の段の 1.2 倍あれば 1 段上げる", () => {
     const a = new RungAdapter();
     const clear = paces(() => ({ backlog: 0, dropped: 0, speed: null }));
     expect(
@@ -550,7 +551,7 @@ describe("手で選んでいるとき", () => {
 });
 
 describe("音声だけ", () => {
-  test("段 3 でも 10 秒続けて足りなければ音声だけにする", () => {
+  test("段 3 に移って 10 秒たっても足りないままなら音声だけにする", () => {
     const a = new RungAdapter();
     expect(
       first(a, 0, 60_000, { route: "live", current: 3, waiting: true }),
@@ -624,7 +625,7 @@ describe("音声だけ", () => {
 });
 
 /**
- * **放送に対する遅れの伸び** (`lag`)。溜まりが中継・カーネル・リバースプロキシに隠れると、サーバの `backlog` は 0 のまま。
+ * **放送に対する遅れの伸び** (`lag`)。バッファが中継・カーネル・リバースプロキシに隠れると、サーバの `backlog` は 0 のまま。
  * 手元で 2 Mbit/s に絞り 3 Mbit/s の段を流したとき、`backlog` は 0 のままで、2 Mbit/s のまま段 0 まで上がっていった
  */
 describe("放送に対する遅れの伸び", () => {
@@ -775,7 +776,7 @@ describe("サーバが切り替えなかったとき", () => {
   });
 });
 
-/** **画面に出す文** (`stepLabel`・`adaptNote`)。ライブも観る画面も同じ文 */
+/** **画面に出す文** (`stepLabel`・`autoValue`・`adaptNote`)。ライブも観る画面も同じ文 */
 describe("画面に出す文", () => {
   test("自動の行の値は、段 0 は形式だけ、下げたら高さを添える、音声だけはそう出す", () => {
     expect(stepLabel(0, "MPEG-2")).toBe("MPEG-2");
@@ -784,6 +785,13 @@ describe("画面に出す文", () => {
     // 応答を受ける前はコーデックが分からない
     expect(stepLabel(3, "")).toBe("360p");
     expect(stepLabel("audio", "H.264")).toBe("音声だけ");
+  });
+
+  test("「自動」の行は添えるものを括弧に入れ、添えるものが無ければ「自動」だけ", () => {
+    expect(autoValue(0, "MPEG-2")).toBe("自動 (MPEG-2)");
+    expect(autoValue(2, "H.264")).toBe("自動 (H.264 540p)");
+    expect(autoValue("audio", "")).toBe("自動 (音声だけ)");
+    expect(autoValue(0, "")).toBe("自動");
   });
 
   test("段を動かしたときは、理由と替えた先を書く", () => {
@@ -810,6 +818,52 @@ describe("画面に出す文", () => {
     );
     expect(adaptNote({ step: 0, reason: "pinned" }, 0)).toBe(
       "回線が細いため、再生が止まります。コーデックを「自動」にすると、画質を下げて再生を続けます",
+    );
+  });
+});
+
+describe("端末のデコードが追いつかない (`behind`)", () => {
+  test("「自動」なら 1 段下げ、その段から上へはもう上げない", () => {
+    const adapter = new RungAdapter();
+    expect(
+      first(adapter, 0, 2 * GRACE, {
+        route: "live",
+        current: 1,
+        behind: true,
+      }),
+    ).toEqual({ at: GRACE, decision: { step: 2, reason: "decode" } });
+    // 下げたあとは回線が十分でも、追いつかなかった段 (1) へは戻さない
+    expect(
+      first(adapter, 2 * GRACE, 2 * GRACE + UP_WAIT_MOST + HOLD, {
+        route: "live",
+        current: 2,
+        capacity: ROOMY,
+      }),
+    ).toBeNull();
+  });
+
+  test("形式を手で選んでいるときは段を動かさない", () => {
+    const adapter = new RungAdapter();
+    expect(
+      first(adapter, 0, 60_000, {
+        route: "live",
+        current: 1,
+        manual: true,
+        behind: true,
+      }),
+    ).toBeNull();
+  });
+
+  test("いちばん軽い段からは下げない (音声だけにはしない)", () => {
+    const adapter = new RungAdapter();
+    expect(
+      first(adapter, 0, 60_000, { route: "live", current: 3, behind: true }),
+    ).toBeNull();
+  });
+
+  test("断り書きは追いつかない理由と下げた先", () => {
+    expect(adaptNote({ step: 2, reason: "decode" }, 1)).toBe(
+      "再生が追いつかないため、540p に下げました",
     );
   });
 });

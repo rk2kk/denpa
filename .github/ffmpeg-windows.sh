@@ -10,10 +10,19 @@
 # configure が黙って外す。NVENC (h264_nvenc など) は Dockerfile の一覧にあるので、Windows でも組まれる。
 # patches/ の直しも Linux と同じく当てる。
 #
-# Linux と同じく、SVT-AV1 と Opus はソースから組んで libavcodec に静的に繋ぎ、x264 と dav1d は配布物
-# (MSYS2 のパッケージ。Linux は Debian のもの) を使う。**libav* は Linux と違って静的に繋ぐ** (ffmpeg.exe と ffprobe.exe が
+# Linux と同じく、SVT-AV1 と Opus はソースから組んで libavcodec に静的に繋ぎ、x264・dav1d・zimg は配布物
+# (MSYS2 のパッケージの DLL。Linux は Debian のもの) を使う。MSYS2 に opus・svt-av1 のパッケージが入っていると、組むときに
+# そちらの DLL に繋がる。そのため x264 は CLI のパッケージ (MSYS2 の ffmpeg を通して opus・svt-av1 も入れる) ではなく、
+# ライブラリだけの libx264 を入れる (.github/workflows/windows-server.yml。zip に入る DLL は、そこの bundle で決めた一覧と比べる)。
+# **libav* は Linux と違って静的に繋ぐ** (ffmpeg.exe と ffprobe.exe が
 # それぞれ抱える)。DLL にすると、libavfilter の DLL が libavformat の関数 (metadata フィルタの avio_closep) を解決できず組めない
 # (Linux の共有ライブラリは解決を実行時まで待つので組める)。
+#
+# **ffprobe は ffmpeg とは別に、読む部品だけで組む。** 同じ configure で組むと、libavcodec の部品の一覧が全部のエンコーダ
+# (SVT-AV1・Opus・x264 と GPU のもの) を指しているので、エンコードしない ffprobe.exe にもそれが静的に入り、ffmpeg.exe と同じ大きさになる。
+# ffprobe に入れるのは Dockerfile の一覧のうちデコーダ・デマクサ・パーサ・bsf・プロトコルと、デコーダの使う dav1d・zlib だけで、
+# エンコーダ・マクサ・フィルタ・libavfilter・libavdevice は入れない。読める部品が ffmpeg と同じかは、組んだあとで一覧を比べる。
+# ライセンスの設定 (`--enable-gpl --enable-version3`) は ffmpeg とそろえる
 #
 # **自動で見つけるもの (`--disable-autodetect`) は全部切ってから、要るものだけ足す。** 切らないと、MSYS2 に
 # 入っているものや Windows の API (Media Foundation・D3D11 など) を configure が勝手に繋ぎ、ランナーの中身しだいで
@@ -21,7 +30,7 @@
 #
 # **GPU のエンコーダは NVENC・QSV・AMF を組む** (`gpu`。docs/encode.md「Windows でエンコードする」)。どれもドライバのライブラリは
 # 実行時に読むので、配布物には足さない。ヘッダとライブラリは MSYS2 のパッケージで、ライセンスは GPL-3.0-or-later のままにできるもの
-# (nonfree にしない): nv-codec-headers (MIT。ffnvcodec-headers)、AMF のヘッダ (MIT。amf-headers)、libvpl (MIT。静的ライブラリ)。
+# (nonfree にしない): nv-codec-headers (MIT。ffnvcodec-headers)、AMF のヘッダ (MIT。amf-headers)、libvpl (MIT。DLL)。
 # QSV は Direct3D 11 のデバイスを子にして開くので `--enable-d3d11va` も要る。QSV と AMF のエンコーダは Dockerfile の
 # 一覧に無い (Linux は組まない) ので、ここで足す
 #
@@ -63,9 +72,10 @@ echo "ffmpeg ${FFMPEG_VERSION} / SVT-AV1 ${SVT_AV1_VERSION} / Opus ${OPUS_VERSIO
 CURL="curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20"
 temp=$(cygpath -u "${RUNNER_TEMP:-/tmp}")
 prefix="$temp/ffmpeg-prefix"
+probe_prefix="$temp/ffprobe-prefix"
 work="$temp/ffmpeg-work"
-rm -rf "$prefix" "$work" "$out"
-mkdir -p "$prefix" "$work" "$out/licenses"
+rm -rf "$prefix" "$probe_prefix" "$work" "$out"
+mkdir -p "$prefix" "$probe_prefix" "$work" "$out/licenses"
 # Opus と SVT-AV1 は ffmpeg とは別の入れ先 (`deps/<名前>`) に組む (下)
 deps="$temp/ffmpeg-deps"
 mkdir -p "$deps"
@@ -115,11 +125,14 @@ fi
 if [ "$only" = svt-av1 ]; then exit 0; fi
 cp -r "$deps/opus/licenses/." "$deps/svt-av1/licenses/." "$out/licenses/"
 
-# FFmpeg (キャッシュの鍵はこのスクリプト全体。ここから下を変えても、上の Opus と SVT-AV1 は組み直さない)
-mkdir "$work/ffmpeg" && cd "$work/ffmpeg"
+# FFmpeg (キャッシュの鍵はこのスクリプト全体。ここから下を変えても、上の Opus と SVT-AV1 は組み直さない)。
+# ffmpeg と ffprobe は同じソースから、別々の場所で組む (configure の出力をソースの中に書かない)
+src="$work/ffmpeg"
+mkdir "$src" && cd "$src"
 fetch_tar "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.bz2" j
 for p in "$root"/patches/ffmpeg-*.patch; do [ -e "$p" ] || continue; patch -p1 --fuzz=0 < "$p"; done
-./configure \
+mkdir "$work/build-ffmpeg" && cd "$work/build-ffmpeg"
+"$src/configure" \
   --prefix="$prefix" \
   --enable-gpl \
   --enable-version3 \
@@ -133,7 +146,9 @@ for p in "$root"/patches/ffmpeg-*.patch; do [ -e "$p" ] || continue; patch -p1 -
   --enable-libsvtav1 \
   --enable-libx264 \
   --enable-libdav1d \
+  --enable-libzimg \
   "${gpu[@]}" \
+  --disable-ffprobe \
   --disable-everything \
   --disable-network \
   --disable-doc \
@@ -146,11 +161,57 @@ encoders=$("$prefix/bin/ffmpeg.exe" -hide_banner -encoders)
 for e in h264_nvenc hevc_nvenc av1_nvenc h264_qsv hevc_qsv av1_qsv h264_amf hevc_amf av1_amf; do
   grep -qw "$e" <<< "$encoders" || { echo "ffmpeg に $e が組み込まれていません" >&2; exit 1; }
 done
-mkdir -p "$out/licenses/ffmpeg" && cp COPYING.GPLv3 LICENSE.md "$out/licenses/ffmpeg/"
+# 4K の局の HLG を SDR に直すフィルタ (uhd.HLG_TO_SDR)。zscale は libzimg が無いと configure が黙って外す
+filters=$("$prefix/bin/ffmpeg.exe" -hide_banner -filters)
+for f in setparams zscale tonemap; do
+  grep -qw "$f" <<< "$filters" || { echo "ffmpeg に $f が組み込まれていません" >&2; exit 1; }
+done
+mkdir -p "$out/licenses/ffmpeg" && cp "$src/COPYING.GPLv3" "$src/LICENSE.md" "$out/licenses/ffmpeg/"
+
+# ffprobe (読む部品だけ。冒頭の説明)
+mapfile -t probe_components < <(printf '%s\n' "${components[@]}" | grep -E -- '^--enable-(decoder|demuxer|parser|bsf|protocol)=')
+mkdir "$work/build-ffprobe" && cd "$work/build-ffprobe"
+"$src/configure" \
+  --prefix="$probe_prefix" \
+  --enable-gpl \
+  --enable-version3 \
+  --disable-shared \
+  --enable-static \
+  --pkg-config-flags="--static" \
+  --disable-autodetect \
+  --enable-w32threads \
+  --enable-zlib \
+  --enable-libdav1d \
+  --disable-programs \
+  --enable-ffprobe \
+  --disable-avdevice \
+  --disable-avfilter \
+  --disable-everything \
+  --disable-network \
+  --disable-doc \
+  "${probe_components[@]}"
+make -j"$jobs"
+make install
+# ffprobe が読める部品が ffmpeg と同じか (configure は、組めない部品を黙って外す)。デコーダとデマクサは行ごと比べる
+# (名前・説明・印が同じになる)。lavfi は ffmpeg の入力の装置 (libavdevice) で、`-demuxers` に載るが ffprobe には組まない。
+# bsf は、ffmpeg にはマクサとエンコーダが自分で足すもの (mpegts の hevc_mp4toannexb など) も載るので、Dockerfile の一覧にあるものだけを見る
+for kind in decoders demuxers; do
+  missing=$(comm -23 <("$prefix/bin/ffmpeg.exe" -hide_banner "-$kind" | tr -d '\r' | LC_ALL=C sort) \
+    <("$probe_prefix/bin/ffprobe.exe" -hide_banner "-$kind" | tr -d '\r' | LC_ALL=C sort) | grep -vw lavfi || true)
+  if [ -n "$missing" ]; then
+    echo "ffprobe に、ffmpeg にある $kind がありません:" >&2
+    echo "$missing" >&2
+    exit 1
+  fi
+done
+bsfs=$("$probe_prefix/bin/ffprobe.exe" -hide_banner -bsfs | tr -d '\r')
+for b in $(printf '%s\n' "${probe_components[@]}" | sed -nE 's/^--enable-bsf=//p' | tr ',' ' '); do
+  grep -qx "$b" <<< "$bsfs" || { echo "ffprobe に bsf の $b が組み込まれていません" >&2; exit 1; }
+done
 
 # 実行ファイルと、それが読む DLL。DLL は取り込み表から辿る (Windows の API の集まり api-ms-win-* と、
 # System32 にあるものは置かない)。見つからないものがあれば止める (起動してからエンコードで落ちるより早く分かる)
-cp "$prefix/bin/ffmpeg.exe" "$prefix/bin/ffprobe.exe" "$out/"
+cp "$prefix/bin/ffmpeg.exe" "$probe_prefix/bin/ffprobe.exe" "$out/"
 declare -A seen=()
 queue=("$out/ffmpeg.exe" "$out/ffprobe.exe")
 from_msys=()
@@ -178,7 +239,7 @@ while [ "${#queue[@]}" -gt 0 ]; do
 done
 
 # MSYS2 から写した DLL と、静的に繋いだ MSYS2 のライブラリのパッケージの、ライセンスの文書とバージョン
-for lib in lib/libx264.a lib/libdav1d.a lib/libz.a lib/libwinpthread.a lib/libvpl.a include/ffnvcodec/nvEncodeAPI.h include/AMF/core/Version.h; do
+for lib in lib/libx264.a lib/libdav1d.a lib/libzimg.a lib/libz.a lib/libwinpthread.a lib/libvpl.a include/ffnvcodec/nvEncodeAPI.h include/AMF/core/Version.h; do
   if [ -e "/ucrt64/$lib" ]; then from_msys+=("/ucrt64/$lib"); fi
 done
 : > "$out/licenses/msys2-packages.txt"
@@ -201,6 +262,14 @@ for file in "${from_msys[@]}"; do
   fi
   # x264 は MSYS2 のパッケージに文書が入っていない。ライセンスは GPL-2.0-or-later だけなので、FFmpeg のソースにある GPLv2 の文を置く
   if [ "${#texts[@]}" -eq 0 ] && [ "${name:-}" = x264 ]; then texts=("$work/ffmpeg/COPYING.GPLv2"); fi
+  # zimg も MSYS2 のパッケージに文書が入っていない。上流の同じバージョンのタグ (release-<バージョン>) から COPYING (WTFPL) を取る
+  if [ "${#texts[@]}" -eq 0 ] && [ "${name:-}" = zimg ]; then
+    version=$(pacman -Q "$pkg" | awk '{ print $2 }')
+    version=${version%-*}
+    mkdir -p "$work/zimg-license"
+    $CURL -o "$work/zimg-license/COPYING" "https://raw.githubusercontent.com/sekrit-twc/zimg/release-${version}/COPYING"
+    texts=("$work/zimg-license/COPYING")
+  fi
   # winpthreads は MinGW-w64 の一部で、文書は MinGW-w64 の CRT のパッケージにある
   if [ "${#texts[@]}" -eq 0 ] && [[ "${name:-}" == winpthread* ]]; then
     mapfile -t texts < <(find /ucrt64/share/licenses/crt -type f 2>/dev/null || true)
@@ -220,8 +289,15 @@ cd "$out"
 export PATH="/c/Windows/System32:/c/Windows"
 ./ffmpeg.exe -hide_banner -version
 ./ffprobe.exe -hide_banner -loglevel error -version > /dev/null
+# SVT-AV1 が Dockerfile と同じバージョンか (preset と crf の効き方はバージョンで変わる。src/lib/server/encoder.ts)。
+# SVT-AV1 が標準エラーに出すバージョンの行で見る
 ./ffmpeg.exe -hide_banner -loglevel error -f lavfi -i testsrc2=s=320x240:r=30:d=1 -f lavfi -i sine=d=1 \
-  -c:v libsvtav1 -preset 12 -c:a libopus -f matroska -y "$work/av1.mkv"
+  -c:v libsvtav1 -preset 12 -c:a libopus -f matroska -y "$work/av1.mkv" 2> "$work/av1.log" || { /usr/bin/cat "$work/av1.log" >&2; exit 1; }
+/usr/bin/grep -qF "SVT-AV1 Encoder Lib ${SVT_AV1_VERSION}" "$work/av1.log" || {
+  /usr/bin/cat "$work/av1.log" >&2
+  echo "ffmpeg が読む SVT-AV1 が ${SVT_AV1_VERSION} ではありません" >&2
+  exit 1
+}
 ./ffmpeg.exe -hide_banner -loglevel error -f lavfi -i testsrc2=s=320x240:r=30:d=1 -c:v libx264 -f null -
 ./ffmpeg.exe -hide_banner -loglevel error -c:v libdav1d -i "$work/av1.mkv" -f null -
 /usr/bin/ls -la "$out"

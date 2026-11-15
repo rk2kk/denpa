@@ -16,15 +16,19 @@ internal sealed class NativeTsFramer
 
     /// <summary>
     /// <see cref="Push"/> と同じく 188 バイトのパケットを取り出すが、同期バイトが続く範囲を 1 回でまとめて渡す (パケットごとの呼び出しとコピーを省く)。
-    /// 前の呼び出しの残りが無ければ、<paramref name="data"/> を直接見て、足りない端数だけ持ち越す
+    /// 前の呼び出しの残り (188 バイト未満) があれば、それを 1 パケットに埋めるぶんだけ <see cref="Push"/> で読み、続きは <paramref name="data"/> を直接読む。
+    /// 足りない端数だけ持ち越す
     /// </summary>
     public void PushRuns(ReadOnlySpan<byte> data, Action<ReadOnlySpan<byte>> sink)
     {
-        if (_used > 0)
+        // 埋めるたびに 1 パケット渡すか、同期のずれを捨てて data を 1 バイト以上読む
+        while (_used > 0 && data.Length > 0)
         {
-            Push(data, packet => sink(packet));
-            return;
+            var take = Math.Min(188 - _used, data.Length);
+            Push(data[..take], sink);
+            data = data[take..];
         }
+        if (_used > 0) return;
         var at = 0;
         while (data.Length - at >= 188)
         {
@@ -67,32 +71,45 @@ internal sealed class NativeTsFramer
 }
 
 /// <summary>
-/// TS を 1 回流すぶん。取り込みを設定して始め (<see cref="Dt295NativeBoard"/>)、EP 0x81 の読みを出しっぱなしにして 188 バイトのパケットを取り出し、
+/// TS を 1 回流すぶん。取り込みを設定して始め (<see cref="Dt295NativeBoard"/>)、EP 0x81 の転送要求を出しっぱなしにして 188 バイトのパケットを取り出し、
 /// <see cref="Pipe"/> に詰める。流している間は、別のスレッドで機材のプログラムに要求を送り続ける (1 回の要求で <see cref="KickPackets"/> 個のパケットを bulk IN へ送らせる)。
 /// 要求を送っている間は制御転送が機材の中の処理の終わりまで返らない。通常の要求は <see cref="KickPackets"/> 個 (256 KiB。30 Mbps で約 70 ms) で、
 /// 実機の試験では 30 Mbps を欠けなく送れ、ホストの CPU 時間も少なかった (32 個にすると CS22 の 6 秒で 313 ms から 797 ms に増えた)。
-/// 同じ機材のカードが読み書きしている間 (<see cref="Dt295NativeLink.CardBusy"/>) だけ、UART の受信 FIFO (32 バイト) が溢れないよう、要求を <see cref="CardKickPackets"/> 個 (16 KiB。30 Mbps で約 4 ms) にする (仕様書に無い)
+/// 同じ機材のカードが読み書きしている間 (<see cref="Dt295NativeLink.CardBusy"/>) だけ、要求を <see cref="CardKickPackets"/> 個 (64 KiB。30 Mbps で約 17 ms) にする (仕様書に無い。数は <see cref="CardKickPackets"/> の説明)
 /// </summary>
 internal sealed class Dt295NativeStream
 {
     private const byte Endpoint = 0x81;
 
-    /// <summary>1 本の読みの大きさと数 (8 KiB を 64 本)。以前の方式 (mAgicVISION のファームウェアを入れる方式) のときに実機で測って決めた値</summary>
+    /// <summary>1 本の転送要求の大きさと数 (8 KiB を 64 本)。以前の方式 (mAgicVISION のファームウェアを入れる方式) のときに実機で測って決めた値</summary>
     private const int TransferSize = 8192;
 
     private const int Depth = 64;
 
     private const int ReadTimeoutMs = 100;
 
-    /// <summary>1 回の要求で送らせるパケット数 (512 バイトずつ)。カードが使っていないとき</summary>
+    /// <summary>1 回の要求で送らせるパケット数 (512 バイトずつ)。カードが読み書きしていないとき</summary>
     internal const uint KickPackets = 512;
 
-    /// <summary>カードが読み書きしている間の 1 回の要求のパケット数</summary>
-    internal const uint CardKickPackets = 32;
+    /// <summary>
+    /// カードが読み書きしている間の 1 回の要求のパケット数。
+    ///
+    /// <para>
+    /// **小さくすると TS を取りこぼし、大きくするとカードの応答を読むのが遅れる。** カードの読み書きの制御転送が続く間は、
+    /// TS の要求がロックを譲るので進まず、機材の取り込みのリング (192 KiB。37 Mbps で約 42 ms) が溢れる。
+    /// 要求が大きいと、その間カードの受信 FIFO (32 バイト。19200 ボーで約 17 ms) を読めない。
+    /// 128 個 (64 KiB) は、ホストがカードの UART を 1 バイトずつ読み書きしていたときに実機で測った値 (#2413):
+    /// CS18 (37 Mbps) の 40 秒で、32 個だと連続性の飛びが 8142 個、64 個だと 1593 個、128 個だと 0 個。BS15 (24 Mbps) の 90 秒、
+    /// 地上波 (T28) のライブ 40 秒、全 108 局の 15〜20 秒ずつでも 0 個だった。
+    /// いまはカードの送受信を機材のプログラムに実行させる (<see cref="Dt295NativeLink.CardProgram"/>) ので、1 ブロックの制御転送は数回になり、
+    /// TS の要求が譲る時間は短い。この形では、実機の BS15 と地上波 (T22) で連続性の飛びが 0 個だった (#2413)。CS18 ではまだ測っていない
+    /// </para>
+    /// </summary>
+    internal const uint CardKickPackets = 128;
 
     private const int PumpTimeoutMs = 10_000;
 
-    private readonly Pipe _pipe = Px4Stream.NewBuffer();
+    private readonly Pipe _pipe = TsBuffer.New();
     private readonly Dt295NativeDevice _device;
     private readonly IUsbInStream _in;
     private readonly Action _stalled;
@@ -147,7 +164,7 @@ internal sealed class Dt295NativeStream
         return stream;
     }
 
-    /// <summary>機材のプログラムの状態を戻し、取り込みを始めて、読みと要求を動かす。TS はここから出る (<see cref="Prepare"/> のあと、受信を確認してから)</summary>
+    /// <summary>機材のプログラムの状態を戻し、取り込みを始めて、読み出しと要求を動かす。TS はここから出る (<see cref="Prepare"/> のあと、受信を確認してから)</summary>
     public void Begin()
     {
         try
@@ -270,33 +287,12 @@ internal sealed class Dt295NativeStream
         }
     }
 
-    /// <summary>書いたぶんを渡す。溜めが空かないまま <see cref="Zd1jTuner.StallLimit"/> 経ったら、読む側がいないとみて終わる</summary>
-    private bool Flush(PipeWriter writer)
+    /// <summary>書いたぶんを渡す (<see cref="Zd1jTuner.Flush"/>)。読む側がいないと判定したら終わる</summary>
+    private bool Flush(PipeWriter writer) => Zd1jTuner.Flush(writer, () => _stopped, () =>
     {
-        var flushing = writer.FlushAsync();
-        if (!flushing.IsCompleted)
-        {
-            var waiting = flushing.AsTask();
-            var stalled = Stopwatch.StartNew();
-            while (!waiting.Wait(50))
-            {
-                if (_stopped)
-                {
-                    writer.CancelPendingFlush();
-                    return false;
-                }
-                if (stalled.Elapsed >= Zd1jTuner.StallLimit)
-                {
-                    writer.CancelPendingFlush();
-                    _ended = true;
-                    _stalled();
-                    return false;
-                }
-            }
-            return !waiting.Result.IsCompleted;
-        }
-        return !flushing.Result.IsCompleted;
-    }
+        _ended = true;
+        _stalled();
+    });
 
     private void End(string reason)
     {
@@ -305,7 +301,7 @@ internal sealed class Dt295NativeStream
         Log.Write($"[{_name}] {reason}");
     }
 
-    /// <summary>止める。要求と読みを止め、取り込みを止めて設定を戻し、読みかけの読む側が戻ってから溜めを閉じる</summary>
+    /// <summary>止める。要求と読み出しを止め、取り込みを止めて設定を戻し、読んでいる途中の呼び出しが戻ってからバッファを閉じる</summary>
     public void Stop()
     {
         _stopped = true;
@@ -323,7 +319,8 @@ internal sealed class Dt295NativeStream
 
 /// <summary>
 /// PIX-DT295 のチューナー (地上波・BS・CS。復調は地上波と衛星の 2 つだが、TS を出すのは 1 つずつ)。
-/// 機材は復号しないので、TS はスクランブルのまま出す (B25 はエージェントが復号する)。機材は選局している間だけ取る
+/// 機材は復号しないので、TS はスクランブルのまま出す (B25 はエージェントが復号する)。機材は最初の選局で取り、捨てる (<see cref="Dispose"/>) まで持つ。
+/// 読む側が詰まって止めたときと、機材が使えなくなった (USB が抜けたなど) ときは返す
 /// </summary>
 public sealed class Dt295NativeTuner : ITuneDevice
 {
@@ -350,8 +347,8 @@ public sealed class Dt295NativeTuner : ITuneDevice
     /// <summary>設定の device (画面に出す理由の持ち主のキー)</summary>
     private readonly string _key;
 
-    public Dt295NativeTuner(string port)
-        : this($"{Dt295.Model} {port}", () => Dt295NativeDevice.Acquire(port), () => Dt295NativeDevice.CloseIfIdle(port), Dt295.Device(port))
+    public Dt295NativeTuner(string port, string? name = null)
+        : this(name ?? $"{Dt295.Model} {port}", () => Dt295NativeDevice.Acquire(port), () => Dt295NativeDevice.CloseIfIdle(port), Dt295.Device(port))
     {
     }
 
@@ -375,11 +372,13 @@ public sealed class Dt295NativeTuner : ITuneDevice
 
     internal Dt295NativeDevice? Device => _device;
 
-    public void Tune(ChannelTable.Tuning tuning, uint streamId)
+    public void Tune(ChannelTable.Tuning tuning)
     {
+        var streamId = tuning.StreamId;
         lock (_gate)
         {
-            Stop(release: false);
+            // 前の受信の途中で使えなくなった (USB が抜けた) 機材は返して、開き直す
+            Stop(release: _device is { Faulted: true });
             try
             {
                 _device ??= _acquire();
@@ -387,10 +386,10 @@ public sealed class Dt295NativeTuner : ITuneDevice
             catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or TimeoutException)
             {
                 // 開けない、設定を書けない。空いているときも画面に出す
-                Px4Userland.SetNotice(_key, this, error.Message);
+                TunerNotice.Set(_key, this, error.Message);
                 throw new IOException(error.Message, error);
             }
-            Px4Userland.ClearNotice(_key, this);
+            TunerNotice.Clear(_key, this);
             var device = _device;
             var timeline = device.Timeline;
             // 同じ機材のカードの準備を、選局と並べて始める (復号は TS が届いてからすぐ始められる)
@@ -407,7 +406,7 @@ public sealed class Dt295NativeTuner : ITuneDevice
                 // 同じ機材が同じチャンネルに合ったまま (機材は開いたまま) なら、選局を省いて、受信が続いているかだけ確かめる
                 var reuse = false;
                 if (before is { } was && ReferenceEquals(was.Device, device) && was.Tuning == tuning && was.StreamId == streamId
-                    && frontend.IsTuned(tuning.Satellite, tuning.Satellite ? (uint)tuning.Frequency : (uint)((tuning.Frequency + 500UL) / 1000)))
+                    && frontend.IsTuned(tuning.Satellite, tuning.Satellite ? tuning.Frequency : ChannelTable.Khz(tuning.Frequency)))
                 {
                     using (timeline.Step("同じチャンネル: 受信が続いているかを確かめる", "選局を省く"))
                     {
@@ -424,7 +423,7 @@ public sealed class Dt295NativeTuner : ITuneDevice
                     }
                     else
                     {
-                        using (timeline.Step("選局 (地上波の周波数の設定)", "仕様書 7.2.2")) frontend.TuneTerrestrial((uint)((tuning.Frequency + 500UL) / 1000));
+                        using (timeline.Step("選局 (地上波の周波数の設定)", "仕様書 7.2.2")) frontend.TuneTerrestrial(ChannelTable.Khz(tuning.Frequency));
                     }
                 }
                 // 取り込みの設定は、受信の確認を待つ間に済ませておく (TS はまだ出ない)
@@ -459,7 +458,7 @@ public sealed class Dt295NativeTuner : ITuneDevice
     }
 
     /// <summary>
-    /// いま受けているチャンネルの受信の状態と C/N の生の値 (<see cref="Dt295NativeFrontend.Signal"/>。dB には直していない)。
+    /// いま受けているチャンネルの受信の状態と C/N の生の値 (<see cref="Dt295NativeFrontend.Signal"/>。dB にするのは <see cref="TunerSignal.Tc90522Db"/>)。
     /// 受けていなければ null。I2C を読むだけで、受信中の TS には影響しない
     /// </summary>
     public Dt295Signal? Signal()

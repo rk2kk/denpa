@@ -26,7 +26,7 @@ import {
 const SIZE = { width: 1104, height: 882 };
 const FOLD = SIZE.height / 2;
 /**
- * 上の段を低くした折り目。実機ではブラウザのタブと URL の欄が上の段の頭を取る (CDP では真似られないので、折り目を上げて代わりにする)
+ * 上の段を低くした折り目。実機ではブラウザのタブと URL の欄が上の段の先頭を取る (CDP では真似られないので、折り目を上げて代わりにする)
  */
 const LOW_FOLD = 330;
 
@@ -230,6 +230,9 @@ async function watchRaw(page: Page): Promise<void> {
 }
 
 test.describe("テーブルトップ", () => {
+  // ライブは MPEG-2 をデコードできる端末として開く (`stack.ts` の `liveWithoutMpeg2`)
+  test.use({ liveMpeg2: true });
+
   test.beforeEach(async ({ request }) => {
     await syncEpg(request);
   });
@@ -274,7 +277,7 @@ test.describe("テーブルトップ", () => {
       .evaluate((el) => el.getBoundingClientRect().bottom))!;
     expect(bar).toBeLessThanOrEqual(FOLD);
 
-    // 上の段が低くても (実機ではブラウザの欄が頭を取る)、映像は段の高さいっぱいに縮むだけで、折り目をまたがない
+    // 上の段が低くても (実機ではブラウザの欄が先頭を取る)、映像は段の高さいっぱいに縮むだけで、折り目をまたがない
     await fold(cdp, "tabletop", LOW_FOLD);
     await expectTabletop(page, "live-frame", { fold: LOW_FOLD, tabbar: true });
     await expectReflection(page, "live-frame", LOW_FOLD);
@@ -357,7 +360,7 @@ test.describe("テーブルトップ", () => {
     await expectSideBySide(page, "watch-stage");
     await fold(cdp, "tabletop");
     await expect(page.getByTestId("watch-stage-reflection")).toBeAttached();
-    await expectTabletop(page, "watch-stage", { tabbar: false });
+    await expectTabletop(page, "watch-stage", { tabbar: true });
     await expectReflection(page, "watch-stage");
     // 番組の中身は列の中で巻く
     const body = await page.getByTestId("watch-facts").evaluate((el) => ({

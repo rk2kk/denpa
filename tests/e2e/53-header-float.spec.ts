@@ -25,9 +25,9 @@ function flat(page: Page) {
   );
 }
 
-/** 設定の画面で巻いて、ヘッダーを浮かせる */
+/** 設定の画面 (長く巻ける「連携」) で巻いて、ヘッダーを浮かせる */
 async function floatOnSettings(page: Page) {
-  await goto(page, "/settings");
+  await goto(page, "/settings/integrations");
   const scrollable = await page.evaluate(
     () =>
       document.scrollingElement!.scrollHeight -
@@ -145,7 +145,7 @@ test("Tab で「本文へ移動」が出て、Enter で本文へ焦点が移る"
 test("明暗を選び直したときだけ画面全体が移り、開いたときは移らない", async ({
   page,
 }) => {
-  // E2E のブラウザは GPU を切っていて `<html data-lite>` が付く (`#lib/lite.ts`)。WebGL の描き手の名前を差し替えて、GPU で描ける端末として見る
+  // E2E のブラウザは GPU を切っていて `<html data-lite>` が付く (`#lib/lite.ts`)。WebGL のレンダラの名前を差し替えて、GPU で描ける端末として見る
   await page.addInitScript(() => {
     const read = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function (name: number) {
@@ -277,7 +277,7 @@ test.describe("動きを減らす設定", () => {
  * **スマホでは、番組表の操作の 1 行もほかの画面と同じく下のタブのすぐ上に浮く** (docs/design.md の「浮かせ方」)。
  * 平らなまま表の下に置かれていたので、面 (`--dp-float`) とカプセルの角 (`--dp-radius-full`) を見る
  */
-test("スマホの番組表の操作の1行は、カプセルの面で浮く", async ({ page }) => {
+test("スマホの番組表の操作の 1 行は、カプセルの面で浮く", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await goto(page, "/guide?type=GR");
   const bar = page.getByTestId("guide-toolbar");

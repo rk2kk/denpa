@@ -6,7 +6,8 @@ import { error } from "@sveltejs/kit";
 import { pagesFromMkv } from "#lib/server/captions.js";
 import { config } from "#lib/server/config.js";
 import { fileMemo, sharing } from "#lib/server/file-memo.js";
-import { captionArgs } from "#lib/server/playback.js";
+import { mmtsCaptions } from "#lib/server/mmts.js";
+import { captionArgs, uhdCaptionSource } from "#lib/server/playback.js";
 import { recordingOr404 } from "#lib/server/recording.js";
 import { etagMatches, fileEtag } from "#lib/server/serve.js";
 import { run } from "#lib/server/stream.js";
@@ -23,6 +24,10 @@ import { run } from "#lib/server/stream.js";
  * **まだエンコードできていない録画は元の TS から抜く** (`playback.captionArgs`)。時刻は観る画面の物差し
  * (TS の先頭を 0) に揃える。TS は丸ごと舐めるのでエンコードしたものより時間がかかる (1 時間の BS で 7GB)。
  * エンコードが終わると物差しが変わるので、こちらは覚えない (同時に来たリクエストだけ、1 回の取り出しを共有する)
+ *
+ * **4K の局の録画 (TTML) は ffmpeg を通さない** (`playback.uhdCaptionSource`)。エンコード済みがあれば、その隣に置いた
+ * 文字の配置 (`….captions.json`) をそのまま渡す。無ければ元の録画 (`.mmts`) を denpa が丸ごと読む (`mmts.mmtsCaptions`)。
+ * 録り終えた `.mmts` はエンコードするまで変わらず、物差しも変わらないので、読んだものは覚える (元の TS と違う)
  */
 
 /** 待ち時間の上限。壊れたファイルで ffmpeg を待ち続けない。元の TS は大きいぶん長く待つ */
@@ -69,16 +74,51 @@ async function build(argv: string[], ts: boolean): Promise<Made> {
   const out = joinBytes(parts);
   if (out.length === 0) return { missing: MISSING };
   const pages = pagesFromMkv(out);
+  // 画像の字幕 (PGS) は読まない (null)。字幕の無い録画と同じに返す
   return pages === null
-    ? {
-        missing:
-          "画像の字幕 (PGS) には対応していません。元の TS が残っていれば、再エンコードすると字幕が入ります",
-      }
+    ? { missing: MISSING }
     : { json: JSON.stringify(pages) };
+}
+
+/** 4K の局の録画の字幕を渡す (`uhdCaptionSource`) */
+async function uhdCaptions(
+  source: NonNullable<Awaited<ReturnType<typeof uhdCaptionSource>>>,
+  request: Request,
+): Promise<Response> {
+  if ("missing" in source) error(404, MISSING);
+  if ("sidecar" in source) {
+    const stat = statSync(source.sidecar, { throwIfNoEntry: false });
+    if (stat === undefined) error(404, MISSING);
+    const tag = fileEtag(stat);
+    const headers = {
+      "Content-Type": "application/json",
+      "Cache-Control": "private, no-cache",
+      ETag: tag,
+    };
+    if (etagMatches(request, tag))
+      return new Response(null, { status: 304, headers });
+    return new Response(Bun.file(source.sidecar), { headers });
+  }
+  // 録り終えた `.mmts` は変わらないので、同じファイル (大きさ・更新時刻) なら覚えたものを返す (丸ごと読み直さない)
+  const result = await made.get(source.mmts.path, async (): Promise<Made> => {
+    const pages = await mmtsCaptions(source.mmts, source.serviceId);
+    return pages.pages.length === 0
+      ? { missing: MISSING }
+      : { json: JSON.stringify(pages) };
+  });
+  if ("missing" in result) error(404, result.missing);
+  return new Response(result.json, {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 export async function GET({ params, request }) {
   const recording = recordingOr404(params.id);
+  const uhd = await uhdCaptionSource(recording);
+  if (uhd !== null) return uhdCaptions(uhd, request);
   const args = await captionArgs(recording);
   if (args === null) error(404, MISSING);
   const { argv, path } = args;
@@ -86,7 +126,7 @@ export async function GET({ params, request }) {
 
   /*
    * **持たせてよいが、毎回確かめさせる** (チャプターと同じ)。再エンコードしても置き場所は同じ名前のことがあり、
-   * CM を切れば字幕の時刻も変わる。`no-cache` + ETag (ファイルの大きさと更新時刻) にして、変わっていなければ 304。
+   * 捨てる先頭の長さが変われば字幕の時刻も変わる。`no-cache` + ETag (ファイルの大きさと更新時刻) にして、変わっていなければ 304。
    * 元の TS はエンコードが終わると物差しが変わるので控えさせない
    */
   const stat =

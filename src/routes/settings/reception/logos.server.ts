@@ -1,5 +1,6 @@
 import { type Actions, fail } from "@sveltejs/kit";
 
+import { parseId } from "#lib/id.js";
 import { forgetMaterials } from "#lib/server/cm-material-store.js";
 import { orm } from "#lib/server/db.js";
 import { currentServices, typeRank } from "#lib/server/epg.js";
@@ -11,6 +12,7 @@ import {
   stats as learnStats,
 } from "#lib/server/logo-data.js";
 import {
+  logoSource,
   logoState,
   stats as logoStats,
   sweepNow,
@@ -20,11 +22,23 @@ import { DIGITAL_TV, services } from "#lib/server/schema.js";
 import type { ChannelType } from "#lib/types.js";
 
 /**
+ * 局ロゴの具合。ロゴを取得しない局 (`logo.logoSource` が null。復号できない局・4K の局・スカパー！プレミアムの局と、
+ * 6 分開いても CDT が来なかったケーブルの TS の局) は `skipped`。
+ * ただし取得しない局でも、ONID・SID の同じ局のロゴが同じ行に書かれていれば (`logo.store`) `have`
+ */
+function logoOf(service: Parameters<typeof logoSource>[0] & { id: number }) {
+  if (logoSource(service) !== null) return logoState(service.id);
+  return logoState(service.id) === "have"
+    ? ("have" as const)
+    : ("skipped" as const);
+}
+
+/**
  * 局ごとのロゴ。**番組表に出す局ロゴと、CM 検出のために覚えたロゴは別物** (logo.ts と logo-data.ts) だが、
  * 確かめたいのはどちらも「この局のロゴが取れているか・合っているか」なので、受信できるチャンネルの表の局の行に
  * 列を 2 つ並べる (`Channels.svelte`。局名と種別を別の表で繰り返さない)。
  *
- * - `logo` … 局ロゴの具合 (`logo.logoState`)
+ * - `logo` … 局ロゴの具合 (`logo.logoState`)。取得しない局は `skipped` (`logoOf`)
  * - `cm` … CM 検出のロゴを覚えた時刻 (`logo-data.learnedAt`)。覚えていなければ null。
  *   CM 検出の対象でない局 (テレビでない局・同じ映像を流しているサブチャンネル) もいつも null
  */
@@ -35,7 +49,10 @@ function stationLogos() {
       name: services.name,
       type: services.type,
       network_id: services.network_id,
+      transport_stream_id: services.transport_stream_id,
+      transport: services.transport,
       service_type: services.service_type,
+      decodable: services.decodable,
     })
     .from(services)
     // いま選局できる局だけ
@@ -52,12 +69,12 @@ function stationLogos() {
     ),
   );
   return rows
-    .map(({ id, name, type }) => ({
-      id,
-      name,
-      type: type as ChannelType,
-      logo: logoState(id),
-      cm: cmShown.has(id) ? learnedAt(id) : null,
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      type: row.type as ChannelType,
+      logo: logoOf(row),
+      cm: cmShown.has(row.id) ? learnedAt(row.id) : null,
     }))
     .sort((a, b) => typeRank(a.type) - typeRank(b.type));
 }
@@ -95,9 +112,8 @@ export const actions = {
    */
   logoForget: async ({ request }) => {
     const form = await request.formData();
-    const serviceId = Number(form.get("serviceId"));
-    if (!Number.isFinite(serviceId))
-      return fail(400, { message: "局 ID が不正です" });
+    const serviceId = parseId(form.get("serviceId"));
+    if (serviceId === null) return fail(400, { message: "局 ID が不正です" });
     // 同じ映像を映しているサブチャンネルの枠にも配ってある (`logo-data.share`)
     const ids = [serviceId, ...siblings(serviceId)];
     for (const id of ids) forgetLogoData(id);

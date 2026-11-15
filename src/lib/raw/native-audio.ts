@@ -15,6 +15,7 @@ import {
   MAX_PENDING_BYTES,
   type PcmChunk,
 } from "./native-audio-protocol";
+import { Seam, SNAP } from "./seam";
 
 const TICK_MS = 20;
 /**
@@ -26,6 +27,18 @@ const PCM_LIMIT = 16 * 1024 * 1024;
 const HISTORY_SECONDS = 30;
 const SCHEDULE_AHEAD = 0.3;
 const RESYNC_SECONDS = 0.08;
+/**
+ * 音を途中で止めるとき・途切れのあとに鳴らし始めるときに、音量を上げ下げする時間 (秒)。
+ * 波形が途中で 0 に飛ぶ (または 0 から飛ぶ) と「プツッ」と聞こえる (#2474)。映像が一瞬止まる・先へ飛ぶたびに起きる
+ */
+const FADE_SECONDS = 0.008;
+/** 映像の時刻の動きがこれより小さければ、動いていないとみなす (秒) */
+const FROZEN_SECONDS = 0.001;
+/**
+ * 音とずれて組み直すとき、映像の時刻がこれだけ動いていなければ、映像は止まっているとみなす (秒)。
+ * 止まってからずれが `RESYNC_SECONDS` を超えるまでに同じ長さが過ぎるので、その半分。先へ飛んだ・速さがずれたときは、その刻みで時刻が動いている
+ */
+const STALLED_SECONDS = RESYNC_SECONDS / 2;
 
 /** AudioContext の `at` 秒に、映像は `position` 秒を `rate` 倍で進んでいた */
 interface Clock {
@@ -38,7 +51,6 @@ interface Frame extends PcmChunk {
   bytes: number;
 }
 export class NativeAudio {
-  private readonly context: AudioContext;
   private readonly worker: Worker;
   private readonly outlet: Outlet;
   private readonly muteGain: GainNode;
@@ -47,6 +59,15 @@ export class NativeAudio {
   private readonly listening = new AbortController();
   private frames: Frame[] = [];
   private nodes = new Set<AudioBufferSourceNode>();
+  /**
+   * 予約した音をまとめて通す音量。組み直す (`flush`) ときは今の音を絞りきってから止め、新しいものに替える。
+   * 止めた音が絞りきるまで鳴っている間も、新しく予約した音は新しいほうで鳴る
+   */
+  private fade: GainNode;
+  /** 最後に予約した音が鳴り終わる AudioContext の時刻。組み直すと null (次の音は音量を上げながら鳴らす) */
+  private scheduledEnd: number | null = null;
+  /** 予約したコマを継ぎ目なく並べる (`seam.ts`)。組み直すと保持していた終わりを破棄する */
+  private readonly seam: Seam;
   private epoch = 0;
   /** まだ予約していない最初のコマ (`frames` の添字)。組み直す (`flush`) と 0 に戻る */
   private cursor = 0;
@@ -57,12 +78,26 @@ export class NativeAudio {
   /** 映像の時計と AudioContext の時計の対応。組み直すまで同じものを使う */
   private last: Clock | null = null;
   private clockLatency = 0;
+  /** 映像の時刻が最後に動いた AudioContext の時刻と、そのときの位置。止まっているかはここからの長さで見る */
+  private moved = { at: 0, position: Number.NaN };
+  /**
+   * 映像の時刻が動かないまま、音だけ進んで組み直した。動き出すまで音を予約しない。
+   * WebKit は、バッファが空になって映像が止まっても `waiting` を出さず、`readyState` も 3 のままにすることがある。
+   * 予約し続けると、80 ms 鳴っては組み直すのを繰り返して「ブツブツ」と途切れる
+   */
+  private frozen = false;
+  /**
+   * @param context 鳴らす AudioContext。**畳んでも閉じない** (閉じるのは渡した側)。iOS の Safari は、押したとき以外に作った
+   *   AudioContext を止めたまま始めるので、画質を切り替えるたびに新しく作ると自動再生を断られたことになり、消音になっていた (#2728)。
+   *   畳むときは自分のつないだ音だけを外す
+   */
   constructor(
     private readonly video: HTMLVideoElement,
     private readonly failed: (reason: string) => void,
     decoder: string,
+    private readonly context: AudioContext,
   ) {
-    this.context = new AudioContext({ latencyHint: "interactive" });
+    this.seam = new Seam(this.context.sampleRate);
     let outlet: Outlet | null = null;
     try {
       this.outlet = outlet = new Outlet(
@@ -77,13 +112,13 @@ export class NativeAudio {
       this.muteGain = this.context.createGain();
       this.muteGain.gain.value = 0;
       this.muteGain.connect(this.outlet.input);
+      this.fade = this.newFade();
       this.worker = new Worker(
         new URL("./native-audio-worker.ts", import.meta.url),
         { type: "module" },
       );
     } catch (error) {
       outlet?.destroy();
-      void this.context.close().catch(() => undefined);
       throw error;
     }
     this.worker.onmessage = (event: MessageEvent<AudioOutput>) =>
@@ -182,16 +217,34 @@ export class NativeAudio {
     this.pcmBytes -= first.bytes;
     this.cursor = Math.max(0, this.cursor - 1);
   }
+  private newFade(): GainNode {
+    const fade = this.context.createGain();
+    fade.connect(this.muteGain);
+    return fade;
+  }
   private flush(): void {
-    for (const node of this.nodes) {
-      try {
-        node.stop();
-      } catch {
-        /* もう終わっている */
+    if (this.nodes.size > 0) {
+      // 鳴っている途中で止めると波形が 0 に飛ぶ。絞りきってから止める
+      const now = this.context.currentTime,
+        end = now + FADE_SECONDS,
+        fade = this.fade;
+      fade.gain.cancelScheduledValues(now);
+      fade.gain.setValueAtTime(fade.gain.value, now);
+      fade.gain.linearRampToValueAtTime(0, end);
+      for (const node of this.nodes) {
+        try {
+          node.stop(end);
+        } catch {
+          /* もう終わっている */
+        }
       }
-      node.disconnect();
+      this.nodes.clear();
+      // 止めた音は onended で外れる。絞る音量は、止めた音が鳴り終わってから外す
+      setTimeout(() => fade.disconnect(), FADE_SECONDS * 1000 + 100);
+      this.fade = this.newFade();
     }
-    this.nodes.clear();
+    this.seam.reset();
+    this.scheduledEnd = null;
     this.cursor = 0;
     this.last = null;
   }
@@ -206,8 +259,18 @@ export class NativeAudio {
       this.waiting ||
       video.readyState < 3 ||
       this.context.state !== "running"
-    )
+    ) {
+      // 止めている・待っている間は止まっているうちに数えない。再開した直後の組み直しを、映像が止まったとみない
+      this.moved = { at: now, position };
       return;
+    }
+    if (!(Math.abs(position - this.moved.position) < FROZEN_SECONDS))
+      this.moved = { at: now, position };
+    // 映像が進まないまま止まっている間は鳴らさない (下の組み直しで止めてから動いていない)
+    if (this.frozen) {
+      if (this.moved.at !== now) return;
+      this.frozen = false;
+    }
     const rate = video.playbackRate;
     const follow = (last: Clock) => last.position + (now - last.at) * last.rate;
     // 映像と音の対応は 1 つに保つ。21ms の AAC の 1 コマごとに video.currentTime を読み直すと、
@@ -215,8 +278,14 @@ export class NativeAudio {
     if (
       this.last !== null &&
       Math.abs(follow(this.last) - position) > RESYNC_SECONDS
-    )
+    ) {
       this.flush();
+      // 再生の途中で止まったときも、時計を組んだ直後から動いていないときも、止まってからの長さで見分ける
+      if (now - this.moved.at >= STALLED_SECONDS) {
+        this.frozen = true;
+        return;
+      }
+    }
     if (this.last === null) {
       this.last = { at: now, position, rate };
       const { baseLatency, outputLatency } = this.context;
@@ -246,6 +315,7 @@ export class NativeAudio {
         latency,
       );
       if (plan === null) continue;
+      const when = this.seam.place(plan.when, plan.duration / rate);
       const buffer = this.context.createBuffer(
         frame.planes.length,
         length,
@@ -255,13 +325,26 @@ export class NativeAudio {
       const node = this.context.createBufferSource();
       node.buffer = buffer;
       node.playbackRate.value = rate;
-      node.connect(this.muteGain);
+      node.connect(this.fade);
+      // 途切れのあと (組み直した直後・コマを捨てた・途中から鳴らす) は、波形が 0 から飛ばないよう音量を上げながら鳴らす。
+      // 前の音の終わりから `SNAP` より離れていれば途切れ (`Seam` がつながなかった)
+      if (
+        this.scheduledEnd === null ||
+        when > this.scheduledEnd + SNAP ||
+        plan.offset > 0
+      ) {
+        const gain = this.fade.gain;
+        gain.cancelScheduledValues(when);
+        gain.setValueAtTime(0, when);
+        gain.linearRampToValueAtTime(1, when + FADE_SECONDS);
+      }
+      this.scheduledEnd = when + plan.duration / rate;
       this.nodes.add(node);
       node.onended = () => {
         this.nodes.delete(node);
         node.disconnect();
       };
-      node.start(plan.when, plan.offset, plan.duration);
+      node.start(when, plan.offset, plan.duration);
     }
   }
   /** 自動再生を断られたら、通常の「音を出す」操作へ渡す。 */
@@ -281,8 +364,9 @@ export class NativeAudio {
     this.listening.abort();
     this.worker.terminate();
     this.outlet.destroy();
+    this.muteGain.disconnect();
+    this.fade.disconnect();
     this.context.onstatechange = null;
-    void this.context.close().catch(() => undefined);
     playbackSession(false);
     this.frames = [];
     this.cursor = 0;

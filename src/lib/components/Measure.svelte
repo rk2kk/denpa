@@ -100,7 +100,7 @@
         /*
          * **数えるほうが先。** `CSSStyleRule` にも `cssRules` がある
          * (入れ子が書けるようになったため、たいてい空)。潜るほうを
-         * 先に見ると**規則が全部そちらへ流れて 0 件になる** (実際なった)
+         * 先に見ると**規則が全部そちらへ流れて 0 件になる** (実際に 0 件になった)
          */
         if (rule instanceof CSSStyleRule) {
           seen++;
@@ -287,7 +287,7 @@
     </div>
   {/if}
   <div class="wrap">{rules}</div>
-  {#each culprits as culprit (culprit.what + culprit.bottom)}
+  {#each culprits as culprit, index (index)}
     <div>↳ {culprit.what} → {culprit.bottom}</div>
   {/each}
 </div>
@@ -296,11 +296,11 @@
   .measure {
     pointer-events: none;
     position: fixed;
-    right: 0.25rem;
-    bottom: 0.25rem;
+    right: var(--dp-space-1);
+    bottom: var(--dp-space-1);
     z-index: var(--dp-z-measure);
     max-width: 95vw;
-    padding: 0.25rem 0.5rem;
+    padding: var(--dp-space-1) var(--dp-space-2);
     border-radius: var(--dp-radius-sm);
     background: var(--dp-video-veil-strong);
     color: var(--dp-on-video);

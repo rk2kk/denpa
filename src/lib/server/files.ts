@@ -5,7 +5,7 @@ import {
   rmdirSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   and,
@@ -24,6 +24,7 @@ import {
 import type { Recording } from "../types";
 import { config } from "./config";
 import { affected, now, orm } from "./db";
+import { emit } from "./events";
 import { pruneEmptyDirs, removeIfExists } from "./fsx";
 import { encodedPaths } from "./library";
 import { removeSidecars, SIDECAR_SUFFIXES } from "./metadata";
@@ -83,6 +84,19 @@ export function deleteRecordingFiles(
 }
 
 /**
+ * 人が消す (画面の削除と `DELETE /api/recordings/<id>`)。**録画中は消さない** (使っているチューナーと
+ * 書きかけのファイルが残る)。消したら `recordings` を通知し、開いているほかの画面の一覧も取り直させる
+ *
+ * @returns 録画中で消さなかったら false
+ */
+export function removeRecording(recording: Recording, reason: string): boolean {
+  if (recording.finished_at === null) return false;
+  deleteRecordingFiles(recording, reason);
+  emit("recordings");
+  return true;
+}
+
+/**
  * その置き場所を**他の録画**が現に使っているか (`library_path` / `hevc_path` / `alt_path`)。
  * はぐれファイルを片付けるとき、万一の同名衝突で他の録画を巻き添えにしないために見る
  */
@@ -132,6 +146,8 @@ export function reconcile(): {
     .all();
 
   let removed = 0;
+  /** 行を書き換えたか。開いている画面に知らせる (定期チェックでも、押したときでも) */
+  let changed = false;
   for (const recording of placed) {
     // 主でないもの (H.265・H.264) だけが外から消えたら、その控えだけ外す。主は無事なので録画は残る
     let hevc = recording.hevc_path;
@@ -147,6 +163,7 @@ export function reconcile(): {
         .where(eq(recordings.id, recording.id))
         .run();
       removeSidecars(path);
+      changed = true;
       if (column === "hevc_path") hevc = null;
       else alt = null;
       console.log(
@@ -172,25 +189,41 @@ export function reconcile(): {
         .where(eq(recordings.id, recording.id))
         .run();
       console.log(`[files] 主が消えたので繰り上げました: ${recording.name}`);
+      changed = true;
       continue;
     }
     deleteRecordingFiles(recording, "保存先から消えていました");
     removed++;
+    changed = true;
     console.log(
       `[files] 保存先から消えていたので削除済みにしました: ${recording.name}`,
     );
   }
+
+  if (changed) emit("recordings");
 
   const left = sweepLeftovers();
   return { checked: placed.length, removed, ...left };
 }
 
 /** 動画そのものの拡張子。これの隣に置くものが「サイドカー」 */
-const VIDEO_EXTENSIONS = ["m2ts", "ts", "mkv", "mp4"];
+const VIDEO_EXTENSIONS = ["m2ts", "mmts", "ts", "mkv", "mp4"];
 const VIDEO = new RegExp(`\\.(?:${VIDEO_EXTENSIONS.join("|")})$`, "i");
+/** EPGStation の引き継ぎの書きかけ (`migrate.ts` の `TEMPORARY`)。`.epgstation-12.m2ts.migrating` は下の `TRAILING` にも当たる */
+const MIGRATING = /^\.epgstation-\d+\..+\.migrating$/;
 /** 作業ファイル。動画の名前をまるごと先頭に持つ (`….m2ts.chapters.txt`) */
 const TRAILING = new RegExp(
   `^(.+\\.(?:${VIDEO_EXTENSIONS.join("|")}))\\.[^/]+$`,
+  "i",
+);
+/**
+ * **エンコードの作業ファイル。** 動画の名前のあとにジョブの番号を持つ (`encoder.ts`)。
+ * 書いている間の `<動画>.<ジョブ>.<コーデック>.encoding` とその隣の `.post`・`.chapters.txt`、
+ * チャプターの書き直しの `<動画>.<ジョブ>.post` と `<元の TS>.<ジョブ>.chapters.txt`。
+ * 1 つめの括弧がジョブの番号
+ */
+const WORKING = new RegExp(
+  `^.+\\.(?:${VIDEO_EXTENSIONS.join("|")})\\.(\\d+)\\.(?:[a-z0-9]+\\.encoding(?:\\.post|\\.chapters\\.txt)?|post|chapters\\.txt)$`,
   "i",
 );
 
@@ -244,6 +277,16 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
       ]),
   );
 
+  /** 走っているエンコードのジョブ。その作業ファイルには触らない (`orphan`) */
+  const running = new Set(
+    orm()
+      .select({ id: encodeJobs.id })
+      .from(encodeJobs)
+      .where(eq(encodeJobs.state, "running"))
+      .all()
+      .map((row) => row.id),
+  );
+
   const at = now();
   let swept = 0;
   let strays = 0;
@@ -252,12 +295,12 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
     const videos = new Set(files.filter((path) => VIDEO.test(path)));
     for (const path of videos) {
       // 動画は消さない。手で置いたものかもしれないので、数えるだけ。
-      // エンコードの途中で作る復号した TS (`<入力>.decoded.m2ts`) を数に入れないよう、書きたては飛ばす
+      // エンコードの途中で作る復号した TS (`<入力>.decoded.m2ts`) と、4K の録画を詰め替えた MP4 (`<入力>.remux.mp4`) を数に入れないよう、書きたては飛ばす
       if (!known.has(path) && !settling(path, at)) strays++;
     }
     for (const path of files) {
       if (videos.has(path)) continue;
-      if (!orphan(path, videos)) continue;
+      if (!orphan(path, videos, running)) continue;
       if (settling(path, at)) continue;
       removeIfExists(path);
       pruneEmptyDirs(path);
@@ -298,8 +341,23 @@ function sweepLeftovers(): { swept: number; strays: number; pruned: number } {
   return { swept, strays, pruned };
 }
 
-/** サイドカーで、かつ元の動画が 1 つも無いか */
-function orphan(path: string, videos: Set<string>): boolean {
+/**
+ * サイドカーで、かつ元の動画が 1 つも無いか。
+ *
+ * **エンコードの作業ファイルは、動画があっても、そのジョブが走っていなければ片付ける** (`WORKING`)。
+ * 再エンコードやチャプターの書き直しで落ちたものは、置き換える前の動画が同じ名前で残っているので、
+ * 動画の有る無しだけで見ると片付けから外れていた。走っているジョブのものは、書き終えて別のコーデックを
+ * エンコードしている間 (更新時刻が古くなる) も残す
+ */
+function orphan(
+  path: string,
+  videos: Set<string>,
+  running: Set<number>,
+): boolean {
+  // 引き継ぎの書きかけは次の実行で続きから取るので触らない。片付けは引き継ぎがする (`migrate.sweepTemporaries`)
+  if (MIGRATING.test(basename(path))) return false;
+  const working = WORKING.exec(path);
+  if (working?.[1] !== undefined) return !running.has(Number(working[1]));
   const trailing = TRAILING.exec(path);
   if (trailing?.[1] !== undefined) return !videos.has(trailing[1]);
   // ポスター・データ放送。動画の拡張子を取り替えた名前 (metadata.ts の SIDECAR_SUFFIXES)
@@ -349,7 +407,10 @@ export function pruneHistory(): {
   /*
    * 録画中や予約中のものは、いつ立てたかに関係なく残す。
    * 「終わった予約」は**取り消し・録り逃し・録画しない (コピー禁止) か、もう録り始めたもの**。
-   * 録り始めたあとの顛末は録画の行が持っているので、予約側では見ない
+   * 録り始めたあとの顛末は録画の行が持っているので、予約側では見ない。
+   * **録画の行が指している予約は残す。** 何で録れたか (ルール・手動) は予約の行から引くので
+   * (`/` の一覧の `rule_id`、ルールの一覧の録れた数と最後に録れた日)、消すと 2 週間より前の録画がどれも引き継いだものと同じに見える。
+   * 録画の行を消した (`deleted_at` から 2 週間たった) あとの回で消える
    */
   const droppedReservations = affected(
     orm()
@@ -361,6 +422,13 @@ export function pruneHistory(): {
             isNotNull(reservations.started_at),
           ),
           lt(reservations.end_at, cutoff),
+          notInArray(
+            reservations.id,
+            orm()
+              .select({ id: recordings.reservation_id })
+              .from(recordings)
+              .where(isNotNull(recordings.reservation_id)),
+          ),
         ),
       ),
   );

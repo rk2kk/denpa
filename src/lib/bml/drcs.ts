@@ -8,7 +8,7 @@
  * 字は 87・88 区 (中では私用領域。[euc.ts](euc.ts) の `isDrcs`) に入る。
  */
 
-import { PUA_ADDITIONAL } from "./euc";
+import { isDrcs, PUA_ADDITIONAL } from "./euc";
 
 interface Glyph {
   /** 1 丸ゴシック・2 角ゴシック・3 太丸ゴシック */
@@ -33,7 +33,7 @@ export function parseDrcs(data: Uint8Array): [number, Glyph][] {
       const head = data[at++]!;
       const fontId = head >> 4;
       const mode = head & 0x0f;
-      // ジオメトリックは運用されない。読み方を持たないので、そこから後ろは読まない
+      // 圧縮 (2・3) とジオメトリック (4 から上) は運用されない。読み方を持たないので、そこから後ろは読まない
       if (mode > 1) return out;
       const levels = (data[at++] ?? 0) + 2;
       const width = data[at++] ?? 0;
@@ -51,7 +51,7 @@ export function parseDrcs(data: Uint8Array): [number, Glyph][] {
         alpha[p] = Math.round((value * 255) / (levels - 1));
       }
       at = (position + 7) >> 3;
-      if (ku >= 85 && ku <= 94 && ten >= 1 && ten <= 94)
+      if (ten >= 1 && ten <= 94 && isDrcs(unit))
         out.push([unit, { fontId, width, height, alpha }]);
     }
   }

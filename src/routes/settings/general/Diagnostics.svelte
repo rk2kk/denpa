@@ -6,7 +6,7 @@
 
   import Lead from "#lib/components/Lead.svelte";
   import Icon from "#lib/components/player/Icon.svelte";
-  import { READER_STATE_LABEL } from "#lib/format.js";
+  import { READER_STATE_LABEL, typeNames } from "#lib/format.js";
   import {
     agentSystem,
     CCID_DRIVER,
@@ -30,7 +30,7 @@
   let { data }: { data: PageData } = $props();
 
   /**
-   * スマホの形 (下のタブがある形。`#lib/phone-form.ts`) では、ログの押すもの (読み直す・Issue にする) を絞り込みと同じ 1 行に入れる。
+   * スマホの形 (下のタブがある形。`#lib/phone-form.ts`) では、ログの押すもの (「再読み込み」「Issue にする」) を絞り込みと同じ 1 行に入れる。
    * その 1 行は下のタブの上に浮く (`settings/+layout.svelte` の `.section-bar`)
    */
   const phone = new MediaQuery(PHONE_FORM);
@@ -38,8 +38,9 @@
   /** 読み直しの間も前の中身を出したままにする (`held`。設定の「チューナー」と同じ) */
   const tuners = held(() => data.tuners);
   const card = held(() => data.card);
-  const agent = held(() => data.agentLogs);
-  const about = held(() => data.agentAbout);
+  /** エージェントごとのログとバージョン (`data.agents` と同じ並び) */
+  const agentLogs = held(() => data.agentLogs);
+  const abouts = held(() => data.agentAbout);
 
   /** ブラウザ。サーバでは分からないので、開いてから入れる */
   let browser = $state("");
@@ -57,7 +58,7 @@
           : tuners.value.list
               .map(
                 (t) =>
-                  `${t.name} (${t.types.join("・")}${t.disabled ? "・無効" : ""}${t.error === null ? "" : `・${t.error}`})`,
+                  `${t.name} (${typeNames(t.types)}${t.disabled ? "・無効" : ""}${t.error === null ? "" : `・${t.error}`})`,
               )
               .join("、"),
   );
@@ -79,28 +80,38 @@
     version === "dev" ? "開発ビルド (dev)" : version;
   const versionText = $derived(showVersion(data.environment.version));
 
+  type AboutResult = NonNullable<typeof abouts.value>[number];
+
   /** エージェントのバージョン。取れなければ理由を出す */
-  const agentVersionText = $derived(
-    about.value === undefined
+  const agentVersionText = (about: AboutResult | undefined): string | null =>
+    about === undefined
       ? null
-      : about.value.about === null
-        ? (about.value.error ?? "—")
-        : about.value.about.version === null
+      : about.about === null
+        ? (about.error ?? "—")
+        : about.about.version === null
           ? "不明"
-          : showVersion(about.value.about.version),
-  );
+          : showVersion(about.about.version);
   /** denpa とエージェントは同じバージョンで使うもの。違えば知らせる */
-  const versionMismatch = $derived.by(() => {
-    const version = about.value?.about?.version ?? null;
+  const versionMismatch = (about: AboutResult | undefined): boolean => {
+    const version = about?.about?.version ?? null;
     return version !== null && !sameVersion(data.environment.version, version);
-  });
+  };
 
   // ---- ログ ----
 
-  type Row = LogLine & { source: "server" | "agent"; key: string };
+  /** `agent` はエージェントの行の ID (サーバの行は null) */
+  type Row = LogLine & {
+    source: "server" | "agent";
+    agent: number | null;
+    key: string;
+  };
+
+  const agentName = (id: number | null): string =>
+    data.agents.find((a) => a.id === id)?.name ?? "エージェント";
 
   let showServer = $state(true);
-  let showAgent = $state(true);
+  /** 外したエージェント (行の ID)。どれも外していなければ空 */
+  let hiddenAgents = $state<number[]>([]);
   let problemsOnly = $state(false);
   let query = $state("");
   /** 一度に描く行の数。足りなければ「もっと見る」で増やす */
@@ -113,16 +124,20 @@
         ? data.serverLogs.map((line, i) => ({
             ...line,
             source: "server" as const,
+            agent: null,
             key: `s${i}`,
           }))
         : []),
-      ...(showAgent
-        ? (agent.value?.lines ?? []).map((line, i) => ({
-            ...line,
-            source: "agent" as const,
-            key: `a${i}`,
-          }))
-        : []),
+      ...data.agents.flatMap(({ id }, at) =>
+        hiddenAgents.includes(id)
+          ? []
+          : (agentLogs.value?.[at]?.lines ?? []).map((line, i) => ({
+              ...line,
+              source: "agent" as const,
+              agent: id,
+              key: `a${id}-${i}`,
+            })),
+      ),
     ];
     const words = query.trim().toLowerCase();
     return all
@@ -133,7 +148,7 @@
 
   // 絞り方を変えたら、描く行の数を戻す
   $effect(() => {
-    void [showServer, showAgent, problemsOnly, query];
+    void [showServer, hiddenAgents, problemsOnly, query];
     shown = STEP;
   });
 
@@ -170,24 +185,36 @@
         data.tuners,
         data.card,
       ]);
-      const agentLogs = agent.value;
       const environment = environmentText({
         denpaVersion: data.environment.version,
         server: `${data.environment.os}・${data.environment.runtime}`,
-        agent: about.value,
+        agents: data.agents.map((agent, at) => ({
+          name: agent.name,
+          about: abouts.value?.[at],
+        })),
         tuners: tunerText ?? "—",
         card: cardText ?? "—",
         browser: browser || "—",
       });
       const scrub = (lines: LogLine[]): LogLine[] =>
         lines.map((line) => ({ ...line, text: redact(line.text, known) }));
-      const agentSource: LogSource = {
-        label: "エージェント",
-        tagged: false,
-        lines: scrub(agentLogs?.lines ?? []),
-      };
-      if (agentLogs?.error)
-        agentSource.note = `(${redact(agentLogs.error, known)})`;
+      const agentSources = data.agents.map((agent, at): LogSource => {
+        const logs = agentLogs.value?.[at];
+        const source: LogSource = {
+          label: redact(`エージェント「${agent.name}」`, known),
+          tagged: false,
+          lines: scrub(logs?.lines ?? []),
+        };
+        if (logs?.error) source.note = `(${redact(logs.error, known)})`;
+        return source;
+      });
+      if (data.agentsError !== null)
+        agentSources.push({
+          label: "エージェント",
+          tagged: false,
+          lines: [],
+          note: `(${redact(data.agentsError, known)})`,
+        });
       report = {
         version: data.environment.version,
         environment: redact(environment, known),
@@ -197,7 +224,7 @@
             tagged: true,
             lines: scrub(data.serverLogs),
           },
-          agentSource,
+          ...agentSources,
         ],
       };
     } finally {
@@ -247,39 +274,52 @@
           {/if}
         </div>
         <div class="field">
-          <span class="field-label">エージェントのバージョン</span>
-          <span class="small" data-testid="diag-agent-version">
-            {agentVersionText ?? "エージェントから取得しています…"}
-            {#if versionMismatch}
-              <span class="mismatch" data-testid="diag-version-mismatch">
-                ⚠ denpa ({data.environment.version})
-                とバージョンが違います。同じバージョンに揃えてください
-              </span>
-            {/if}
-          </span>
-        </div>
-        <div class="field">
           <span class="field-label">サーバ</span>
           <span class="small" data-testid="diag-server">
             {data.environment.os}・{data.environment.runtime}
           </span>
         </div>
-        {#if about.value?.about}
+        <!-- エージェントは 1 台ずつ、名前を付けた行にする (1 台でも同じ形) -->
+        {#if data.agentsError !== null}
           <div class="field">
-            <span class="field-label">エージェントの OS</span>
-            <span class="small" data-testid="diag-agent-system">
-              {agentSystem(about.value.about)}
+            <span class="field-label">エージェント</span>
+            <span class="small" data-testid="diag-agent-version">
+              {data.agentsError}
             </span>
           </div>
-          {#if about.value.about.ccidDriver}
-            <div class="field">
-              <span class="field-label">CCID ドライバ</span>
-              <span class="small" data-testid="diag-ccid-driver">
-                {CCID_DRIVER[about.value.about.ccidDriver]}
+        {/if}
+        {#each data.agents as agent, at (agent.id)}
+          {@const about = abouts.value?.[at]}
+          <div class="field" data-agent={agent.id}>
+            <span class="field-label">エージェント「{agent.name}」</span>
+            <span class="small" data-testid="diag-agent-version">
+              {agentVersionText(about) ?? "エージェントから取得しています…"}
+              {#if versionMismatch(about)}
+                <span class="mismatch" data-testid="diag-version-mismatch">
+                  ⚠ denpa ({data.environment.version})
+                  とバージョンが違います。同じバージョンに揃えてください
+                </span>
+              {/if}
+            </span>
+          </div>
+          {#if about?.about}
+            <div class="field" data-agent={agent.id}>
+              <span class="field-label">「{agent.name}」の OS</span>
+              <span class="small" data-testid="diag-agent-system">
+                {agentSystem(about.about)}
               </span>
             </div>
+            {#if about.about.ccidDriver}
+              <div class="field" data-agent={agent.id}>
+                <span class="field-label">「{agent.name}」の CCID ドライバ</span
+                >
+                <span class="small" data-testid="diag-ccid-driver">
+                  {CCID_DRIVER[about.about.ccidDriver]}
+                </span>
+              </div>
+            {/if}
           {/if}
-        {/if}
+        {/each}
         <div class="field">
           <span class="field-label">チューナー</span>
           <span class="small" data-testid="diag-tuners">
@@ -303,7 +343,7 @@
   </div>
 </div>
 
-<!-- ログの押すもの。広い画面では見出しの行の右、スマホの形では絞り込みの 1 行の頭 (上の `phone`) -->
+<!-- ログの押すもの。広い画面では見出しの行の右、スマホの形では絞り込みの 1 行の先頭 (上の `phone`) -->
 {#snippet logActions()}
   <button
     type="button"
@@ -312,7 +352,7 @@
     disabled={reloading}
     data-testid="logs-reload"
   >
-    {reloading ? "読み直しています…" : "読み直す"}
+    {reloading ? "読み込んでいます…" : "再読み込み"}
   </button>
   <button
     type="button"
@@ -362,14 +402,22 @@
             />
             サーバ
           </label>
-          <label class="chip">
-            <input
-              type="checkbox"
-              bind:checked={showAgent}
-              data-testid="logs-agent"
-            />
-            エージェント
-          </label>
+          {#each data.agents as agent (agent.id)}
+            <label class="chip">
+              <input
+                type="checkbox"
+                checked={!hiddenAgents.includes(agent.id)}
+                onchange={(event) => {
+                  hiddenAgents = event.currentTarget.checked
+                    ? hiddenAgents.filter((id) => id !== agent.id)
+                    : [...hiddenAgents, agent.id];
+                }}
+                data-agent={agent.id}
+                data-testid="logs-agent"
+              />
+              {agent.name}
+            </label>
+          {/each}
         </div>
         <label class="check">
           <input
@@ -391,16 +439,28 @@
         />
       </div>
 
-      {#if agent.value?.error}
+      {#if data.agentsError !== null}
         <p class="small muted" data-testid="agent-logs-error">
-          ⚠ {agent.value.error}
+          ⚠ {data.agentsError}
         </p>
       {/if}
+      {#each data.agents as agent, at (agent.id)}
+        {@const error = agentLogs.value?.[at]?.error}
+        {#if error}
+          <p
+            class="small muted"
+            data-agent={agent.id}
+            data-testid="agent-logs-error"
+          >
+            ⚠ {agent.name}: {error}
+          </p>
+        {/if}
+      {/each}
 
       {#if rows.length === 0}
         <p class="small muted" data-testid="logs-empty">
           {query.trim() !== "" || problemsOnly
-            ? "当てはまる行はありません"
+            ? "当てはまるものはありません"
             : "ログはまだありません"}
         </p>
       {:else}
@@ -416,7 +476,9 @@
                 >{stamp(row.at).slice(5)}</time
               >
               <span class="from"
-                >{row.source === "server" ? "サーバ" : "エージェント"}</span
+                >{row.source === "server"
+                  ? "サーバ"
+                  : agentName(row.agent)}</span
               >
               {#if row.level !== "info"}
                 <span class="level">{LEVEL_MARK[row.level]}</span>
@@ -457,8 +519,8 @@
     color: var(--dp-warn-text);
   }
   /*
-   * 新しいバージョンのリンク。事実なのでバッジにせず字のまま、外へ出る印を添える (ヘッダーの「… が公開されています」と同じ)。
-   * 指で押すので高さは 40px を取る
+   * 新しいバージョンのリンク。事実なのでバッジにせず控えた字のまま、外へ出る印を添える
+   * (ヘッダーの「… が公開されています」と同じ。指を乗せたら本文の色)。指で押すので高さは 40px を取る
    */
   .update {
     display: inline-flex;
@@ -466,11 +528,11 @@
     align-items: center;
     gap: 0.375rem;
     min-height: 2.5rem;
-    color: inherit;
+    color: var(--dp-muted);
     text-decoration: none;
   }
   .update:hover {
-    color: var(--pico-h1-color);
+    color: var(--dp-fg);
   }
   .filters {
     display: flex;

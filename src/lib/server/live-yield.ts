@@ -20,12 +20,14 @@
 import { eq } from "drizzle-orm";
 
 import type { YieldedRecording } from "#lib/live.js";
+import type { Recording } from "#lib/types.js";
 
 import { orm } from "./db";
+import { recordedBroadcast } from "./recorded-broadcast";
 import { recordingUntil } from "./recorder";
-import { recordings } from "./schema";
+import { recordings, services } from "./schema";
 import { displayTitle } from "./title";
-import { type AgentTuner, getTuners, recordingOf } from "./tuner";
+import { type AgentTuner, recordingOf } from "./tuner";
 
 type Listed = Pick<AgentTuner, "index" | "channel" | "users">;
 
@@ -66,7 +68,35 @@ export function recordingOn(
 const LOOKS = 5;
 const LOOK_WAIT = 300;
 
-/** 録画の行から、画面に渡す形式を作る。消された・無い録画なら null */
+/**
+ * 録画の行から、画面に渡す形式を作る。消された録画なら null
+ * @param rec `program` は局の放送の番号 (ARIB のサービス ID)。局の行が無ければ null
+ */
+export function yieldedRecording(
+  id: number,
+  rec: Pick<
+    Recording,
+    "name" | "service_name" | "end_at" | "record_to" | "deleted_at" | "ts_path"
+  > & { program: number | null },
+): YieldedRecording | null {
+  if (rec.deleted_at !== null) return null;
+  return {
+    id,
+    title: displayTitle(rec.name),
+    serviceName: rec.service_name,
+    endAt: recordingUntil(rec),
+    /*
+     * 4K の局は `.mmts` の拡張子で、TS で送る 4K の局は録画の PMT で分かる (`recordedBroadcast`)。追っかけをこの形式で開かせる。
+     * 録り始めたばかりで PMT をまだ読めなければ MPEG-2 で、追っかけを開くときにサーバが読み直す (`live.chaseForm`)
+     */
+    broadcast:
+      rec.ts_path === null
+        ? "mpeg2"
+        : recordedBroadcast(rec.ts_path, rec.program ?? 0),
+  };
+}
+
+/** 録画の行を引いて `yieldedRecording` にする。無い録画なら null */
 function lookup(id: number): YieldedRecording | null {
   const rec = orm()
     .select({
@@ -75,17 +105,14 @@ function lookup(id: number): YieldedRecording | null {
       end_at: recordings.end_at,
       record_to: recordings.record_to,
       deleted_at: recordings.deleted_at,
+      ts_path: recordings.ts_path,
+      program: services.service_id,
     })
     .from(recordings)
+    .leftJoin(services, eq(services.id, recordings.service_id))
     .where(eq(recordings.id, id))
     .get();
-  if (rec === undefined || rec.deleted_at !== null) return null;
-  return {
-    id,
-    title: displayTitle(rec.name),
-    serviceName: rec.service_name,
-    endAt: recordingUntil(rec),
-  };
+  return rec === undefined ? null : yieldedRecording(id, rec);
 }
 
 /**
@@ -94,7 +121,8 @@ function lookup(id: number): YieldedRecording | null {
  */
 export async function yieldedTo(
   index: number | null,
-  list: () => Promise<readonly Listed[]> = getTuners,
+  /** 覚えておいたチューナーのエージェントの一覧 (`index` はエージェントごとの番号) */
+  list: () => Promise<readonly Listed[]>,
   find: (id: number) => YieldedRecording | null = lookup,
   wait: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
 ): Promise<YieldedRecording | null> {

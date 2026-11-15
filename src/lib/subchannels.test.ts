@@ -12,13 +12,27 @@ import {
 
 const HOUR = 60 * 60 * 1000;
 
+/** チャンネルの名前を TS の番号にする。同じ名前なら同じ TS */
+function tsOf(channel: string): number {
+  let hash = 0;
+  for (const char of channel) hash = (hash * 31 + char.charCodeAt(0)) % 65_521;
+  return hash;
+}
+
 function station(
   id: number,
   serviceId: number,
   channel: string,
   type = "GR",
+  networkId = 0x7fe0,
 ): Station {
-  return { id, service_id: serviceId, channel, type };
+  return {
+    id,
+    service_id: serviceId,
+    transport_stream_id: tsOf(channel),
+    type,
+    network_id: networkId,
+  };
 }
 
 // テレ東 (1072〜1074) と NHK総合 (1024・1025)。並びは SERVICE_ORDER のとおり
@@ -201,6 +215,31 @@ describe("本チャンネルとサブチャンネル", () => {
       b.id,
       c.id,
       d.id,
+    ]);
+  });
+
+  test("CATV は地上波か BS を再送信している TS だけ束ねる", () => {
+    // 地上波の再送信 (NHK総合1・2) と BS の再送信 (BS朝日1・2)
+    const gr1 = station(40, 1024, "QC20", "CATV", 0x7fe0);
+    const gr2 = station(41, 1025, "QC20", "CATV", 0x7fe0);
+    const bs1 = station(42, 151, "QC30", "CATV", 4);
+    const bs2 = station(43, 152, "QC30", "CATV", 4);
+    // CS の再送信と、ケーブルの自主放送
+    const cs1 = station(44, 296, "QC40", "CATV", 7);
+    const cs2 = station(45, 298, "QC40", "CATV", 7);
+    const own1 = station(46, 101, "QC50", "CATV", 0xfffe);
+    const own2 = station(47, 102, "QC50", "CATV", 0xfffe);
+    const all = [gr1, gr2, bs1, bs2, cs1, cs2, own1, own2];
+    const main = mainOf(all);
+    expect(all.map((s) => main.get(s.id))).toEqual([
+      gr1.id,
+      gr1.id,
+      bs1.id,
+      bs1.id,
+      cs1.id,
+      cs2.id,
+      own1.id,
+      own2.id,
     ]);
   });
 

@@ -3,9 +3,9 @@ using System.Diagnostics;
 namespace Denpa.Agent;
 
 /// <summary>
-/// 自前方式 (dt295:) の I2C。ホストが I2C コントローラのレジスタ (0xFD8FE0〜) を 0xBC のメモリ要求で直に動かす。
-/// 節の番号は仕様書 (dt295-resident/spec.md) のもの。仕様書では補助 CPU がやる仕事 (仕様書 6.4)。
-/// ふだんは機材の中の順次実行 (<see cref="Run"/> と <see cref="UseSequencer"/>) で同じ手順を行い、ここの <see cref="Transfer"/> は使えないときに使う。
+/// PIX-DT295 (dt295:) の I2C。ホストが I2C コントローラのレジスタ (0xFD8FE0〜) を 0xBC のメモリ要求で直に動かす。
+/// 節の番号は仕様書 (dt295-resident/spec.md) のもの。仕様書では補助 CPU の処理 (仕様書 6.4)。
+/// ふだんは機材の中の順次実行 (<see cref="Run"/> と <see cref="UseSequencer"/>) で同じ手順を実行し、ここの <see cref="Transfer"/> は使えないときに使う。
 ///
 /// コントローラは富士通の I2C (状態・制御・データ) と同じ形 (仕様書 6.4):
 /// 状態 0xFD8FE0 の bit7 = バス使用中・bit4 = 最後の ACK が来なかった。制御 0xFD8FE4 の bit7 = バスエラー・bit5 = 再スタート・
@@ -13,9 +13,9 @@ namespace Denpa.Agent;
 ///
 /// 仕様書に無くて決めた所:
 /// - 1 バイト終わるのを、仕様書の割り込み要因 (0xFD8090 と 0xFD80B0 の bit0) ではなく制御の bit0 を読んで待つ (仕様書 6.4 の表に制御の bit0 の意味がある)
-/// - 読み書きの制御転送を減らすため、制御レジスタは書いた値を覚えておき、待つときに読んだ値を元にして次の値を作る
+/// - 読み書きの制御転送を減らすため、制御レジスタは書いた値を持っておき、待つときに読んだ値を元にして次の値を作る
 /// - STOP は制御の bit0・3・4・5 を落とした値を書く (仕様書は bit4 を落とすとだけ書いている)
-/// - 仕様書 6.4 の手順 4 のとおり、ACK が来なかったかはアドレスを送った直後だけ見る。データの途中では見ない
+/// - 仕様書 6.4 の手順 4 のとおり、ACK が来なかったかはアドレスを送った直後だけ確かめる。データの途中では確かめない
 /// </summary>
 public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace = null)
 {
@@ -29,7 +29,7 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
     private bool _checkIdle = true;
 
     /// <summary>1 バイトを待つ上限</summary>
-    public TimeSpan ByteTimeout { get; init; } = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan ByteTimeout = TimeSpan.FromMilliseconds(200);
 
     /// <summary>準備 (<see cref="Prepare"/>) で書く USB コアのレジスタ。常駐イメージが I2C を動かし始めるとき、これらが変わるのを実機で観測した。呼ぶ側が <see cref="Dt295NativeLink.AllowedCoreWrites"/> に入れておく</summary>
     public static readonly uint[] ClockRegisters = [0xFD8010, 0xFD8014, 0xFD80B0, 0xFD80C0];
@@ -40,7 +40,7 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
     /// <summary>
     /// <see cref="Prepare"/> のあと、I2C のレジスタが書いた値で読めたか (制御 0xFD8FE4 が 0x42、0xFD8FF8 が 6、0xFD8FF4 が 0x10。制御の bit0 は除く)。
     /// 実機の常駐イメージが動かした I2C は、0xFD8FE8 が 0xBC (書いた 0x3C に bit7 の状態が付く)、0xFD8FEC が 0x80、0xFD8FFC が 0x30 だった。
-    /// ここでは 0xFD8FE8 と、そのほかの読み値は見ない
+    /// ここでは 0xFD8FE8 と、そのほかの読み値は確かめない
     /// </summary>
     public bool Alive { get; private set; }
 
@@ -54,19 +54,19 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
         _saved.Clear();
         // 実機の 0xFD8010 は 4 で、0x10 をそのまま書くと USB の制御が止まった (bit2 が要る)。足して書く。
         // 0xFD80C0 は実機で 3 から 0 になった (常駐イメージ)。仕様書 6.4 の「1 → 0」の終わりと同じ
-        Set(0xFD8010, link.Read32(0xFD8010) | 0x10, verify: false);
-        // 0xFD8014 は bit4 だけを落とす (読み・落とす・書き)。実機の常駐イメージは 0x0F3F001B を 0x0F3F000B にした。
+        Set(0xFD8010, link.Read32(0xFD8010) | 0x10);
+        // 0xFD8014 は bit4 だけを落とす (読み出し・落とす・書き込み)。実機の常駐イメージは 0x0F3F001B を 0x0F3F000B にした。
         // bit4 は I2C のブロックのリセットで、0xFD8010 の bit4 がそのクロックと見立てる (推定。仕様書に無い)。
         // 0x08080000 を足す書き込みはしない (書くと USB の制御がすべて時間切れになった)
-        Set(0xFD8014, link.Read32(0xFD8014) & ~0x10u, verify: false);
-        Set(0xFD80B0, link.Read32(0xFD80B0) | 1, verify: false);
-        Set(0xFD80C0, 0, verify: false);
+        Set(0xFD8014, link.Read32(0xFD8014) & ~0x10u);
+        Set(0xFD80B0, link.Read32(0xFD80B0) | 1);
+        Set(0xFD80C0, 0);
         // 書いた値が読めないことがある (主 CPU からは、クロックを入れる前に 0xFD8FF8 に 6 を書いても 0 が読めた)。失敗にはせず、
         // 続く I2C の転送が通るかを Alive で確かめる
-        Set(0xFD8FF8, 6, verify: false);
-        Set(0xFD8FF4, 0x10, verify: false);
-        Set(0xFD8FE8, 0x3C, verify: false);
-        Set(0xFD8FE4, 0x42, verify: false);
+        Set(0xFD8FF8, 6);
+        Set(0xFD8FF4, 0x10);
+        Set(0xFD8FE8, 0x3C);
+        Set(0xFD8FE4, 0x42);
         _control = 0x42;
         Alive = (link.Read32(Control) & ~1u) == 0x42 && link.Read32(0xFD8FF8) == 6 && link.Read32(0xFD8FF4) == 0x10;
         trace?.Invoke($"I2C の準備のあと: 制御 0x{link.Read32(Control):X}、0xFD8FE8 = 0x{link.Read32(0xFD8FE8):X}、{(Alive ? "書いた値で読めました" : "書いた値で読めません")}");
@@ -81,37 +81,20 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
 
     private readonly List<(uint Address, uint Value)> _saved = [];
 
-    /// <summary>書く直前に元の値を読んで覚える (クロックを入れる前の読み値を戻す値にしない)</summary>
+    /// <summary>書く直前に元の値を読んで控える (クロックを入れる前の読み値を戻す値にしない)</summary>
     private void Save(uint address)
     {
         if (_saved.All(item => item.Address != address)) _saved.Add((address, link.Read32(address)));
     }
 
-    private void Set(uint address, uint value, bool verify = true)
+    private void Set(uint address, uint value)
     {
         Save(address);
-        var before = _saved.First(item => item.Address == address).Value;
         link.Write32(address, value);
-        // 読み戻しは、確かめるとき (verify) か記録を出すときだけ。使わない読みは制御転送の無駄
-        if (!verify && trace is null) return;
-        var back = link.Read32(address);
-        if (!verify)
-        {
-            var line = $"I2C の準備 0x{address:X}: 0x{value:X} を書いて 0x{back:X} が読めた (書く前 0x{before:X})";
-            trace?.Invoke(line);
-            return;
-        }
-        // 制御の bit0 は待つ側の印で、読み戻しの値は書いた値と違ってよい (仕様書に無い)
-        var mask = address == Control ? ~1u : uint.MaxValue;
-        if ((back & mask) == (value & mask)) return;
-        // 変えようとしたビットが 1 つも変わらなければ失敗。一部だけなら通して記録に出す (Dt295NativeBoard.SetUpUsb の読み戻しと同じ。
-        // 仕様書に比べるビットが無い)
-        var tried = (before ^ value) & mask;
-        if (tried != 0 && ((back ^ before) & tried) == 0)
-        {
-            throw new Dt295NativeException($"I2C の準備で 0x{address:X} に 0x{value:X} を書いたが 0x{back:X} が読めた (書く前 0x{before:X})");
-        }
-        trace?.Invoke($"I2C の準備 0x{address:X}: 0x{value:X} を書いて 0x{back:X} が読めた (書く前 0x{before:X})");
+        // 読み戻すのは記録を出すときだけ (使わない読み出しは制御転送の無駄)。比べるビットが仕様書に無いので、読み戻しでは失敗にしない
+        if (trace is null) return;
+        var before = _saved.First(item => item.Address == address).Value;
+        trace($"I2C の準備 0x{address:X}: 0x{value:X} を書いて 0x{link.Read32(address):X} が読めた (書く前 0x{before:X})");
     }
 
     /// <summary>I2C の異常からの戻し (仕様書 6.4 の初期化)</summary>
@@ -130,7 +113,7 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
         if (write.Length + read > MaxBytes) throw new ArgumentOutOfRangeException(nameof(write), "1 転送の上限を超えています");
         Transfers++;
         trace?.Invoke($"I2C {address:X2} W {Convert.ToHexString(write)}{(read > 0 ? $" R {read}" : "")}");
-        // 1. 使用中なら少し待つ (仕様書は失敗にするとだけ書く)。直前の転送を自分で STOP で終えていれば、次の制御転送が出るまでに
+        // 1. 使用中なら少し待つ (仕様書は失敗にするとだけ書く)。直前の転送を STOP で終えていれば、次の制御転送が出るまでに
         //    STOP は済んでいる (制御転送 1 回は約 60 µs で、I2C の STOP は数 µs) ので読まない。最初と、失敗・バスエラーのあとだけ読む
         if (_checkIdle) WaitIdle();
         _checkIdle = false;
@@ -138,7 +121,18 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
         link.Write32(Data, (uint)((address << 1) | (write.IsEmpty ? 1 : 0)));
         _control |= 0x10;
         link.Write32(Control, _control);
-        var control = WaitByte();
+        uint control;
+        try
+        {
+            control = WaitByte();
+        }
+        catch (Dt295NativeException)
+        {
+            // アドレスのバイトが終わらなかった。STOP を出し、次の転送はバスが空くのを待ってから始める
+            Stop(_control);
+            _checkIdle = true;
+            throw;
+        }
         // 4. アドレスの直後に ACK が来なかったら失敗
         CheckAck(address);
         var result = new byte[read];
@@ -180,8 +174,8 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
     }
 
     /// <summary>
-    /// true なら <see cref="Run"/> は機材の中で転送を順に行わせる (<see cref="Dt295NativeLink.RunI2c"/>)。機材を開くとき、使えると確かめたら立てる。
-    /// false ならホストが 1 つずつ <see cref="Transfer"/> で行う
+    /// true なら <see cref="Run"/> は機材の中で転送を順に実行させる (<see cref="Dt295NativeLink.RunI2c"/>)。機材を開くとき、使えると確かめたら立てる。
+    /// false ならホストが 1 つずつ <see cref="Transfer"/> で実行する
     /// </summary>
     public bool UseSequencer { get; set; }
 
@@ -189,8 +183,8 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
     private const int ChunkBytes = 0x800;
 
     /// <summary>
-    /// 転送の並びを順に行い、読んだバイトを転送の順につなげて返す。<see cref="UseSequencer"/> なら機材の中で行わせ、
-    /// そうでなければホストが 1 つずつ行う。失敗の例外はどちらも同じ (ACK が来ない・バスエラー・1 バイトが終わらない)
+    /// 転送の並びを順に実行し、読んだバイトを転送の順につなげて返す。<see cref="UseSequencer"/> なら機材の中で実行させ、
+    /// そうでなければホストが 1 つずつ実行する。失敗の例外はどちらも同じ (ACK が来ない・バスエラー・1 バイトが終わらない)
     /// </summary>
     public byte[] Run(Dt295I2cBatch batch)
     {
@@ -198,7 +192,7 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
         var results = new List<byte>();
         if (!UseSequencer)
         {
-            // 種類 1 (読み・変更・書き) の書く値は、直前に読んだ転送の先頭バイトから作る
+            // 種類 1 (リード・モディファイ・ライト) の書く値は、直前に読んだ転送の先頭バイトから作る
             byte lastRead = 0;
             foreach (var op in batch.Ops)
             {
@@ -235,10 +229,6 @@ public sealed class Dt295NativeI2c(Dt295NativeLink link, Action<string>? trace =
         _checkIdle = true;
         return [.. results];
     }
-
-    public void Write(int address, params byte[] bytes) => Transfer(address, bytes, 0);
-
-    public byte[] Read(int address, int count) => Transfer(address, [], count);
 
     private void Stop(uint control)
     {

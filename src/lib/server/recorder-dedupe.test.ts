@@ -27,13 +27,9 @@ let following: SynthEvent;
 const actualTuner = await import("./tuner");
 mock.module("./tuner", () => ({
   ...actualTuner,
-  openChannelStream: async (
-    _type: string,
-    _channel: string,
-    signal: AbortSignal,
-  ): Promise<ReadableStream<Uint8Array>> => {
+  openChannel: async (_type: string, _channel: string, signal: AbortSignal) => {
     let timer: ReturnType<typeof setInterval> | undefined;
-    return new ReadableStream<Uint8Array>({
+    const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         const push = () => controller.enqueue(pfPackets(following));
         push();
@@ -47,6 +43,12 @@ mock.module("./tuner", () => ({
         clearInterval(timer);
       },
     });
+    return {
+      stream,
+      tsmfStreams: 1,
+      transport: "ts" as const,
+      place: { agent: 1, channel: "T16" },
+    };
   },
 }));
 
@@ -56,6 +58,7 @@ config.dbPath = join(dir, "denpa.db");
 config.rawDir = dir;
 
 const { now, orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { startRecording, stopRecording } = await import("./recorder");
 const { reservationStates } = await import("./reservations");
 const { programs, recordings, reservations, rules, services } =
@@ -123,10 +126,10 @@ beforeEach(() => {
         name,
         type,
         service_type: 1,
-        channel,
         updated_at: now(),
       })
       .run();
+    placeServices([{ id, channel }]);
   }
   orm()
     .insert(rules)

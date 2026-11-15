@@ -59,9 +59,9 @@
     flex-direction: column;
   }
   /*
-     * **列の最初のものの上は `--dp-side-top`** (サイドバーのとき `PlayerLayout` が映像の上と同じ値を入れる)。
-     * 映像の上端と列の最初のものの上端を、同じ 1 つの値でそろえる
-     */
+   * **列の最初のものの上は `--dp-side-top`** (サイドバーのとき `PlayerLayout` が映像の上と同じ値を入れる)。
+   * 映像の上端と列の最初のものの上端を、同じ 1 つの値でそろえる
+   */
   .top {
     padding: var(--dp-side-top, var(--dp-side-pad, 0)) var(--dp-side-pad, 0) 0;
   }
@@ -73,9 +73,9 @@
     display: none;
   }
   /*
-     * 戻るは字とアイコンだけの小さなボタン。
-     * 矢印の先頭を下の番組名の字の先頭にそろえる (ボタンの左の余白ぶん外へ出す)
-     */
+   * 戻るは字とアイコンだけの小さなボタン。
+   * 矢印の先頭を下の番組名の字の先頭にそろえる (ボタンの左の余白ぶん外へ出す)
+   */
   .back-row {
     flex-shrink: 0;
     padding: var(--dp-side-top, var(--dp-side-pad, 0.25rem))
@@ -89,17 +89,17 @@
     padding-top: 0;
   }
   .back {
-    margin: 0 0 0 -0.5rem;
-    padding-inline: 0.5rem 0.75rem;
+    margin: 0 0 0 calc(-1 * var(--dp-space-2));
+    padding-inline: var(--dp-space-2) var(--dp-space-3);
   }
   .back :global(svg) {
     width: 1.125rem;
     height: 1.125rem;
   }
   /*
-     * カードにしない。高さは画面の残りぜんぶで映像とは揃わないので、枠があると
-     * 映像の下端とずれた枠の下端が目立った。地の上に文字だけを置く
-     */
+   * カードにしない。高さは画面の残りぜんぶで映像とは揃わないので、枠があると
+   * 映像の下端とずれた枠の下端が目立った。地の上に文字だけを置く
+   */
   .box {
     display: flex;
     flex-direction: column;
@@ -111,11 +111,11 @@
     flex: 1;
     overflow-y: auto;
     padding: var(--dp-side-top, var(--dp-side-pad, 0.25rem))
-      var(--dp-side-pad, 0.5rem) 1rem;
+      var(--dp-side-pad, 0.5rem) var(--dp-space-4);
   }
   /* 上に戻るがあるときは、その下は列の中の余白。リモコン・コメントの一覧の下の間は、それぞれが持つ (上の `.back-row`) */
   .back-row + .box .body {
-    padding-top: 0.5rem;
+    padding-top: var(--dp-space-2);
   }
   .top:has(:global(*)) + .box .body {
     padding-top: 0;

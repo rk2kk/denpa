@@ -72,17 +72,18 @@
   import { playbackAt } from "#lib/ts/watch.js";
 
   /**
-   * 追っかけ再生 (録画中の録画を頭から観る)。プレイヤーはライブと同じ (`live-player.svelte.ts` の chase モード)。
-   * ライブとの違いは、頭から観られる・シークできる・右端 (いま録れているところ) が壁時計で伸びる
+   * 追っかけ再生 (録画中の録画を先頭から観る)。プレイヤーはライブと同じ (`live-player.svelte.ts` の chase モード)。
+   * ライブとの違いは、先頭から観られる・シークできる・右端 (いま録れているところ) が壁時計で伸びる
    */
   let { data } = $props();
 
   /** 運転中の注意 (互換モード。`drive-gate.svelte.ts`)。押すまで再生を始めない */
   const drive = driveGate();
-  // 開いた名前が家の中か (サーバが決める)。「自動」の形式をライブと同じ決め方で決める
+  // 開いた名前が家の中かと、その場でエンコードできるコーデック (サーバが決める)。「自動」とメニューをライブと同じ決め方で決める
   const player = livePlayer({
     confirm: drive.confirm,
     indoor: untrack(() => data.indoor),
+    liveCodecs: untrack(() => data.liveCodecs),
   });
   /** 映像と重ねもの (MediaStack が組む)。bind で受けるので開くまでは null */
   let video = $state<HTMLVideoElement | null>(null);
@@ -121,7 +122,13 @@
     if (still !== null && overlay !== null) player.attach(still, overlay);
     // 前に途中まで観ていたら、そこから
     if (video !== null)
-      void player.openChase(video, data.rec.id, data.rec.resumeSec);
+      void player.openChase(
+        video,
+        data.rec.id,
+        data.rec.resumeSec,
+        false,
+        data.broadcast,
+      );
     // 出演者などは番組表の側にある。押させずに、開いた時点で引く (観る画面と同じ)
     void detail.open(data.rec.program_id, facts);
     const ticker = setInterval(() => (clock = Date.now()), 1000);
@@ -132,7 +139,7 @@
       clearInterval(ticker);
       clearInterval(keeper);
       window.removeEventListener("pagehide", onLeave);
-      sendResume();
+      sendResume(true);
       player.stop();
     };
   });
@@ -173,14 +180,14 @@
   onMount(() => () => jikkyo.close());
 
   /**
-   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
+   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端に縦に並ぶボタンで出す (端末ごとに覚える)。
    * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない (`jikkyoListSwitch`。3 画面で同じ)
    */
   const jikkyoList = jikkyoListSwitch(
     () => jikkyoActive && data.jikkyo !== null,
     () => fullscreen.active,
   );
-  /** いま観ている場面の放送時刻 (元の TS の頭の放送時刻 + 追っかけの再生位置) */
+  /** いま観ている場面の放送時刻 (元の TS の先頭にある放送時刻 + 追っかけの再生位置) */
   function airTime(): number | null {
     const target = data.jikkyo;
     return target === null ? null : target.head + player.chasePosition * 1000;
@@ -190,7 +197,7 @@
     const target = data.jikkyo;
     return target === null ? null : target.head + recorded * 1000;
   }
-  /** 放送時刻 `at` が追っかけのどこか (`airTime` の逆)。録画の頭より前は「開始前」で、飛べない */
+  /** 放送時刻 `at` が追っかけのどこか (`airTime` の逆)。録画の先頭より前は「開始前」で、飛べない */
   function placeAir(at: number): number | "before" | "cut" {
     const target = data.jikkyo;
     return target === null
@@ -203,8 +210,12 @@
     if (w !== null && jikkyoActive) untrack(() => jikkyo.backfill(w));
   });
 
-  /** シーク。**録れているところより先へは行かせない** (まだ無い) */
+  /**
+   * シーク。**録れているところより先へは行かせない** (まだ無い)。
+   * 録れている長さがまだ届いていない間 (`line` が null) は飛ばない。0 として扱うと、続きから開いた録画が先頭へ戻る
+   */
   function seekTo(value: number): void {
+    if (line === null) return;
     player.chaseSeek(Math.max(0, Math.min(value, Math.max(0, recorded - 5))));
   }
 
@@ -306,6 +317,7 @@
     {controls}
     {fullscreen}
     {ambient}
+    pip={pip.active}
     testid="chase"
     bind:element={stageEl}
   >
@@ -393,9 +405,9 @@
           </Extras>
 
           <!--
-                    いま録れているところへ (ライブの「ライブ」の場所)。録り終わっていたら端は動かず、
-                    ただの「終わりへ飛ぶ」になるので出さない
-                -->
+            いま録れているところへ (ライブの「ライブ」の場所)。録り終わっていたら端は動かず、
+            ただの「終わりへ飛ぶ」になるので出さない
+          -->
           {#if line !== null && !line.finished}
             <EdgeButton
               active={recorded - pos < 20}
@@ -459,9 +471,10 @@
             codec={liveCodecs({
               icon: CODEC,
               choice: player.choice,
+              shown: player.shown,
               format: player.format,
               step: player.step,
-              hidden: data.hidden.length > 0,
+              broadcast: player.broadcast,
               unavailable: player.unavailable,
               onselect: (next) => player.setChoice(next),
             })}
@@ -491,12 +504,12 @@
           {#snippet actions()}
             <button
               type="button"
-              class="small secondary"
+              class="small"
               onclick={() =>
                 video !== null &&
                 void player.openChase(video, data.rec.id, pos)}
             >
-              やり直す
+              再試行
             </button>
           {/snippet}
         </PlayerVeil>
@@ -507,9 +520,9 @@
     {#snippet notes()}
       {#if encoded}
         <!--
-                    エンコードが終わったら、この先はみな観る画面の話なのでこれだけを出す。
-                    StageNote は押せないので、ここだけ押せる形で置く (見た目は同じ)
-                -->
+          エンコードが終わったら、この先はみな観る画面の話なのでこれだけを出す。
+          StageNote は押せないので、ここだけ押せる形で置く (見た目は同じ)
+        -->
         <span class="encoded" data-testid="chase-encoded">
           <a
             class="stage-note to-watch"
@@ -525,7 +538,7 @@
           <StageNote>録画済みのところまで観ました</StageNote>
         {/if}
         {#if player.warning}
-          <!-- リクエストどおりにできなかった断り書き (GPU でエンコードできずにソフトウェアへ降りた、など) -->
+          <!-- 指定したとおりにできなかったときの断り書き (ライブと同じ。GPU でエンコードできずソフトウェアに切り替えた、など) -->
           <StageNote>{player.warning}</StageNote>
         {/if}
         <VolumeNote {volume} testid="chase-volume-note" />
@@ -569,7 +582,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 0.375rem;
-    margin-inline-start: 0.625rem;
+    margin-inline-start: var(--dp-space-3);
   }
   /* 録画中の点 (`app.css` の `.rec-dot`。ゆっくり脈打つ) を字の真ん中に */
   .rec .rec-dot {

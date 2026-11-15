@@ -368,8 +368,11 @@ test.describe("音量", () => {
    * (`Outlet.route`) 同じ所で効く
    */
   test("canvas の経路: バックグラウンド再生で <audio> を通しても、100% は +6 dB、消音で無音", async ({
-    page,
+    browser,
   }) => {
+    // MPEG-2 をデコードできる端末として開く (既定の枠は `stack.ts` の `liveWithoutMpeg2`)
+    const context = await browser.newContext();
+    const page = await context.newPage();
     await hookAudio(page);
     await goto(page, "/live");
     await page.getByTestId("live-channel").first().click();
@@ -417,9 +420,10 @@ test.describe("音量", () => {
     const muted = await measure(page, "buffer");
     expect(muted.post.peak).toBeLessThan(-90);
     await inject(page, "buffer", null);
+    await context.close();
   });
 
-  test("3画面で同じ音量を使い、どの画面でも ↑↓ で変えられる", async ({
+  test("3 画面で同じ音量を使い、どの画面でも ↑↓ で変えられる", async ({
     page,
     request,
   }) => {
@@ -584,6 +588,34 @@ test.describe("音のボタンの縦のつまみ", () => {
     await page.keyboard.press("Escape");
     await expect(pop).toBeHidden();
   });
+
+  /*
+   * **つまみが遅れて閉じても、開いている ⚙ のぶんは操作バーを残す** (`controls.svelte.ts` の `holdOpen`)。
+   * 開いているかを真偽 1 つで持っていた頃は、つまみが外れて 0.4 秒後に閉じたときに ⚙ のぶんまで下ろし、
+   * ⚙ を開いたまま操作バーが引っ込んでいた
+   */
+  test("つまみを出したまま ⚙ を開いても、⚙ を開いている間は操作バーが残る", async ({
+    page,
+  }) => {
+    await goto(page, "/live");
+    await page.getByTestId("live-channel").first().click();
+    await expect(page.getByTestId("live-title")).toBeVisible();
+    const bar = page.getByTestId("live-controls");
+    const pop = page.getByTestId("live-sound-pop");
+
+    await wakeControls(page, STAGE.live);
+    await page.getByTestId("live-sound").hover();
+    await expect(pop).toBeVisible();
+    // つまみが閉じる前に ⚙ を開く
+    await page.getByTestId("live-settings").click();
+    const menu = page.getByTestId("live-settings-menu");
+    await expect(menu).toBeVisible();
+    await expect(pop).toBeHidden();
+    // 触らずに操作バーの時計 (2.5 秒) より長く待っても、⚙ を開いている間は残る
+    await page.waitForTimeout(3500);
+    await expect(menu).toBeVisible();
+    await expect(bar).toHaveAttribute("data-shown", "true");
+  });
 });
 
 test.describe("指の端末の音のボタン", () => {
@@ -631,11 +663,11 @@ test.describe("指の端末の音のボタン", () => {
     await page.keyboard.press("ArrowRight");
     await expect(volume).toHaveValue("100");
     await page.keyboard.press("ArrowDown");
-    await expect(page.getByTestId("live-data-receive")).toBeFocused();
+    await expect(page.getByTestId("live-ambient")).toBeFocused();
     await expect(volume).toHaveValue("100");
     // つまみは行の幅いっぱいの横のカプセルで、高さ 44px (ほかの行と同じ幅)
     const slider = (await volume.boundingBox())!;
-    const row = (await page.getByTestId("live-data-receive").boundingBox())!;
+    const row = (await page.getByTestId("live-ambient").boundingBox())!;
     expect(Math.abs(slider.width - row.width)).toBeLessThan(2);
     expect(slider.height).toBeGreaterThanOrEqual(43.5);
 

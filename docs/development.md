@@ -90,20 +90,25 @@ PR を出して自分でマージします。急ぐときは Actions から手�
 **1 台ではこれ以上縮みません。** 中身の合計は約 3 分で大半は偽の放送を待つ時間、
 下限はいちばん長いファイル 1 本の時間です。
 
-CI では 6 つに割って別のランナーに出し、3 ワーカー×5 台と 1 ワーカーの 6 組 (下) で 16 ワーカーぶん並べます。
+CI では 10 組に割って別のランナーに出し、3 ワーカー×8 台と 1 ワーカー×2 台の 10 組 (下) で 26 ワーカーぶん並べます。
 組の中身は `tests/e2e/shards.json` で、実測の所要時間 (CI の結果に出る 1 本ずつの秒数) で人が割っています。
-組ごとにテストの秒数の和がそろうように割り、長いファイルは組の先頭のほうに来るように組みます
-(組の中ではファイル名の順にワーカーへ配られるので、遅れて始まらずに済む)。組の時間の下限は、その組でいちばん長いファイル 1 本です。
+1 組から 8 組は、テストの秒数の和がどれも 320 秒ほど (1 ワーカー 110 秒ほど) になるように割ります。
+8 組の秒数の和を 24 ワーカーで割った値が、組の時間の下限です。ジョブの時間は、これにチェックアウト・ビルド・ワーカーの立ち上がりの約 20 秒を足したものです。
 
-- 映像を長くデコードし続けるスペック (20-live・22-watch・互換モードのものなど。一覧は shards.json の注記) は 1 つの組に寄せすぎません。混むとどれも遅くなります
-- 名前が後ろの長いスペック (57-jikkyo など) は、前に並ぶスペックが少ない組に置きます。
-  前のスペックがワーカーを埋めていると遅れて始まり、組がそのぶん長くなります
-- 6 組はライブの貯め方 (50-live-pacing・51-live-gaps) だけを、1 ワーカーで順に流します (test.yml)。同じ組でほかのワーカーが動くと
+- **1 本のスペックは 50 秒以下にします。** 組の中ではファイル名の順に空いたワーカーへ配られるので、組の時間の下限は
+  いちばん長いファイル 1 本です。1 本で 60 秒を超えたら、確かめる中身はそのままで、describe やテストの切れ目で
+  ファイルを分けます。いまは 03-recording・15-scramble・20-live・22-watch・23-watch-data・26-hwenc・28-live-raw・
+  39-watch-stream・40-watch-compat・57-jikkyo・57-jikkyo-recorded をそうして分けてあり、いちばん長いのは 50 秒ほどです
+- 分けた先のファイルは、ほかのファイルの後でも前でも、単独でも通るようにします。同じファイルの前のテストが録った録画を
+  使い回していたもの (22-watch・23-watch-data) は、ファイルごとに 1 本録ります (`tests/e2e/watch.ts` の `sharedRecording`)。
+  分けたファイルどうしで使う道具は、`tests/e2e/` の小さなモジュール (`jikkyo.ts`・`live.ts`・`watch.ts` など) に置きます
+- 映像を長くデコードし続けるスペック (20-live・22-watch・互換モードのものなどと、そこから分けたもの。一覧は shards.json の注記) は 1 つの組に 3 本までにします。混むとどれも遅くなります
+- 9 組と 10 組は、ライブの貯め方 (50-live-pacing・51-live-gaps) を 1 本ずつ 1 ワーカーで流します (test.yml)。同じ組でほかのワーカーが動くと
   届く間隔が乱れ、貯める量がその間隔を覆う高さ (`pacing.ts` の `cover`) へ上がって、「下限のまま」を見るテストが落ちるためです
   (軽いスペックと組ませても 5 回に 2 回落ちた)。デコードが重なると、途中から入ったときにコマも落とします。
-  1 ワーカーなので、ほかのスペックを足すとそのぶん組が長くなります
-- 1 本で 1 分を超えるスペックは、組の時間の下限を押し上げるので分けます (57-jikkyo-recorded・26-hwenc-hevc はそうして分けたもの)。
-  いまの組の時間の下限は、テストが細かく多い 20-live (CI で 2.4 分) です
+  1 ワーカーなので、ほかのスペックを足すとそのぶん組が長くなります。どちらも 1 本で 60 秒ほどですが、組の時間は 1 分半ほどなので分けていません
+- 組の時間は、組の秒数の和を 3 で割った値と、長いファイルが始まる時刻にその長さを足した値の、大きいほうで決まります。
+  割り直すときは、ファイル名の順に空いたワーカーへ配って両方を見積もります
 - 実時間を待つテストは、確かめる性質が出る最短の尺で見ます。51-live-gaps は空きを 3 回 (縮めにかかる 20 秒より長い間隔で)、
   50-live-pacing は 20 秒、録画を待つテストはすぐ次の番組 (`reserveSoon` の `skip` を付けない) を録ります
 - どの組にも入れていない新しいスペックは **5 組で流れます** (CI に注記が出る)。あとで所要時間を見て割り直してください
@@ -113,6 +118,47 @@ CI では 6 つに割って別のランナーに出し、3 ワーカー×5 台�
 ワーカー数は**手元では CPU の数そのまま (下限 2・上限 6)、CI (`CI=1`。`docker compose run e2e` も
 そう) では 3 で固定**です (4 つ並べるとチューナー待ちで落ちる。実測は `playwright.config.ts` の冒頭)。
 混み具合でごく稀にブラウザ側が落ちるので、1 回だけやり直します (`retries: 1`)。
+
+## CI
+
+**PR の CI は、触ったファイルに関係するジョブだけ中身を回します。** main への push では全部回します。
+PR で飛ばしたものが main で赤くなったら、見て直します。
+
+main は ruleset の必須チェックで守ってあります。`check`・`agent`・`agent-asicen-mock`・`install-linux`・`talos`・
+`agent-windows`・`agent-windows-install`・`agent-macos`・`e2e (1)`〜`(10)`・`claude-review` と、CodeQL の
+`codeql / Analyze (actions・c-cpp・csharp・javascript-typescript)` です。確かめるには `gh api repos/danything/denpa/rules/branches/main`。
+
+### 中身を回すジョブを決める
+
+**関係ないジョブは、ジョブごと飛ばします。** ジョブの `if` で飛ばしたジョブは、必須チェックでも成功として数えられ、ランナーを使いません。
+
+- 決めるのは `.github/ci-changes.sh` です。PR の触ったファイルを GitHub の API から読み、下の組ごとに回すかを出します
+
+  | 組      | ジョブ                                                                           | 回すとき                                                                                      |
+  | ------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+  | e2e     | `e2e (1)`〜`(10)`                                                                | エージェント・通知領域のアプリ・文書・入れ方・配備のほかを触ったとき                          |
+  | windows | `agent-windows`・`agent-windows-install`                                         | `agent/`・`tray/Denpa.Tray*`・`install.ps1`・`scripts/build-wdi-simple.ps1`                   |
+  | macos   | `agent-macos`・`tray-macos`                                                      | `agent/`・`tray/mac/`・`install.sh`                                                           |
+  | android | `agent-android`                                                                  | `agent/` と、android.yml・Android で組む部品                                                  |
+  | bundle  | `server-windows-bundle`・`server-windows`・`server-macos-bundle`・`server-macos` | 配布物の組み方・ffmpeg・入れ方・`tests/native-*`・依存と、OS ごとに扱いが違うサーバのファイル |
+
+- test.yml・ci-changes.sh・global.json を触ったときは全部回します。bundle を回すときは windows と macos も回します (配布物を確かめるジョブが、そちらで組んだエージェントを使う)
+- 回したか飛ばしたかは `changes` ジョブの Summary に出ます。`changes` が落ちたときも、必須チェックのジョブは回します
+- e2e だけはジョブを走らせ、`changes` を待たずにそれぞれのジョブの最初の段で決めて、中身の段を飛ばします。E2E がいちばん長いので、始まりを遅らせないためです
+- CodeQL の C# の解析は、PR が `agent/`・`tray/`・C# のファイル・global.json を触っていなければ飛ばします (codeql.yml の `language-paths`。中身は 5ym/repo-config の共有の workflow)。
+  matrix の 1 つだけはジョブの `if` で飛ばせないので、ジョブは走らせて解析の段を飛ばします。main への push と週 1 回の実行では全部解析します
+- `check`・`agent`・`agent-asicen-mock`・`install-linux`・`talos` はいつも回します。どれも ubuntu のランナーで 2 分かかりません
+- ジョブが読むファイルを足したら、ci-changes.sh の一覧にも足します。足さないと、そのファイルだけを触った PR でジョブの中身が回りません
+
+### キャッシュ
+
+**キャッシュの鍵は、中身を決めるものだけから作ります。** バージョン・csproj・組むスクリプトが変わったときだけ外れます。
+
+- .NET の SDK と NuGet は別のキャッシュに置き、置くのは main だけです。PR が置いたキャッシュはその PR でしか使えません。
+  前は PR ごとに SDK と NuGet を合わせて 840MB 置いていて、リポジトリの上限 (10GB) を超えるたびに、ffmpeg や Playwright のキャッシュが古いものから消されていました
+- csproj を変えた PR は main の前の NuGet を戻し、足りないぶんだけを取ります (`restore-keys`)
+- ffmpeg (Windows・Mac) の鍵は、Dockerfile の ffmpeg 段と組むスクリプトから作ります。そこを変えた PR と、それが main に入った直後の 1 回は組み直します (Windows で 15 分ほど)
+- wdi-simple の鍵は、組むスクリプトとランナーのイメージのバージョンです。イメージが上がるたびに組み直し、新しい MSVC で組めるかを見ます。置くのは main だけです
 
 ## DB の列を足す
 
@@ -201,7 +247,7 @@ JSON で持つ列 (ジャンル・音声の構成・ルールの対象の局な�
 
 `Dockerfile` が denpa 本体、`agent/Dockerfile` がチューナー側です。
 CI が両方をビルドして `deploy/` の印を書き戻します。**main は直接 push できない**
-(ruleset の必須チェック `check` / `agent` / `e2e (1)`〜`(6)` / `claude-review`) ので、
+(ruleset の必須チェック。[CI](#ci)) ので、
 書き戻しは bot が PR を出し、必須チェックの status を自分で付けてマージします
 (手順と理由は `.github/bump-pr.sh`。release の Chart.yaml の書き戻しと README の謝辞の一覧も同じ)。
 release は組み直さず、main で組んだイメージにバージョンを 1 層足します
@@ -210,7 +256,7 @@ release は組み直さず、main で組んだイメージにバージョンを 
 
 **イメージは amd64 と arm64 の 2 つ**で、同じタグに束ねてあります (理由と組み方は
 [architecture.md](architecture.md#イメージのタグ))。Dockerfile は BuildKit の `TARGETARCH`
-で配布物 (px4-userland / siano-ts) の名前と .NET の RID を読み替え、
+で配布物 (asicen-userland) の名前と .NET の RID を読み替え、
 Intel と AMD の VA-API ドライバは amd64 だけに入れます
 (Debian の arm64 には Intel のドライバが無く、AMD の GPU を載せた arm の機械はまず無い)。Dockerfile やそこへ入るもの (`agent/`・`patches/`・依存) を
 触った PR では、`Docker build check` が両方の arch を本物のランナーで組みます
@@ -234,8 +280,11 @@ denpa が起こすのは ffmpeg / ffprobe だけで、シェルを通しませ�
 
 ### 外から持ってくるものはバージョンで固定する
 
-ffmpeg・SVT-AV1・emsdk・Denpa Font・px4-userland / siano-userland / asicen-userland は、どれも
+ffmpeg・SVT-AV1・emsdk・Denpa Font・asicen-userland は、どれも
 `ARG` / `ENV` にバージョン (タグかコミット) を書いてから取ってきます。同じコミットからビルドすれば同じ中身になります。
+Android 向けのエージェントに入れる OpenSSL は `.github/openssl-android.sh` に、NDK は `.github/workflows/android.yml` に、Android のアプリの AGP と依存は `android/gradle/libs.versions.toml` に、アプリに入れる bun は `.github/bun-android.sh` にバージョンを書いています。
+アプリに入れる ffmpeg は Dockerfile の `ffmpeg` 段からバージョンと部品を読み、x264・dav1d・zimg のバージョンは `.github/ffmpeg-android.sh` に書いています (Mac の `ffmpeg-macos.sh` と同じ)。
+`bun-android.sh` のバージョンは Dockerfile の `oven/bun` と別に Renovate が上げます。APK の denpa 本体もコンテナと同じ bun で動かすので、ずれている間は Android の CI が落ちます。両方の PR をそろえてからマージします。
 
 **土台のイメージと GitHub Actions は digest で留めます。** Dockerfile の `FROM`・`COPY --from=` は
 `名前:タグ@sha256:…`、ワークフローの `uses:` は `@<コミットの SHA> # vX.Y.Z` の形にします。
@@ -245,5 +294,110 @@ ffmpeg・SVT-AV1・emsdk・Denpa Font・px4-userland / siano-userland / asicen-u
 場所を教えてあります。タグのあるものはタグで、無いものはブランチの先頭のコミット (`git-refs`) で追います。
 digest もタグと一緒に Renovate が上げ、タグだけで足した土台やアクションには digest を足す PR を出します (`renovate.json` の `pinDigests`)。
 `renovate.json` の書き方は `docker compose run --rm unit bunx --package renovate renovate-config-validator` で確かめます。
+
+## Android 向けのエージェント
+
+**Android で動かすエージェントは、Linux と同じソースを `linux-bionic-arm64` の Native AOT で組みます。** CI のエミュレータのために `linux-bionic-x64` も組みます。
+組み上がりは Android のアプリ (下の節) の APK に入れます。組むのは `.github/workflows/android.yml` で、test.yml が呼びます。
+
+- .NET の SDK は ASP.NET Core の実行時パックを bionic 向けに出していません。csproj でその除外を外し、linux の実行時パックの IL を AOT で組ませています。
+  SDK が対応していない使い方なので、SDK を上げたら Android の CI が通るかを見ます
+- Android には OpenSSL が無いので、NDK で組んだ OpenSSL の静的ライブラリを実行ファイルに入れます (`StaticOpenSslLinking`)。
+  組むのは `.github/openssl-android.sh` で、CI は組み上がりを actions/cache に置き、バージョン・組み方・NDK が変わるまで使い回します
+- 出来上がりは `/system/bin/linker64` で動く PIE で、繋ぐのは libc・libm・libdl だけです。LOAD は 16 KB ページに揃えます。CI がこの 3 つを確かめます
+
+手元で組むなら、NDK (バージョンは android.yml の `NDK_VERSION`) を置いたコンテナで、cmake と make を入れてから流します。
+
+```sh
+ANDROID_NDK_ROOT=/opt/ndk bash .github/openssl-android.sh arm64 /tmp/openssl-arm64
+PATH=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH OPENSSL_ROOT_DIR=/tmp/openssl-arm64 \
+  dotnet publish agent/Denpa.Agent/Denpa.Agent.csproj -c Release -r linux-bionic-arm64 -o out
+```
+
+## Android のアプリ
+
+**Android で denpa を動かすアプリは `android/` の Gradle のプロジェクトです (パッケージは `io.github.danything.denpa`)。** 画面は持たず、常駐サービスがエージェントと denpa 本体 (bun) を子プロセスとして起動します。
+使い方は [install-android.md](install-android.md)、エージェントとの取り決めは [agent.md](agent.md#android-でアプリから-usb-を受け取る) にあります。
+
+- Kotlin で、Android の標準の API (`android.*`) だけで書きます。AndroidX も使わず、APK に入る依存は Kotlin の標準ライブラリだけです。
+  Gradle・AGP・Kotlin・compileSdk・JDK・依存は、その時点の最新の安定版にします。上げるのは Renovate です (JDK は `renovate.json` の注釈で追う)
+- エージェントは `android/agent-libs/<ABI>/libdenpa_agent.so` に置くと APK に入ります (`DENPA_AGENT_LIBS` で別の置き場も渡せます)。
+  入れるときに `nativeLibraryDir` へ展開させ (`useLegacyPackaging`)、そこから exec します。Android 10 からは、アプリのデータの置き場のファイルは実行できません
+- asicen-userland は `android/asicen-userland/` に置くと APK に入ります (`DENPA_ASICEN` で別の置き場も渡せます)。`bash .github/asicen-android.sh android/asicen-userland arm64 x86_64` が、
+  上流の Android 版を SHA-256 で確かめて取り、`jniLibs/<ABI>/libasicend.so`・`libasicenctl.so`、ファームウェア、ライセンスの文書を並べます。
+  バージョンが `agent/Dockerfile` と、組んだコミットが test.yml の `ASICEN_USERLAND_REF` と違えば止まります。置かなければ asicen-userland の無い APK になります
+- bun は `android/bun/` に置くと APK に入ります (`DENPA_BUN` で別の置き場も渡せます)。`bash .github/bun-android.sh android/bun arm64 x86_64` が、
+  公式の Android 版を SHA-256 で確かめて取り、`jniLibs/<ABI>/libbun.so` とライセンスの文書を並べます。x86_64 は CI のエミュレータ用で、AVX2 を使わない baseline を入れます。
+  bun は配布物のまま入れます (`keepDebugSymbols`)。jniLibs は APK の中では圧縮されるので、増えるのは arm64 で約 53 MB です。端末には展開した 113 MB が置かれます
+- denpa 本体は `android/server/assets/server.zip` に置くと APK に入ります (`DENPA_SERVER` で別の置き場も渡せます)。中身は Dockerfile の `native-files` 段 (`app/`・`font/`・`mpeg2/`) を
+  1 つの zip にしたものです。zip にするのは、AGP が assets の `_` で始まるディレクトリ (SvelteKit の `_app/`) を APK に入れないためです。
+  常駐サービスはこれを `files/denpa/server/<versionCode>-<更新した時刻>/` に書き出し、`bun app/server.js` を部品として起動します (`Server.kt`)。
+  環境変数は Mac の `denpa.sh` と同じ並びで、人が足すものは外部ストレージの `denpa.env` から読みます ([install-android.md](install-android.md#環境変数を足す-denpaenv))。
+  出力は logcat の `denpa-server` に出ます。置かなければ、エージェントだけが動く APK になります
+- ffmpeg は `android/ffmpeg/` に置くと APK に入ります (`DENPA_FFMPEG` で別の置き場も渡せます)。`.github/ffmpeg-android.sh` が NDK で組み、
+  `jniLibs/<ABI>/libffmpeg.so`・`libffprobe.so` と libav* の共有ライブラリ、ライセンスの文書とソースの入手先を並べます ([encode.md](encode.md#android-でエンコードする))。
+  CI は組み上がりを actions/cache に置き、Dockerfile の `ffmpeg` 段・組むスクリプト・NDK が変わるまで使い回します (依存は別のキャッシュ。Mac と同じ作り)。
+  常駐サービスは、APK に入っていれば `FFMPEG`・`FFPROBE` にそのパスを入れてサーバに渡します。APK の中で増えるのは arm64 で約 7 MB、端末には展開した 14 MB が置かれます
+- 挿したときにアプリを起こす機材の表 `res/xml/device_filter.xml` は手で書いています。エージェントが USB を直に持つ機材 (`WinUsbTargets.cs`) と asicen-userland の機材
+  (`AsicenUserland.UsbIds`) と食い違わないことを、エージェントの単体テスト (`AndroidDeviceFilterTests.cs`) で確かめます。機種を足したら表にも足します
+- debug の APK にだけ、エミュレータで確かめるための受け口 (`src/debug/` の `DebugReceiver`) が入ります。USB の機材の代わりにファイルの fd を送ること、
+  通知の「終了」を押すこと、エージェントの異常終了の代わりに SIGKILL を送ること、アプリの置き場のスクリプトを denpa 本体と同じ起動の仕方の bun で流すことを
+  `adb shell am broadcast` で代えます。DUMP の権限を持つもの (adb shell) からしか送れません
+
+手元で組むなら、JDK と Android SDK を入れ、エージェント (上の節) を置いてから流します。
+
+```sh
+mkdir -p android/agent-libs/arm64-v8a && cp out/denpa-agent android/agent-libs/arm64-v8a/libdenpa_agent.so
+bash .github/bun-android.sh android/bun arm64
+# denpa 本体 (native-files 段) を zip にして置く。置かなければエージェントだけが動く
+docker buildx build --target native-files --output type=local,dest=files .
+mkdir -p android/server/assets && (cd files && zip -qr ../android/server/assets/server.zip app font mpeg2)
+cd android && ./gradlew lintDebug testDebugUnitTest assembleDebug
+```
+
+ffmpeg は NDK (バージョンは android.yml の `NDK_VERSION`) を置いたコンテナで、nasm・meson・ninja・autoconf・automake・libtool・cmake を入れてから組みます (数分かかる)。
+
+```sh
+ANDROID_NDK_ROOT=/opt/ndk RUNNER_TEMP=/tmp bash .github/ffmpeg-android.sh android/ffmpeg arm64
+```
+
+CI は android.yml で両方の ABI を入れた debug の APK を組み (成果物の `denpa-android-debug`)、Android 10 (API 29。minSdk) と Android 15 (API 35) の
+x86_64 のエミュレータに入れて確かめます (`.github/android-app-smoke.sh`)。
+
+- アイコンで起動すると、常駐サービスが connectedDevice で始まり、通知が出て、本文が「チューナー 0 台」になること
+- エージェントがアプリの子プロセス (SELinux の `untrusted_app`) で動き、`<dataDir>/u` に USB_BROKER のソケット (0600) を作り、アプリが繋いで `synced` を送ること
+- denpa と同じ手順で組み、`/denpa/about` (`os` が `android`)・`/denpa/tuners`・`/denpa/card` が答えること
+- アプリの `LocalSocket` からファイルの fd を付けた `attached` を送ると、エージェントが fd ごと受け取ること
+- エージェントが APK の `asicend --version` を起動できること。ファームウェア待ちの ID (`1738:5211`) でファイルの fd を送ると、エージェントがその fd を `asicend --fd` に継がせること
+- denpa 本体がアプリの子プロセスの bun で動き、3000 番で `/api/health`・画面・字・デコーダを返すこと。エージェントが全部のインターフェースで待ち受け、
+  denpa が 127.0.0.1 からアプリの作った合言葉でエージェントと組み、設定の「受信」の「チューナー」の一覧 (0 台) を読めること
+- アプリの子プロセスの bun で `.github/android-bun-check.js` を流し (debug の受け口)、JIT が動くこと、`localhost` を引けること、
+  `/proc` から読めること、bun が自分を子プロセスで起動できること、`TZ=Asia/Tokyo` を解けること、`bun:sqlite` で置き場に書けることを見る。外の名前を引けるかと HTTPS は、ランナーのネットワークに左右されるので結果を残すだけ
+- bun が `FFMPEG`・`FFPROBE` の ffmpeg・ffprobe を起動できること。`tests/native-smoke.ts` を bun build で 1 つにまとめてアプリの置き場に置き、
+  debug の受け口で流す (エンコード、4K の局の HLG を SDR に直すフィルタ、ffprobe で 10 種類のファイルを読む、MediaCodec の H.264 のエンコードと、MediaCodec のエンコーダを名前で選ぶこと、4 本目の出口)
+- 同じ APK を入れ直す (更新) と常駐サービスが始まり直し、書き出した置き場が入れ替わって古いものが消え、DB が残ること
+- エージェントが落ちたらアプリが起動し直すこと、通知の「終了」でエージェントも bun も常駐サービスも残らないこと、端末を起動し直すと常駐サービスが始まること
+
+エミュレータの列は必須チェックではありません (起動や応答の時間がばらつき、コードと関係なく落ちることがあるため)。
+USB の機材はエミュレータに挿せないので、usbfs の fd (許可・`USBDEVFS_CONNINFO_EX`・確保) は CI では見ません。
+
+### リリースの APK と署名の鍵
+
+リリース (release.yml) は android.yml を `tag` 付きで呼び、arm64 のエージェントと asicen-userland だけを入れた release の APK を組んで、`denpa-<バージョン>-android-arm64.apk` と `.sha256` を添えます (出所の証明も付ける)。
+
+- **リリースはいつも同じ鍵で署名します。** 鍵が違う APK は上書きで入れられないためです。denpa-tv とは別の鍵で、漏れたときに巻き込むアプリを 1 つにします
+- 鍵は PKCS12 (RSA 4096 ビット、有効期限 36500 日。denpa-tv と同じ作り) で、リポジトリの Actions の secrets に `DENPA_ANDROID_KEYSTORE_BASE64` (keystore を base64 にしたもの)・
+  `DENPA_ANDROID_KEYSTORE_PASSWORD`・`DENPA_ANDROID_KEY_ALIAS`・`DENPA_ANDROID_KEY_PASSWORD` として入れてあります。控えは管理者の手元にあります。
+  Gradle には、CI が keystore のパスを `DENPA_ANDROID_KEYSTORE` で、ほかを同じ名前の環境変数で渡します
+- android.yml は、署名した証明書の SHA-256 を、ワークフローに書いた値 (`CERT_SHA256`。install-android.md の「上げる」にも書いてある) と突き合わせます。
+  secrets が無いときと値が違うときは、リリースの APK を出さずに止まります。突き合わせは .github/android-apk-cert.sh で、apksigner の出力の形が変わっても読めるように、
+  `certificate SHA-256 digest:` の行を方式 (v2・v3) ごとにすべて比べます
+- 鍵を渡さないとき (PR の CI・手元) は、release も debug の鍵で署名します。PR の CI は、R8 で縮めた release が組めることと、
+  その証明書をランナーの debug の鍵と同じ手順で突き合わせられることもここで確かめます
+- release は R8 で縮めます (`isMinifyEnabled`・`isShrinkResources`)。リフレクションで引くクラスが無く、マニフェストの部品は AGP の規則が残すので、規則は足していません。
+  エミュレータで確かめるのは debug の APK だけなので、リフレクションを使うコードを足したら規則も足します
+- エージェントに入っているもののライセンスの文書 (Siano のファームウェアの許諾と OpenSSL の LICENSE) を、APK の `assets/licenses/` に入れます
+  (`licenseAssets`。OpenSSL のものは CI が `android/agent-licenses/` に置く。`DENPA_AGENT_LICENSES` で替えられる)。
+  asicen-userland のライセンスの文書とソースの入手先は `assets/licenses/asicen-userland/` に入ります ([licenses.md](licenses.md#android-のアプリ))
 
 文書の一覧は [README](../README.md#もっと詳しく) に。画面・docs・コメントの言葉の決まりは [writing.md](writing.md)。

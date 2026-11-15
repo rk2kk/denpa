@@ -15,17 +15,13 @@
  */
 
 import { parseTimeTable, PID_TIME } from "@danything/arib/eit";
-import { CLOCK, WRAP } from "@danything/arib/pes";
 import { PacketStream, SectionAssembler } from "@danything/arib/psi";
 
-import { BroadcastClock } from "./clock";
-
-/** 33 ビットで一周する長さ (秒) */
-const PCR_WRAP = WRAP / CLOCK;
+import { BroadcastClock, PCR_WRAP } from "./clock";
 
 export class TsHead {
   private readonly packets = new PacketStream();
-  /** PCR を読む (1 局に絞ってあるので、PMT の言う PID のもの) */
+  /** PCR を読む (1 局に絞ってあるので、PMT に書いてある PID のもの) */
   private readonly clock = new BroadcastClock();
   // TDT は CRC を持たない (`bml.ts` と同じ受け方)
   private readonly time = new SectionAssembler(PID_TIME, "syntax");
@@ -38,7 +34,7 @@ export class TsHead {
     return this.headAt;
   }
 
-  /** TS の塊を渡す (パケットの切れ目は気にしなくてよい) */
+  /** TS のチャンクを渡す (パケットの切れ目は気にしなくてよい) */
   feed(chunk: Uint8Array): void {
     for (const packet of this.packets.feed(chunk)) this.feedPacket(packet);
   }

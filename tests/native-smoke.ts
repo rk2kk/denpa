@@ -1,15 +1,22 @@
 /**
- * Windows と Mac の配布物 (`denpa-<バージョン>-windows-x64.zip`・`denpa-<バージョン>-darwin-arm64.tar.gz`) を確かめる。
- * CI (test.yml の server-windows・server-macos) が、配布物の bun で流す。
+ * Windows と Mac の配布物 (`denpa-<バージョン>-windows-x64.zip`・`denpa-<バージョン>-darwin-arm64.tar.gz`) と、Android のアプリの ffmpeg を確かめる。
+ * CI (test.yml の server-windows・server-macos) が、配布物の bun で流す。Android は、.github/android-app-smoke.sh が bun build で 1 つのファイルにまとめて
+ * エミュレータに置き、debug の APK の確かめ用のサーバ (android/app/src/debug/assets/server/) が、アプリの子プロセスの bun からさらに子プロセスで流す。
  *
  *   bun tests/native-smoke.ts <配布物を開いた場所> <作業場所>
+ *   bun native-smoke.js <nativeLibraryDir> <作業場所>   (Android。ffmpeg は libffmpeg.so・libffprobe.so)
  *
  * - 同梱の ffmpeg で、denpa が使う経路の主なもの (.github/image-smoke.sh と同じ素材と引数) を流す。
- *   部品を Dockerfile から読んで組んでいるので、足りなければここで落ちる
+ *   部品を Dockerfile から読んで組んでいるので、足りなければここで落ちる。4K の局の HLG を SDR に直すフィルタ (uhd.HLG_TO_SDR) も流す
+ * - 同梱の ffprobe で、TS・m2ts・mkv・mp4・fMP4 (HEVC Main10・AAC・ARIB 字幕、H.264・AV1・Opus) を読めるか (tests/native-ffprobe.ts)
  * - GPU のエンコーダ (Windows は NVENC・QSV・AMF、Mac は VideoToolbox) が組み込まれ、denpa が渡すオプションを持つか。
  *   GPU で試せないランナーでは、試しのエンコードが全部落ちて、ソフトウェアでエンコードするか
+ * - Android は MediaCodec のエンコーダ (H.264・H.265・AV1) が組み込まれ、NDK の MediaCodec で (JVM の無いプロセスから) エンコードできるか。
+ *   エミュレータのエンコーダはソフトウェアの `c2.android.*` だけなので、アプリはハードウェアのエンコーダの名前を渡さず (`MEDIACODEC_ENCODERS` が空)、
+ *   探すと GPU の方式は 0 になるか。ソフトウェアのエンコーダの名前を渡したことにして探し直すと、その名前で `mediacodec` の方式になり、
+ *   録画とライブの引数で放送に似せた素材をエンコードできるか
  * - ffmpeg の 4 本目の出口 (stream.sideOutput。Windows では名前付きパイプ、Mac は `pipe:3`) で、進み具合と matroska を受けられるか
- * - スリープを止められるか (awake.ts)。Windows は `powercfg /requests` に bun が出るか (管理者で動くランナーだけで読める)、
+ * - スリープを止められるか (awake.ts。Android は常駐サービスが止めるので見ない)。Windows は `powercfg /requests` に bun が出るか (管理者で動くランナーだけで読める)、
  *   Mac は `pmset -g assertions` にこのプロセスの `PreventUserIdleSystemSleep` が出るか
  * - Mac は、録画の前に起こす予約を置いて取り消せるか (awake.macPower。`pmset -g sched` で見る。root が要るので sudo で流す)
  */
@@ -18,15 +25,22 @@ import { join } from "node:path";
 
 import { holdAwake, macPower } from "../src/lib/server/awake.ts";
 import { sideOutput } from "../src/lib/server/stream.ts";
+import { HLG_TO_SDR } from "../src/lib/server/uhd.ts";
+import { probeSmoke } from "./native-ffprobe.ts";
 
 const [root, work] = process.argv.slice(2);
 if (root === undefined || work === undefined) {
   throw new Error("bun tests/native-smoke.ts <dir> <work>");
 }
 const windows = process.platform === "win32";
+const android = process.platform === "android";
 const exe = windows ? ".exe" : "";
-const ffmpeg = join(root, "ffmpeg", `ffmpeg${exe}`);
-const ffprobe = join(root, "ffmpeg", `ffprobe${exe}`);
+const ffmpeg = android
+  ? join(root, "libffmpeg.so")
+  : join(root, "ffmpeg", `ffmpeg${exe}`);
+const ffprobe = android
+  ? join(root, "libffprobe.so")
+  : join(root, "ffmpeg", `ffprobe${exe}`);
 const at = (name: string) => join(work, name);
 
 async function ff(...args: string[]): Promise<void> {
@@ -52,17 +66,27 @@ const encoders = Bun.spawnSync([
   "-hide_banner",
   "-encoders",
 ]).stdout.toString();
-// GPU のエンコーダ (Windows は NVENC・QSV・AMF、Mac は VideoToolbox) は、ランナーで GPU を使えなくても組み込んである。
+// GPU のエンコーダ (Windows は NVENC・QSV・AMF、Mac は VideoToolbox、Android は MediaCodec) は、ランナーで GPU を使えなくても組み込んである。
 // VideoToolbox に AV1 のエンコーダは無い
 const gpuKinds = windows
   ? (["nvenc", "qsv", "amf"] as const)
-  : (["videotoolbox"] as const);
-const gpuCodecs = windows
-  ? (["h264", "hevc", "av1"] as const)
-  : (["h264", "hevc"] as const);
+  : android
+    ? (["mediacodec"] as const)
+    : (["videotoolbox"] as const);
+const gpuCodecs =
+  windows || android
+    ? (["h264", "hevc", "av1"] as const)
+    : (["h264", "hevc"] as const);
 const gpuEncoders = gpuKinds.flatMap((kind) =>
   gpuCodecs.map((codec) => `${codec}_${kind}`),
 );
+const mediacodec = android ? gpuEncoders : [];
+/** エミュレータにあるソフトウェアの MediaCodec のエンコーダ (AV1 は Android 14 から)。選び方を通すために名前で指定する */
+const softwareMediacodec = {
+  h264: "c2.android.avc.encoder",
+  hevc: "c2.android.hevc.encoder",
+  av1: "c2.android.av1.encoder",
+} as const;
 for (const name of [
   "libx264",
   "libsvtav1",
@@ -175,6 +199,22 @@ await ff(
   "frag_keyframe+empty_moov+default_base_moof",
   at("live.mp4"),
 );
+// 4K の局のライブと録画の H.264・H.265 (live.uhdVideoArgs・encoder.ts)。10 ビットの映像を縮めて、HLG を SDR に直す
+await ff(
+  "-f",
+  "lavfi",
+  "-i",
+  "testsrc2=size=640x360:rate=60000/1001:duration=1",
+  "-vf",
+  ["format=yuv420p10le", "scale=-2:180", ...HLG_TO_SDR].join(","),
+  "-c:v",
+  "libx264",
+  "-preset",
+  "ultrafast",
+  "-f",
+  "mp4",
+  at("uhd.mp4"),
+);
 await ff(
   "-ss",
   "1",
@@ -207,37 +247,44 @@ await ff(
   "avif",
   at("thumb.avif"),
 );
-await Bun.write(at("list.txt"), "file h264.mkv\nfile h264.mkv\n");
+// CM のチャプターを書き足す (`cm.chapterArgs`)。H.264 の mkv にそのまま写して付ける
+await Bun.write(
+  at("chapters.txt"),
+  ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=A\n",
+);
 await ff(
-  "-f",
-  "concat",
-  "-safe",
-  "0",
   "-i",
-  at("list.txt"),
+  at("h264.mkv"),
+  "-i",
+  at("chapters.txt"),
   "-map",
   "0",
+  "-map_chapters",
+  "1",
   "-c",
   "copy",
   "-f",
   "matroska",
-  at("cut.mkv"),
+  at("chapters.mkv"),
 );
 console.log("ffmpeg: ok");
+// ffprobe は ffmpeg と別に、読む部品だけで組んである。denpa が読む形式を、denpa と同じ引数で読めるか
+await probeSmoke(ffprobe, ff, at);
 
 /*
  * GPU のエンコーダ。Windows のランナーに GPU は無いのでエンコードは通らない。Mac のランナーでは VideoToolbox が通る。
  * ここで見るのは次の 3 つ。
- * 1. denpa が渡すエンコーダのオプション (hwenc.hwArgs・hwenc.liveHwArgs・encoder.keyframeArgs) を、組み込んだエンコーダが持っている
+ * 1. denpa が渡すエンコーダのオプション (hwenc.hwArgs・hwenc.liveHwArgs) を、組み込んだエンコーダが持っている
  * 2. hwArgs の引数で起動すると、通るか GPU が無いために落ちる (エンコーダやオプションの名前が違って落ちるのではない)
  * 3. 試しのエンコードが全部落ちると、GPU の方式は 0 になり、録画もライブもソフトウェアでエンコードする。
  *    通ったものがあれば、その方式で放送に似せた素材をエンコードでき、試しのエンコードが落ちる ffmpeg で探し直すとソフトウェアに戻る
  */
 const options: Record<string, string[]> = {
-  nvenc: ["gpu", "preset", "rc", "forced-idr", "delay", "zerolatency"],
-  qsv: ["preset", "forced_idr", "async_depth"],
-  amf: ["usage", "quality", "rc", "forced_idr", "async_depth"],
+  nvenc: ["gpu", "preset", "rc", "delay", "zerolatency"],
+  qsv: ["preset", "async_depth"],
+  amf: ["usage", "quality", "rc", "async_depth"],
   videotoolbox: ["profile", "prio_speed", "realtime"],
+  mediacodec: ["ndk_codec", "codec_name", "bitrate_mode"],
 };
 /**
  * 名前の付いた値で渡すオプションは、その値も選択肢にあるか見る。AMF は録画の高画質の指定 (`high_quality`)、
@@ -249,6 +296,7 @@ const choices: Record<string, Record<string, string[]>> = {
     quality: ["high_quality", "quality", "speed"],
     rc: ["vbr_peak", "vbr_latency"],
   },
+  mediacodec: { bitrate_mode: ["vbr", "cbr"] },
 };
 /** `-h encoder=…` の、あるオプションの下に並ぶ選択肢の名前 */
 function choicesOf(help: string, option: string): string[] {
@@ -285,6 +333,36 @@ for (const name of gpuEncoders) {
     }
   }
 }
+/*
+ * Android: MediaCodec のエンコーダを NDK で (JVM の無いこのプロセスから) 1 秒ずつ流す。エミュレータにもソフトウェアの
+ * c2.android のエンコーダがあるので通る。端末によって無いコーデックがある (AV1 は Android 14 から) ので、通らなくても止めず、
+ * H.264 が通らないときだけ止める
+ */
+for (const name of mediacodec) {
+  try {
+    await ff(
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=320x240:rate=30:duration=1",
+      "-vf",
+      "format=nv12",
+      "-c:v",
+      name,
+      "-ndk_codec",
+      "1",
+      "-g",
+      "30",
+      "-f",
+      "null",
+      "-",
+    );
+    console.log(`${name}: ok`);
+  } catch (error) {
+    if (name === "h264_mediacodec") throw error;
+    console.log(`${name}: ${String(error)}`);
+  }
+}
 const { config } = await import("../src/lib/server/config.ts");
 config.ffmpeg = ffmpeg;
 const { HW_CODECS } = await import("../src/lib/hw.ts");
@@ -306,6 +384,8 @@ function tryArgs(label: string, args: string[]): number {
   ]);
   const err = run.stderr.toString();
   console.log(`${label}: exit ${run.exitCode}`);
+  // Android はエミュレータのソフトウェアのエンコーダで通るはずなので、落ちたら理由を残す
+  if (android && run.exitCode !== 0) console.log(err);
   if (
     /Unknown encoder|Unrecognized option|No such filter|Option not found|Unable to parse option value|Error setting option/.test(
       err,
@@ -318,7 +398,9 @@ for (const kind of gpuKinds) {
   for (const codec of gpuCodecs) {
     const way: Way = windows
       ? { device: `${kind}0`, kind, gpu: 0 }
-      : { device: kind, kind };
+      : android
+        ? { device: kind, kind, codecName: softwareMediacodec[codec] }
+        : { device: kind, kind };
     const source = ["-f", "lavfi", "-i", "nullsrc=s=256x256:r=30:d=0.2"];
     const hw = hwArgs(way, codec);
     tryArgs(`${codec}_${kind}`, [
@@ -329,6 +411,18 @@ for (const kind of gpuKinds) {
       "-c:v",
       ...hw.encoder,
     ]);
+    // QSV の CPU のメモリのまま渡す形 (GPU のメモリへ移せない Kaby Lake などで使う。#2342)
+    if (kind === "qsv") {
+      const sys = hwArgs({ ...way, qsvSystem: true }, codec);
+      tryArgs(`${codec}_${kind} (system memory)`, [
+        ...sys.device,
+        ...source,
+        "-vf",
+        sys.filter.join(","),
+        "-c:v",
+        ...sys.encoder,
+      ]);
+    }
     // AMF の古い世代向けの指定 (高画質の指定が通らない GPU で録画に使う)
     if (kind === "amf") {
       const old = hwArgs({ ...way, amfTranscoding: true }, codec);
@@ -381,9 +475,9 @@ if (found.devices.length === 0) {
     );
     console.log(`${codec} on ${way.kind}: ok`);
   }
-  // 試しのエンコードが全部落ちる ffmpeg (いつも 1 で終わる `false`。Mac) で探し直すと、方式は 0 になってソフトウェアに戻る
+  // 試しのエンコードが全部落ちる ffmpeg (いつも 1 で終わる `false`。Mac・Android) で探し直すと、方式は 0 になってソフトウェアに戻る
   if (!windows) {
-    config.ffmpeg = "/usr/bin/false";
+    config.ffmpeg = android ? "/system/bin/false" : "/usr/bin/false";
     const none = await probe();
     console.log(none.message);
     if (none.devices.length !== 0)
@@ -399,6 +493,73 @@ if (found.devices.length === 0) {
   }
 }
 
+/*
+ * Android: アプリが渡したハードウェアのエンコーダの名前 (`MEDIACODEC_ENCODERS`。エミュレータでは空) を出したうえで、
+ * ソフトウェアの c2.android の H.264 のエンコーダの名前を渡したことにして探し直す。名前で `mediacodec` の方式になり、
+ * その名前を ffmpeg に渡して、録画とライブの引数で放送に似せた素材をエンコードできるかを見る。
+ * 放送に似せた素材は、どの API のエミュレータにもある H.264 だけで流す (ソフトウェアのエンコーダは遅く、エミュレータの時間を延ばさないため)。
+ *
+ * **API 29 のエミュレータでは、名前でエンコーダを開けない** (AMediaCodec_createCodecByName が c2.android も OMX.google も返さず、
+ * MIME の種類で選ぶと開ける。原因は確かめていない)。そこでは方式が 0 になり、ソフトウェアに戻ることだけを見る
+ */
+if (android) {
+  console.log(`MEDIACODEC_ENCODERS=${config.mediacodecEncoders}`);
+  const given = config.mediacodecEncoders;
+  const sdk = Number(
+    Bun.spawnSync(["getprop", "ro.build.version.sdk"]).stdout.toString().trim(),
+  );
+  config.mediacodecEncoders = `h264=${softwareMediacodec.h264}`;
+  const soft = await probe();
+  console.log(soft.message);
+  const way = hwChain("h264", {})[0];
+  if (way === undefined && sdk < 30) {
+    if (liveHw("h264", {}) !== null)
+      throw new Error("名前で開けないのに H.264 の方式が残っています");
+    console.log(`h264 on mediacodec: cannot open by name on API ${sdk}`);
+  } else {
+    if (way?.kind !== "mediacodec" || way.codecName !== softwareMediacodec.h264)
+      throw new Error(
+        `名前を渡した H.264 が MediaCodec の方式になりません (API ${sdk})`,
+      );
+    const hw = hwArgs(way, "h264");
+    await ff(
+      "-i",
+      at("in.ts"),
+      "-vf",
+      ["bwdif", ...hw.filter].join(","),
+      "-c:v",
+      ...hw.encoder,
+      "-an",
+      "-f",
+      "matroska",
+      at("mediacodec-h264.mkv"),
+    );
+    const live = liveHwArgs({ way, full: false }, "h264", {
+      height: 540,
+      bps: 2_000_000,
+    });
+    await ff(
+      "-i",
+      at("in.ts"),
+      "-vf",
+      ["bwdif=mode=send_frame", "scale=-2:540", ...live.filter].join(","),
+      "-c:v",
+      ...live.encoder,
+      "-g",
+      "30",
+      "-an",
+      "-f",
+      "mp4",
+      "-movflags",
+      "frag_keyframe+empty_moov+default_base_moof",
+      at("mediacodec-live.mp4"),
+    );
+    console.log("h264 on mediacodec: ok");
+  }
+  config.mediacodecEncoders = given;
+  await probe();
+}
+
 if (!(await holdAwake(true))) throw new Error("スリープを止められません");
 if (windows) {
   const requests = Bun.spawnSync([
@@ -408,7 +569,7 @@ if (windows) {
   console.log(requests);
   if (!/bun\.exe/i.test(requests))
     throw new Error("powercfg /requests に bun が出ません");
-} else {
+} else if (!android) {
   const assertions = Bun.spawnSync([
     "pmset",
     "-g",
@@ -433,7 +594,7 @@ console.log("keep awake: ok");
  * Mac: 録画の前に起こす予約 (power.ts と同じ呼び出し)。1 日先に置いて `pmset -g sched` に出ることを見て、取り消す。
  * root でないと置けないので、CI は sudo で流す
  */
-if (!windows) {
+if (process.platform === "darwin") {
   const power = await macPower();
   if (power === null) throw new Error("IOKit を読めません");
   const when = Math.floor((Date.now() + 86_400_000) / 1000) * 1000;

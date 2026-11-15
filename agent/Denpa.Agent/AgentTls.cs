@@ -19,7 +19,7 @@ namespace Denpa.Agent;
 /// 置き場は tuners.json の隣の <c>tls/</c> (コンテナなら <c>/config/tls</c>)。
 /// </para>
 /// <list type="bullet">
-/// <item><c>agent.key</c> / <c>agent.crt</c>: 自分の鍵と自己署名の証明書。**一度作ったら作り直さない** (denpa が証明書そのものを覚えるので)</item>
+/// <item><c>agent.key</c> / <c>agent.crt</c>: 自分の鍵と自己署名の証明書。**一度作ったら作り直さない** (denpa が証明書そのものを保存するので)</item>
 /// <item><c>pair-token</c>: 合言葉。<c>AGENT_PAIR_TOKEN</c> を渡していれば作らない</item>
 /// <item><c>clients</c>: 組んだ denpa の証明書の指紋。1 行に 1 つ</item>
 /// </list>
@@ -32,7 +32,7 @@ public sealed class AgentTls
 {
     public const string PairPath = "/denpa/pair";
 
-    public const string NotPaired = "この denpa とはまだ組んでいません。TUNER_AGENT_URL に #pair=… を付けてください (docs/agent.md)";
+    public const string NotPaired = "この denpa とはまだ組んでいません。denpa の設定の「エージェントを追加」に登録用の URL を貼るか、TUNER_AGENT_URL に #pair=… を付けてください (docs/agent.md)";
     public const string WrongClient = "証明書が名乗りと違います";
     public const string WrongProof = "合言葉が違います";
 
@@ -67,7 +67,19 @@ public sealed class AgentTls
     }
 
     /// <summary>組むときの URL。denpa の <c>TUNER_AGENT_URL</c> にそのまま書ける</summary>
-    public string PairUrl(int port) => $"https://{Environment.MachineName}:{port}#pair={Token}";
+    public string PairUrl(int port) => $"https://{PairHost()}:{port}#pair={Token}";
+
+    /// <summary>
+    /// URL に書く名前。機械の名前で、macOS だけは Bonjour の名前 (<c>scutil --get LocalHostName</c> に <c>.local</c>) にする。
+    /// .NET の機械の名前は最初の <c>.</c> までなので、Mac では LAN のほかの機械から引けない (install.sh の案内と同じ名前にそろえる)
+    /// </summary>
+    public static string PairHost()
+    {
+        if (!OperatingSystem.IsMacOS()) return Environment.MachineName;
+        var (code, output) = Shell.Run("scutil", ["--get", "LocalHostName"], TimeSpan.FromSeconds(5));
+        var name = code == 0 ? output.Trim() : "";
+        return $"{(name.Length > 0 ? name : Environment.MachineName)}.local";
+    }
 
     // --- 言葉 ----------------------------------------------------------------
 
@@ -125,14 +137,14 @@ public sealed class AgentTls
 
     /// <summary>
     /// <c>denpa-agent --status</c>: 動いているエージェントに自分の証明書で繋いで <c>/denpa/tuners</c> を読み、
-    /// 返った JSON をそのまま標準出力に出す (インストーラが様子を見るため)。サーバの証明書が agent.crt と同じかも確かめる。
+    /// 返った JSON をそのまま標準出力に出す (インストーラが結果を確かめるため)。サーバの証明書が agent.crt と同じかも確かめる。
     /// 繋がらなければ理由を標準エラーに出して 1
     /// </summary>
     public static async Task<int> Status(string dir, string host, int port)
     {
         if (!File.Exists(Path.Combine(dir, "agent.crt")) || !File.Exists(Path.Combine(dir, "agent.key")))
         {
-            Console.Error.WriteLine($"{dir} に agent.key / agent.crt がありません (エージェントを一度起こすと作られます)");
+            Console.Error.WriteLine($"{dir} に agent.key / agent.crt がありません (エージェントを一度起動すると作られます)");
             return 1;
         }
         using var certificate = LoadCertificate(dir);
@@ -209,7 +221,18 @@ public sealed class AgentTls
         }
     }
 
-    /// <summary><c>POST /denpa/pair</c> の答え。断ったら <c>Error</c>、組めたら返す <c>Proof</c> が入る</summary>
+    /// <summary>
+    /// <c>DELETE /denpa/pair</c>: 呼んだ denpa の指紋を <c>clients</c> から消す (denpa の設定でエージェントを削除したとき)。
+    /// ここへ来るのは組んだ相手だけ (<see cref="Decide"/>)。消したら true
+    /// </summary>
+    public bool Unpair(string? peer)
+    {
+        if (peer is null || !Clients.Remove(peer)) return false;
+        Log.Write($"denpa ({peer[..Math.Min(16, peer.Length)]}) の登録を消しました");
+        return true;
+    }
+
+    /// <summary><c>POST /denpa/pair</c> の応答。断ったら <c>Error</c>、組めたら返す <c>Proof</c> が入る</summary>
     public readonly record struct PairResult(int Status, string? Error, string? Proof);
 
     /// <summary>
@@ -229,7 +252,15 @@ public sealed class AgentTls
             return new(403, WrongProof, null);
         }
 
-        if (Clients.Add(client)) Log.Write($"denpa ({client[..Math.Min(16, client.Length)]}) と組みました");
+        if (Clients.Add(client))
+        {
+            Log.Write($"denpa ({client[..Math.Min(16, client.Length)]}) と組みました");
+            /*
+             * 2 つの denpa が同じエージェントを使うと、チューナーの取り合いの約束 (1 つの denpa が全部の利用者を出す) が崩れる。
+             * 断りはしない (denpa を別の機械へ移すときに、新旧が並ぶため)
+             */
+            if (Clients.Count > 1) Log.Write($"ほかの denpa とも組んでいます ({Clients.Count} 台)。チューナーを使う denpa は 1 つにしてください");
+        }
         return new(200, null, Proof(Token, "agent", Fingerprint, client));
     }
 
@@ -240,7 +271,7 @@ public sealed class AgentTls
         var keyFile = Path.Combine(dir, "agent.key");
         var certFile = Path.Combine(dir, "agent.crt");
         /*
-         * 片方だけ残っているのは、作っている途中で落ちたとき。証明書を書く前なので、それを覚えた denpa はいない
+         * 片方だけ残っているのは、作っている途中で落ちたとき。証明書を書く前なので、それを保存した denpa は無い
          */
         if (!File.Exists(keyFile) || !File.Exists(certFile))
         {
@@ -268,7 +299,7 @@ public sealed class AgentTls
     ///
     /// <para>
     /// **拡張は serverAuth と SKI だけ。** denpa はこの証明書そのものを ca に渡して確かめる。basicConstraints の CA:FALSE があると
-    /// Bun (BoringSSL) はそれを信頼の起点にできず落ちる (UNABLE_TO_VERIFY_LEAF_SIGNATURE)。keyUsage も付けない
+    /// Bun (BoringSSL) はそれを信頼の起点にできず、検証に失敗する (UNABLE_TO_VERIFY_LEAF_SIGNATURE)。keyUsage も付けない
     /// (付けて keyCertSign が無いと、自分で自分を発行したと見なされなくなる)
     /// </para>
     /// </summary>
@@ -291,6 +322,8 @@ public sealed class AgentTls
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var working = $"{path}.writing";
+        // 前に途中で止まって残った書きかけは、権限 (0600) が当たらないまま開き直すことになるので先に消す
+        File.Delete(working);
         var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         using (var stream = new FileStream(working, options))
@@ -329,6 +362,17 @@ public sealed class PairedClients
         get
         {
             lock (_gate) return _known.Count;
+        }
+    }
+
+    /// <summary>消す。無ければ何もしない (false)</summary>
+    public bool Remove(string fingerprint)
+    {
+        lock (_gate)
+        {
+            if (!_known.Remove(fingerprint)) return false;
+            AgentTls.WritePrivate(_file, string.Concat(_known.Order().Select(line => line + "\n")));
+            return true;
         }
     }
 

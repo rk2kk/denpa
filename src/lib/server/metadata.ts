@@ -3,30 +3,42 @@ import { extname } from "node:path";
 import type { Range } from "../ts/cm-decide";
 import { config } from "./config";
 import { removeIfExists } from "./fsx";
+import { recordingInput } from "./recording-io";
 import { run } from "./stream";
 import { TS_PROBE } from "./ts-probe";
+import { HLG_TO_SDR } from "./uhd";
 
 /**
  * 動画の隣に置くサイドカー。番組情報そのものは DB が持ち、denpa の画面が出す。
  */
 
+/** サイドカーの接尾辞 (サムネイル・データ放送・字幕の順)。名前を作る `sidecarPaths` も、片付けと孤児探し (files.ts) もこの一覧で見る */
+export const SIDECAR_SUFFIXES = [
+  "-poster.jpg",
+  ".bml.jsonl",
+  ".captions.json",
+] as const;
+
 /**
  * サイドカーの置き場。`foo.mkv` に対して `foo-poster.jpg`。
  *
- * サムネ (`-poster.jpg`) は denpa の画面 (`/api/recordings/<id>/poster`) が配る画像。
+ * サムネイル (`-poster.jpg`) は denpa の画面 (`/api/recordings/<id>/poster`) が配る画像。
  *
- * **字幕は置かない。** コンテナの中に入っていて、取り出すのは実測で 0.1〜1 秒
+ * **TS の局の字幕は置かない。** コンテナの中に入っていて、取り出すのは実測で 0.1〜1 秒
  * (`api/recordings/<id>/captions.json`。一度取り出したものはメモリに覚えておく)。
+ * 4K の局の字幕 (TTML) は Matroska に入れられないので、文字の配置にして置く (`….captions.json`。`encoder.writeCaptions`)
  */
 export function sidecarPaths(videoPath: string): {
   thumbnail: string;
   dataBroadcast: string;
+  captions: string;
 } {
   const base = sidecarBase(videoPath);
   return {
-    thumbnail: `${base}-poster.jpg`,
+    thumbnail: `${base}${SIDECAR_SUFFIXES[0]}`,
     // 録画のデータ放送 (再生位置つきの変化ログ)。d ボタンで出す (server/recorded-bml.ts)
-    dataBroadcast: `${base}.bml.jsonl`,
+    dataBroadcast: `${base}${SIDECAR_SUFFIXES[1]}`,
+    captions: `${base}${SIDECAR_SUFFIXES[2]}`,
   };
 }
 
@@ -35,16 +47,13 @@ function sidecarBase(videoPath: string): string {
   return videoPath.slice(0, videoPath.length - extname(videoPath).length);
 }
 
-/** サイドカーの接尾辞。片付けと孤児探し (files.ts) はこの一覧で見る。増やすときは `sidecarPaths` と一緒に */
-export const SIDECAR_SUFFIXES = ["-poster.jpg", ".bml.jsonl"] as const;
-
 /**
  * 位置から数えて何コマの中から代表を選ぶか。元の TS (29.97 コマ/秒) で約 15 秒ぶん。
  * CM 明けの黒コマ・フェードインをまたげる長さにしてある。
  */
 const THUMBNAIL_CANDIDATES = 450;
 
-/** サムネを取る位置 (読む入力の時刻) と、そこから読んでよい長さ */
+/** サムネイルを取る位置 (読む入力の時刻) と、そこから読んでよい長さ */
 interface ThumbnailPlace {
   at: number;
   limit?: number;
@@ -54,7 +63,7 @@ interface ThumbnailPlace {
  * サムネイルの ffmpeg 引数。
  *
  * **位置のコマをそのまま使わず、そこから `thumbnail` フィルタで代表を選ぶ。**
- * 位置決めだけだった頃は、CM 明けや CM を切った繋ぎ目に当たると黒コマや
+ * 位置決めだけだった頃は、CM 明けに当たると黒コマや
  * フェードインのコマを選ぶことがあった。`thumbnail` は候補の中で平均ヒストグラムに
  * いちばん近いコマを返すので、黒コマ (平均から遠い) は自然に外れて、
  * 少し後ろの本編のコマに落ち着く。
@@ -68,12 +77,15 @@ interface ThumbnailPlace {
  * jpg の SAR は画面が使わない。
  * 縮めてから選ぶのは、`thumbnail` が候補を全部持つため (1080p のままだと候補 450 コマで 1.4GB ほど使う)。
  * 選ぶ基準 (ヒストグラム) は縮めても変わらない。
+ *
+ * **4K の局 (`hlg`) は、縮めたあとで HLG を SDR に直す** (`uhd.HLG_TO_SDR`)。直さないと色の薄い画像になる
  */
 export function buildThumbnailArgs(
   videoPath: string,
   thumbnail: string,
   place: ThumbnailPlace,
   before: readonly string[] = [],
+  hlg = false,
 ): string[] {
   const limit =
     place.limit !== undefined && place.limit > 0
@@ -85,25 +97,29 @@ export function buildThumbnailArgs(
     String(Math.max(0, place.at)),
     ...limit,
     ...before,
-    "-i",
-    videoPath,
+    ...recordingInput(videoPath),
     "-frames:v",
     "1",
     "-vf",
-    `field=top,setsar=sar/2,scale=${config.thumbnailWidth}:trunc(ow/dar/2)*2,setsar=1,thumbnail=${THUMBNAIL_CANDIDATES}`,
+    [
+      "field=top",
+      "setsar=sar/2",
+      `scale=${config.thumbnailWidth}:trunc(ow/dar/2)*2`,
+      "setsar=1",
+      ...(hlg ? HLG_TO_SDR : []),
+      `thumbnail=${THUMBNAIL_CANDIDATES}`,
+    ].join(","),
     thumbnail,
   ];
 }
 
 /**
- * サムネをどこから取るか。**`cm` の時刻は全部、コンテナ (元の TS) の先頭からの秒** (CM 検出と同じ物差し)。
+ * サムネイルをどこから取るか。**`cm` の時刻は全部、コンテナ (元の TS) の先頭からの秒** (CM 検出と同じ物差し)。
  *
  * エンコードしたもの (AV1) をデコードし直さず、元の TS (MPEG-2/H.264) から取る。AV1 のソフトウェアデコードは
  * 数百コマでも重い。選ぶコマはエンコードしたものから取っていた頃と同じ。
  *
- * - **CM を切った** (`kept`) … エンコードしたものの先頭から `thumbnailPosition` 秒 (短ければ尺の 1/3) の所。
- *   残した区間をつないで数え、元の TS の時刻に戻す
- * - **CM を残した** (`content` = 本編の最初の区間) … 区間の先頭から測る。区間が短ければその真ん中
+ * - **CM がある** (`content` = 本編の最初の区間) … 区間の先頭から測る。区間が短ければその真ん中
  * - **CM 無し** … エンコードしたものの先頭 (`skip` 秒捨てた所) から `thumbnailPosition` 秒 (短ければ尺の 1/3)
  *
  * 区間が分かるときは、その終わりまでしか読まない (候補に CM を混ぜない)。
@@ -111,30 +127,12 @@ export function buildThumbnailArgs(
  */
 export function thumbnailPlace(
   durationSec: number,
-  cm: { skip: number; kept: Range[] | null; content: Range | null } = {
-    skip: 0,
-    kept: null,
-    content: null,
-  },
+  cm: { skip: number; content: Range | null } = { skip: 0, content: null },
 ): ThumbnailPlace {
   const head =
     Number.isFinite(durationSec) && durationSec > 0
       ? Math.min(config.thumbnailPosition, durationSec / 3)
       : config.thumbnailPosition;
-  const kept = cm.kept?.filter((r) => r.end > r.start) ?? [];
-  if (kept.length > 0) {
-    let rest = head;
-    for (const range of kept) {
-      const length = range.end - range.start;
-      if (rest < length)
-        return { at: range.start + rest, limit: length - rest };
-      rest -= length;
-    }
-    // 残した区間を全部足しても届かない (ほとんど切った)。最後の区間の真ん中から
-    const last = kept.at(-1)!;
-    const length = last.end - last.start;
-    return { at: last.start + length / 2, limit: length / 2 };
-  }
   const content = cm.content;
   if (
     content !== null &&
@@ -156,17 +154,25 @@ export function thumbnailPlace(
  * `from` を渡せば、画像はそちら (元の TS) の `place` から取る (`thumbnailPlace`)。
  * 渡さなければ `videoPath` そのものの先頭から (エンコードしない録画・取り込み)。
  * 位置ぴったりのコマではなく、そこからの代表を選ぶ (buildThumbnailArgs)。
+ * `hlg` は 4K の局の録画 (映像が HLG。縮めたあとで SDR に直す)
  */
 export async function writeThumbnail(
   videoPath: string,
   durationSec: number,
   from?: { source: string; place: ThumbnailPlace },
+  hlg = false,
 ): Promise<void> {
   const { thumbnail } = sidecarPaths(videoPath);
   const args =
     from === undefined
-      ? buildThumbnailArgs(videoPath, thumbnail, thumbnailPlace(durationSec))
-      : buildThumbnailArgs(from.source, thumbnail, from.place, TS_PROBE);
+      ? buildThumbnailArgs(
+          videoPath,
+          thumbnail,
+          thumbnailPlace(durationSec),
+          [],
+          hlg,
+        )
+      : buildThumbnailArgs(from.source, thumbnail, from.place, TS_PROBE, hlg);
   await run([config.ffmpeg, ...args]);
 }
 

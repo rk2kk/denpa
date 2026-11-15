@@ -2,22 +2,34 @@
   export interface Notice {
     /** どの通知か。テストの目印も兼ねる (`data-testid`) */
     key: string;
-    /** 見た目。error だけは自分では消えない */
-    kind: "error" | "info" | "success";
+    /** 見た目。error と warning は自分では消えない */
+    kind: "error" | "warning" | "info" | "success";
     text: string;
   }
 
   /**
-   * `form?.message` (fail の言葉) をトーストの形に。無ければ空。
-   * どの画面も同じ 1 行を書いていたので、ここにまとめた。
+   * `form` の 1 つの欄の文をトーストの形に。空か文でなければ空。
    * スプレッドでも `push(...)` でもそのまま混ぜられるよう、配列で返す
    */
+  function formNotice(
+    form: unknown,
+    field: string,
+    kind: Notice["kind"],
+    key: string,
+  ): Notice[] {
+    if (form === null || typeof form !== "object") return [];
+    const text: unknown = (form as Record<string, unknown>)[field];
+    return typeof text === "string" && text !== "" ? [{ key, kind, text }] : [];
+  }
+
+  /** `form?.message` (fail の言葉)。どの画面も同じ 1 行を書いていたので、ここにまとめた */
   export function errorNotice(form: unknown, key: string): Notice[] {
-    if (form === null || typeof form !== "object" || !("message" in form))
-      return [];
-    const { message } = form as { message: unknown };
-    if (typeof message !== "string" || message === "") return [];
-    return [{ key, kind: "error", text: message }];
+    return formNotice(form, "message", "error", key);
+  }
+
+  /** 予約の返事に付いた注意の文 (`warning`。有料の番組がスクランブルのまま録れるかもしれない) */
+  export function warningNotice(form: unknown, key: string): Notice[] {
+    return formNotice(form, "warning", "warning", key);
   }
 </script>
 
@@ -34,7 +46,7 @@
    * 画面からはみ出して外側にスクロールバーが生えていた。読み終わって消えると
    * 今度は逆に飛び上がる。浮かせておけば、下の内容は動かない。
    *
-   * 出す場所を 1 箇所に決めておくのは、画面ごとに違う場所へ出ていると
+   * 出す場所を 1 か所に決めておくのは、画面ごとに違う場所へ出ていると
    * 「どこを見れば結果が分かるのか」が覚えられないため。
    *
    * **ここに出すのは「押した結果」だけ。** 「スキャンに失敗しました」のような
@@ -83,8 +95,8 @@
   $effect(() => {
     void ids;
     const timers = untrack(() => notices)
-      // 失敗は自分では消さない。読み終わる前に消えると、何が起きたのか分からなくなる
-      .filter((notice) => notice.kind !== "error")
+      // 失敗と注意は自分では消さない。読み終わる前に消えると、何が起きたのか分からなくなる
+      .filter((notice) => notice.kind !== "error" && notice.kind !== "warning")
       .map((notice) => setTimeout(() => dismiss(notice.key), AUTO_HIDE));
     return () => {
       for (const timer of timers) clearTimeout(timer);
@@ -114,7 +126,7 @@
   <!-- 右下に浮かせる。段はダイアログの下・本文の上 (`--dp-z-toast`) -->
   <div class="toasts">
     {#each shown as notice (notice.key)}
-      <!-- 見た目は app.css の notice (error / info / success。kind と同じ名前) -->
+      <!-- 見た目は app.css の notice (error / warning / info / success。kind と同じ名前) -->
       <div class="notice {notice.kind} toast" data-testid={notice.key}>
         <span class="text">{notice.text}</span>
         <button
@@ -140,25 +152,25 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
     max-width: min(28rem, calc(100vw - 2rem));
   }
   .toast {
     display: flex;
     align-items: flex-start;
-    gap: 0.75rem;
-    /* 操作の層に浮かぶので、面はメニューと同じ (`--dp-pop`)。縁は付けず影だけ。種類は頭のアイコン (app.css の .notice) */
+    gap: var(--dp-space-3);
+    /* 操作の層に浮かぶので、面はメニューと同じ (`--dp-pop`)。縁は付けず影だけ。種類は先頭のアイコン (app.css の .notice) */
     background: var(--dp-pop);
     box-shadow: var(--dp-shadow-pop);
   }
   .text {
     white-space: pre-wrap;
   }
-  /* 1 行目の真ん中にそろえる (頭のアイコンと同じ高さ)。指の端末でボタンが高くなっても字はずれない */
+  /* 1 行目の真ん中にそろえる (先頭のアイコンと同じ高さ)。指の端末でボタンが高くなっても字はずれない */
   .close {
     flex: none;
     margin-block: calc(
-      (var(--pico-line-height) * 1rem - var(--dp-btn-h-xs)) / 2
+      (var(--pico-line-height) * var(--dp-text-base) - var(--dp-btn-h-xs)) / 2
     );
   }
 </style>

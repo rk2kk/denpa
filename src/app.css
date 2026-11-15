@@ -1,6 +1,6 @@
 /*
  * 見た目は Blades の Pico (Pico CSS v2 を引き継いだもの。素の CSS で、Sass は要らない)。
- * Pico は素の HTML を整える作りなので、入力欄・ボタン・余白を詰め、足りない部品(タグ・小さいボタン・並べ方)を下に足す。
+ * Pico は素の HTML を整える作りなので、入力欄・ボタン・余白を詰め、足りない部品 (タグ・小さいボタン・並べ方) を下に足す。
  * 画面ごとの並べ方は各コンポーネントの <style> に書く。
  * 開いたり閉じたりするメニューは `Menu.svelte` (ブラウザの popover)。見た目はここ (`.menu`)。
  *
@@ -19,11 +19,11 @@
  *
  * **限られた画面にしか出ない部品は、それを描くコンポーネントが <script> で読む**
  * (`import "@anyblades/blades/components/modal";`)。その画面の CSS にだけ入る。
- * - content/table … `HomeCalendar`・設定の `Channels`・`Tuners`・`ContractDialog`
+ * - content/table … `HomeCalendar`・設定の `Channels`・`AgentTuners`・`ContractDialog`
  * - forms/input-range … `player/SeekBar`
  * - components/accordion (<details>) … `player/Remote`・`RuleDraft`・設定の `MigrateProgress`・`Channels`
- * - components/modal (<dialog>。card が要るが、card はここにある) … `ProgramDetail`・`DriveNotice`・`LogoZoom`・設定の `IssueDialog`・`ContractDialog`
- * - components/progress … `home/TimelineRow`・`JobProgress`・設定の `Channels`
+ * - components/modal (<dialog>。card が要るが、card はここにある) … `ProgramDetail`・`DriveNotice`・`LogoZoom`・設定の `IssueDialog`・`AgentDialog`・`ContractDialog`
+ * - components/progress … `home/TimelineRow`・`JobProgress`・設定の `Channels`・端末に保存した録画 (`offline`)
  *
  * 部品を足すとき: 当てる要素がどの画面にも出るならここに (並びを守って)、そうでなければ描くコンポーネントの
  * <script> に `import` で足す。**<style> の中で @import しない** (そのコンポーネントだけに閉じ込められ、使うたびに重なって入る)。
@@ -52,7 +52,7 @@
 :root {
   --pico-font-family-sans-serif:
     "BIZ UDPGothic", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
-  /* 16px(Tailwind の頃と同じ)。番組表の 1 マスなど rem で組んだ寸法がそのまま保たれる */
+  /* 16px (Tailwind の頃と同じ)。番組表の 1 マスなど rem で組んだ寸法がそのまま保たれる */
   --pico-font-size: 16px;
   /*
      * **放送から来た字は Denpa Font で** (番組名・説明・番組表のマス・録画の名前・局名)。
@@ -99,11 +99,11 @@
   --dp-space-5: 1.5rem;
   --dp-space-6: 2rem;
   /*
-     * **重なりの段 (`z-index`)。** ページの段と、映像の舞台の中の段に分けて、数字はここにだけ書く。
-     * 1 つの部品の中だけで前後を決めるもの (面の上の線・裏に敷く 1 枚の 1・2・-1、番組表の箱の中の段) は部品に書く
+     * **重なりの段 (`z-index`)。** ページの段と、映像の舞台に置く段に分けて、数字はここにだけ書く。
+     * 1 つの部品の中だけで前後を決めるもの (面の上の線・裏に敷く 1 枚の 1・2・-1、番組表の箱に置く段) は部品に書く
      */
   --dp-z-heading: 3; /* 貼り付く日付の見出し */
-  --dp-z-pagebar: 5; /* ページの中で貼り付く操作の 1 行 (ホーム・切り抜き)。見出しより上 */
+  --dp-z-pagebar: 5; /* ページの中で上に貼り付く操作の 1 行 (切り抜きの選択) と、縦長の窓で上に留める映像の枠 (`PlayerStage`)。見出しより上 */
   --dp-z-dock: 30; /* 下のタブのすぐ上に浮かせる操作の 1 行 (`.dock`) */
   --dp-z-header: 40; /* ヘッダー・下のタブ */
   --dp-z-toast: 50; /* トースト・検索の候補。ダイアログより下 */
@@ -134,7 +134,7 @@
   --dp-bar-pad: 0.375rem;
   /*
    * 字の大きさ。本文は 16px のまま (番組表のマスなど rem で組んだ寸法が変わらない)。使い分けは docs/design.md の「作り方」。
-   * `-2xs` (11px) は幅か高さの決まった所だけ (下のタブの名前・番組表の時の列の「いま」・カレンダーの曜日・バーの先の「いま」・番組表のマスの「コピー禁止」)
+   * `-2xs` (11px) は幅か高さの決まった所だけ (下のタブの名前・番組表で時の列に置く「いま」・カレンダーの曜日・バーの先の「いま」・番組表のマスの「コピー禁止」)
    */
   --dp-text-2xs: 0.6875rem;
   --dp-text-xs: 0.75rem;
@@ -206,6 +206,8 @@
   --dp-video-menu: color-mix(in srgb, var(--dp-video-panel) 75%, transparent);
   /* 映像の上のメニュー・音量・実況に書く欄の影。近い影と遠い影の 2 段 */
   --dp-video-shadow: 0 2px 6px rgb(0 0 0 / 0.35), 0 18px 40px rgb(0 0 0 / 0.45);
+  /* 映像の上のアイコンと字に付ける小さな影 (`filter`)。明るい映像の上でも縁が読めるように。どの部品も同じ値 */
+  --dp-on-video-ink: drop-shadow(0 1px 2px rgb(0 0 0 / 0.6));
   /*
      * つまみ (再生位置のバー・音量) の入れたぶん。**ほかの所と同じ主の色 (azure-550 `#0172ad`) を 80% に透かす**
      * (色はそろえ、太いカプセルで広く塗っても映像が透けて重くならないように)。
@@ -214,6 +216,11 @@
      * 値は固定で書く。`var(--pico-primary)` はテーマで変わるが、映像の上はテーマで変えない
      */
   --dp-video-fill: rgb(1 114 173 / 0.8);
+  /*
+     * 映像の上の焦点の線。主の色 (azure-550) を透かさず固定で書く (暗いテーマの主の色 `#01aaff` は白い映像の上で 2.6:1 しかない)。
+     * 黒い舞台の上で 4.0:1、白い映像の上で 5.2:1 (線とアイコンの 3:1 を、どちらの映像の上でも保つ)
+     */
+  --dp-video-focus: #0172ad;
   --dp-video-veil: rgb(0 0 0 / 0.6);
   --dp-video-veil-strong: rgb(0 0 0 / 0.8);
   /* 再生位置のバーの CM の所。観ていないところは淡く、観たところは濃い琥珀色 (`SeekBar`) */
@@ -403,10 +410,27 @@
   border-radius: var(--dp-radius-full);
   background: var(--pico-primary-background);
 }
+/*
+ * ---- チャンネルのお知らせの印 (`.alert-dot`)。注意は ⚠、案内は ⓘ の小さなアイコンを状態の色で ----
+ * スマホの形の設定の入口 (下のタブ・「その他」・設定の左の一覧)。ヘッダーの印 (`ChannelAlert.svelte`) を小さくしたもの。
+ * 置き場は使う側で決める。点 (`.fresh-dot`) と同じ入口に重なったら、こちらを出す
+ */
+.alert-dot {
+  display: inline-flex;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+  margin-inline-start: var(--dp-space-1);
+}
+.alert-dot.ground {
+  color: var(--dp-warn-text);
+}
+.alert-dot.changed {
+  color: var(--dp-info-text);
+}
 
 /*
- * ---- 自分の書き込みの縦線 (`.mine-line`)。字の頭に短い縦線 ----
- * 実況の流れるコメントと一覧。「いまいる場所」の左の縦線 (`.menu-item` など) と同じ形 (幅 2px・角 1px・主の色) で、
+ * ---- 自分の書き込みの縦線 (`.mine-line`)。字の先頭に短い縦線 ----
+ * 実況の流れるコメントと一覧。「いまいる場所」の左の縦線 (`.menu-item` など) と同じ形 (幅 `--dp-mark`・両端は半円・主の色) で、
  * 「自分のもの」も同じ印で示す。映像の上では使う側が `--mine-line` で色を替える (`JikkyoLayer`)
  */
 .mine-line::before {
@@ -596,18 +620,17 @@ html[data-stage-fullscreen] body {
   background: var(--dp-video);
 }
 /*
- * **ダイアログ (`showModal()` で開いた `<dialog>` と、`aria-modal="true"` の箱。番組の詳細 `ProgramDetail` は `<div>`) を
- * 開いている間は、後ろのページを巻かない。**
+ * **ダイアログ (`showModal()` で開いた `<dialog>`。番組の詳細 `ProgramDetail` も同じ) を開いている間は、後ろのページを巻かない。**
  * Esc・背景のクリック・`closedby` で閉じても `:modal` が外れるので、ひとりでに戻る (JS は要らない)。
  * 舞台を広げている間の指定 (上) とは、どちらも止めるだけなので重なっても食い違わない。
- * `<dialog>` のときは、スクロールバーが消えて中身が横にずれないよう、その幅を空けたままにする (`scrollbar-gutter`)。
- * `aria-modal` の箱には付けない。箱は `position: fixed` で画面いっぱいに置くので、空けた幅の分だけ箱が狭くなり、
+ * スクロールバーが消えて中身が横にずれないよう、その幅を空けたままにする (`scrollbar-gutter`)。
+ * 番組の詳細 (`.detail-modal`) には付けない。中の箱を画面いっぱいに置くので、空けた幅の分だけ箱が狭くなり、
  * 狭い画面で下から出す一枚の右端が画面の端に届かない
  */
-html:has(dialog:modal, [aria-modal="true"]) {
+html:has(dialog:modal) {
   overflow: hidden;
 }
-html:has(dialog:modal) {
+html:has(dialog:modal:not(.detail-modal)) {
   scrollbar-gutter: stable;
 }
 /*
@@ -660,7 +683,7 @@ h3 {
 }
 th,
 td {
-  padding: 0.45rem 0.6rem;
+  padding: var(--dp-space-2) var(--dp-space-3);
 }
 /*
  * 表の見出しは地を塗らず、小さく沈めた字だけ。行の区切りの線も引かない (`--pico-table-border-color` は透明。行の上下の余白で分ける)。
@@ -680,17 +703,12 @@ thead th {
 }
 
 /* ---- 並べる ---- */
-/* 縦に積む / 横に並べて折り返す */
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap, 0.75rem);
-}
+/* 横に並べて折り返す */
 .cluster {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--gap, 0.5rem);
+  gap: var(--dp-space-2);
 }
 .spread {
   justify-content: space-between;
@@ -717,8 +735,8 @@ progress[value]::-webkit-progress-value {
 .progress-block {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 1rem;
+  gap: var(--dp-space-2);
+  margin-top: var(--dp-space-4);
 }
 /* その記録 (`<details class="log">`)。字だけの見出しの下に、開いたら淡い面 (枠は付けない) */
 .progress-block .log summary {
@@ -728,8 +746,8 @@ progress[value]::-webkit-progress-value {
 .progress-block .log pre {
   max-height: 16rem;
   overflow: auto;
-  margin: 0.25rem 0 0;
-  padding: 0.5rem;
+  margin: var(--dp-space-1) 0 0;
+  padding: var(--dp-space-2);
   border-radius: var(--dp-radius);
   background: var(--dp-subtle);
   font-family: var(--pico-font-family-monospace);
@@ -737,14 +755,8 @@ progress[value]::-webkit-progress-value {
   white-space: pre-wrap;
 }
 
-/* ---- 面 ---- */
-/* まとまりの箱。地の上に置き、枠も地も付けず余白だけで囲む */
-.panel {
-  padding: 1rem;
-}
-
 /*
- * 1 つのことだけを言う画面 (断られた・無かった・ログアウトした・テレビのペアリング)。
+ * 1 つのことだけを言う画面 (断られた・無かった・ログアウトした・テレビのペアリング・まだ観られない録画)。
  * **枠で囲まず、見出し・文・ボタンを左に揃えて置く。** 真ん中の小さなカードに入れていた頃は、
  * 文が数文字ずつで折り返して読みにくかった。読みやすい幅 (32rem) で止め、画面の上のほうに置く
  */
@@ -754,7 +766,7 @@ progress[value]::-webkit-progress-value {
   align-items: flex-start;
   gap: var(--dp-space-3);
   max-width: 32rem;
-  margin: clamp(2rem, 16vh, 9rem) auto 2rem;
+  margin: clamp(var(--dp-space-6), 16vh, 9rem) auto var(--dp-space-6);
 }
 .solo h1 {
   line-height: 1.35;
@@ -798,7 +810,7 @@ progress[value]::-webkit-progress-value {
   flex-direction: column;
   align-items: center;
   gap: var(--dp-space-2);
-  padding: 3rem var(--dp-space-4);
+  padding: var(--dp-space-6) var(--dp-space-4);
   text-align: center;
 }
 .empty-state p {
@@ -829,7 +841,7 @@ progress[value]::-webkit-progress-value {
     calc(-1 * var(--dp-gutter));
   height: var(--page-h);
 }
-/* 1 行に収める。表との間に線は引かない (表の頭の局の行が区切りになる) */
+/* 1 行に収める。表との間に線は引かない (表の先頭にある局名の行が区切りになる) */
 .guide-bar {
   display: flex;
   flex: none;
@@ -862,9 +874,9 @@ progress[value]::-webkit-progress-value {
 /*
  * **広い形 (スマホの形でないとき) では表がヘッダーの裏まで伸びる** (docs/design.md の「浮かせ方」。番組表の `.grid-box`)。
  * 操作の 1 行はヘッダーの下端 (`--dp-header-bottom`) に付け、高さを決めておく (`--guide-bar-h`)。
- * 表の頭 (局名の行が貼り付く所) はその下端 `--guide-head`。マスはヘッダーと操作の 1 行の裏を流れる。
+ * 表の先頭 (局名の行が貼り付く所) はその下端 `--guide-head`。マスはヘッダーと操作の 1 行の裏を流れる。
  * 1 行の中身はどれも小さいボタンの高さなので、高さは字の大きさや押す的の大きさ (`--dp-btn-h-sm`) から決まる。
- * 1 行の面は、ほかの画面の操作の 1 行と同じくヘッダーの下 `--dp-bar-gap` に来る (箱の頭は `--dp-fill-top`)
+ * 1 行の面は、ほかの画面の操作の 1 行と同じくヘッダーの下 `--dp-bar-gap` に来る (箱の先頭は `--dp-fill-top`)
  */
 :where(html:not([data-phone])) .guide-frame {
   /*
@@ -917,9 +929,6 @@ progress[value]::-webkit-progress-value {
   .guide-bar {
     padding-inline: var(--dp-space-2);
   }
-  .guide-bar > .segmented > a.button {
-    padding-inline: 0.4rem;
-  }
 }
 /*
  * **スマホの形 (下のタブがある形) では、ほかの画面の操作の 1 行と同じく、下のタブのすぐ上にカプセルで浮かせる** (下の `.dock`)。
@@ -932,8 +941,8 @@ progress[value]::-webkit-progress-value {
   --page-h: calc(100svh - env(safe-area-inset-top));
   /* 下のタブ + 1 行の下の隙間 + 1 行の上下の余白 + ボタンの高さ + 1 行の上の隙間 (下の `.guide-bar` の寸法と対) */
   --guide-float-h: calc(
-    var(--dp-tabbar, 0px) + var(--dp-dock-gap) + 0.5rem + var(--dp-btn-h-sm) +
-      var(--dp-dock-gap)
+    var(--dp-tabbar, 0px) + var(--dp-dock-gap) + var(--dp-space-1) * 2 +
+      var(--dp-btn-h-sm) + var(--dp-dock-gap)
   );
   margin-bottom: calc(-1 * (var(--dp-gutter) + var(--dp-tabbar, 0px)));
 }
@@ -941,7 +950,7 @@ progress[value]::-webkit-progress-value {
   position: fixed;
   inset-inline: var(--dp-dock-inset);
   z-index: var(--dp-z-dock);
-  padding: 0.25rem 0.5rem;
+  padding: var(--dp-space-1) var(--dp-space-2);
 }
 
 /*
@@ -1046,11 +1055,14 @@ progress[value]::-webkit-progress-value {
 .text-error {
   color: var(--dp-rec-text);
 }
+.text-warn {
+  color: var(--dp-warn-text);
+}
 /* 欄の上の小さい見出し。<label class="field"><span>見出し</span><input></label> */
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--dp-space-1);
   min-width: 0;
 }
 .field > span:first-child,
@@ -1066,11 +1078,19 @@ progress[value]::-webkit-progress-value {
 input[type="checkbox"]:not([role="switch"]) {
   border-radius: 0.25rem;
 }
+/*
+ * **スイッチはどこも同じ大きさ** (36 × 20px、丸は 16px で縁から 2px。メニューの `.s-switch`・映像の上の ⚙ も同じ)。
+ * Pico は大きさを字の大きさ (em) で決め、縁は 1px で丸が 18px になる。字の大きさを本文にそろえ、縁を 2px にして丸を 16px にする (縁は溝と同じ色なので見えない)
+ */
+input[type="checkbox"][role="switch"] {
+  border-width: 0.125rem;
+  font-size: 1rem;
+}
 /* チェックボックス + 文 */
 .check {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
   cursor: pointer;
 }
 .check input {
@@ -1089,10 +1109,10 @@ input[type="checkbox"]:not([role="switch"]) {
   display: flex;
   cursor: pointer;
   align-items: flex-start;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
 }
 .check-row input {
-  margin: 0.15rem 0 0;
+  margin: 0.125rem 0 0;
   flex-shrink: 0;
 }
 
@@ -1173,9 +1193,15 @@ input[type="checkbox"]:not([role="switch"]) {
     button:not([class]),
     :is(button, a.button):is(.small, .xs, .danger, .save),
     a.button
-  ):where(:not(.secondary, .outline, .ghost, [aria-pressed="true"])):not(
-    div
-  ):where(:active) {
+  ):where(
+    :not(
+      .secondary,
+      .outline,
+      .ghost,
+      [aria-pressed="true"],
+      [aria-current]:not([aria-current="false"])
+    )
+  ):not(div):where(:active) {
   scale: 0.97;
   /* 押したらすぐ縮み、離すとばねで戻る (戻りは下の `:where(button, a.button)` の transition) */
   transition: scale var(--dp-duration) var(--dp-ease);
@@ -1239,15 +1265,15 @@ input[type="checkbox"]:not([role="switch"]) {
  * **日付の見出し** (`.day-head`。録画の一覧と切り抜き)。ふだんは平ら。貼り付いて行がその裏を流れるときだけ、
  * ヘッダーと同じ半透明の面と影の小さなカプセルで浮かせる (docs/design.md の「浮かせ方」)。地の色で塗ると、半透明のヘッダーの下で塗った所だけが浮いて見えた。
  * 中は `.day-head-chip` に日の名前 (`.day-head-name`) と日付 (`.day-head-date`)。
- * 貼り付く位置は、いちばん上の見出しの置かれた位置 (main の頭の空き) と同じにし、巻き始めても動かない (上端ではカプセルにならない)
+ * 貼り付く位置は、いちばん上の見出しの置かれた位置 (main の先頭の空き) と同じにし、巻き始めても動かない (上端ではカプセルにならない)
  */
 .day-head {
-  --day-head-gap: 0.5rem;
+  --day-head-gap: var(--dp-space-2);
   position: sticky;
   top: var(--day-head-gap);
   z-index: var(--dp-z-heading);
   width: fit-content;
-  margin: 0.5rem 0 0.25rem;
+  margin: var(--dp-space-2) 0 var(--dp-space-1);
   color: var(--dp-muted);
   font-size: var(--dp-text-xs);
   font-weight: var(--dp-weight-bold);
@@ -1256,8 +1282,8 @@ input[type="checkbox"]:not([role="switch"]) {
 .day-head-chip {
   display: flex;
   align-items: baseline;
-  gap: 0.5rem;
-  padding: 0.25rem 0.75rem;
+  gap: var(--dp-space-2);
+  padding: var(--dp-space-1) var(--dp-space-3);
   border-radius: var(--dp-radius-full);
   background: var(--dp-float);
   box-shadow: var(--dp-shadow-pop);
@@ -1293,6 +1319,7 @@ input[type="checkbox"]:not([role="switch"]) {
   top: calc(env(safe-area-inset-top, 0px) + var(--day-head-gap));
 }
 /*
+ * ---- 入っている切り替え ----
  * **並び (`role="group"`) の外で押されているボタン (`aria-pressed="true"`) はオンで、主の色の短い下線と字** (番組表の「サブ ch」・映像の上の字幕など)。
  * 並びの中で押されているボタンは選んでいるもの (字の幅いっぱいの下線・左の縦線。下の `.pick-line`・`.segmented`・`.side-item`) なので、
  * この線は引かない。どの部品も、置いた場所でどちらかの 1 本になる (1 つの部品に線は 1 本)。
@@ -1310,6 +1337,17 @@ input[type="checkbox"]:not([role="switch"]) {
     var(--dp-on-mark, var(--pico-primary)),
     var(--dp-on-mark, var(--pico-primary))
   );
+  background-repeat: no-repeat;
+  background-position: center bottom 0.2rem;
+  background-size: 1rem var(--dp-mark);
+}
+/*
+ * **メニューを開くボタンは、中の設定が既定から変わっているときに同じ短い下線を引く** (`data-on`。ホームの「⋯」・切り抜きの「絞り込み」・番組表の「ジャンル」)。
+ * 開いているかは `aria-expanded` で言うので `aria-pressed` は使わず、字の色も変えない。
+ * 主の色の点は「まだ見ていないもの」の印なので使わない (1 つの見た目に 1 つの意味)
+ */
+button[data-on] {
+  background-image: linear-gradient(var(--pico-primary), var(--pico-primary));
   background-repeat: no-repeat;
   background-position: center bottom 0.2rem;
   background-size: 1rem var(--dp-mark);
@@ -1353,7 +1391,7 @@ a.button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.4rem;
+  gap: 0.375rem;
   padding: var(--pico-form-element-spacing-vertical)
     var(--pico-form-element-spacing-horizontal);
   border: var(--pico-border-width) solid var(--pico-border-color);
@@ -1430,17 +1468,17 @@ a.button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.35rem;
+  gap: 0.375rem;
   padding-block: 0;
 }
 :where(button, [type="button"], [type="submit"], a.button).small {
   min-height: var(--dp-btn-h-sm);
-  padding-inline: 0.75rem;
+  padding-inline: var(--dp-space-3);
   font-size: var(--dp-text-sm);
 }
 :where(button, [type="button"], [type="submit"], a.button).xs {
   min-height: var(--dp-btn-h-xs);
-  padding-inline: 0.5rem;
+  padding-inline: var(--dp-space-2);
   font-size: var(--dp-text-xs);
 }
 /* アイコンだけのボタン。幅を高さに揃えて円にする */
@@ -1457,7 +1495,7 @@ a.button {
 /* ---- 入力欄 ---- */
 /*
  * **入力欄は浮かせず平ら** (docs/design.md の「入力欄」)。線も凹みの影も付けず、地より一段濃い面 (`--dp-field`) だけで示す。
- * 角は `--dp-radius`。字を打っている間 (焦点) は、ほかの焦点と同じ外側の 2px の主の色の線
+ * 角は `--dp-radius`。字を打っている間 (焦点) は、ほかの焦点と同じく外側に 2px の線を引く (主の色)
  */
 :where(
   input:not(
@@ -1509,10 +1547,10 @@ a.button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.35rem;
+  gap: 0.375rem;
   min-height: var(--dp-btn-h);
   padding-block: 0;
-  padding-inline: 0.65rem;
+  padding-inline: var(--dp-space-3);
   font-size: var(--dp-text-sm);
 }
 .row-actions .outline.danger {
@@ -1574,6 +1612,16 @@ a.button {
   border-radius: var(--dp-btn-radius);
   box-shadow: none;
 }
+/*
+ * **768px より狭い画面ではタブの左右の余白を詰める** (番組表とライブで同じ)。ケーブルの局がある家はタブが 4 つ
+ * (ライブは「実況」を足して 5 つ) になり、詰めないと 360px の幅に収まらない。
+ * それでも入りきらない並びは横に流す (番組表は操作の 1 行ごと、ライブはタブの並び。`live/+page.svelte` の `.type-tabs`)
+ */
+@media (max-width: 767.98px) {
+  [role="group"].segmented > :is(button, a.button) {
+    padding-inline: 0.375rem;
+  }
+}
 [role="group"].segmented > :is(button, a.button):hover {
   --pico-background-color: var(--dp-hover-soft);
   --pico-border-color: transparent;
@@ -1589,13 +1637,14 @@ a.button {
 /*
  * 下線。押す場所の内側に引くので高さは変わらない。
  * **選び直すと、下線が前の場所から横へ滑る** (CSS だけ。下の「滑る印」)。
- * アンカーに対応していないブラウザは、選んでいるタブの中に線を引く (滑らない)
+ * アンカーに対応していないブラウザは、選んでいるタブの中に線を引く (滑らない)。ヘッダーのナビ (`ul.links`) も同じ線
  */
 [role="group"].segmented
   > :is(button, a.button):is(
     [aria-current="page"],
     [aria-pressed="true"]
-  )::after {
+  )::after,
+ul.links a.button[aria-current="page"]::after {
   content: "";
   position: absolute;
   inset-inline: 0.65rem;
@@ -1613,24 +1662,28 @@ a.button {
  * 並びごとに `anchor-scope` で閉じ、別の並びの印と混ざらないようにする
  */
 @supports (anchor-name: --a) {
-  [role="group"].segmented {
+  [role="group"].segmented,
+  ul.links {
     position: relative;
     anchor-scope: --slide;
   }
   [role="group"].segmented
-    > :is(button, a.button):is([aria-current="page"], [aria-pressed="true"]) {
+    > :is(button, a.button):is([aria-current="page"], [aria-pressed="true"]),
+  ul.links a.button[aria-current="page"] {
     anchor-name: --slide;
   }
   [role="group"].segmented
     > :is(button, a.button):is(
       [aria-current="page"],
       [aria-pressed="true"]
-    )::after {
+    )::after,
+  ul.links a.button[aria-current="page"]::after {
     content: none;
   }
   [role="group"].segmented:has(
       > :is(button, a.button):is([aria-current="page"], [aria-pressed="true"])
-    )::after {
+    )::after,
+  ul.links:has(a.button[aria-current="page"])::after {
     content: "";
     position: absolute;
     position-anchor: --slide;
@@ -1656,11 +1709,11 @@ a.button {
 .tag {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.05rem 0.5rem;
+  gap: var(--dp-space-1);
+  padding: 0 var(--dp-space-2);
   border-radius: var(--dp-radius-full);
   font-size: var(--dp-text-xs);
-  line-height: 1.6;
+  line-height: 1.75;
   white-space: nowrap;
   background: var(--dp-subtle);
   color: inherit;
@@ -1686,7 +1739,7 @@ a.button {
 
 /* ---- 通知 ---- */
 /*
- * 一言の通知。**種類は頭のアイコンと言葉で示し、地は状態の色で塗らない** (docs/design.md の「通知」)。
+ * 一言の通知。**種類は先頭のアイコンと言葉で示し、地は状態の色で塗らない** (docs/design.md の「通知」)。
  * 状態の色は `-text` の側をアイコンにだけ使う。前は地に状態の色を混ぜ、左に色の線を引いていたが、
  * 左の縦線は「選んでいる」の印と重なっていた。
  * アイコンは lucide の形 (circle-x・triangle-alert・circle-check・info) を `mask` で切り抜いて塗る。
@@ -1697,15 +1750,16 @@ a.button {
   --notice-mark-color: transparent;
   position: relative;
   border-radius: var(--dp-radius);
-  padding: 0.75rem 1rem 0.75rem calc(1.5rem + 1.125em);
+  padding: var(--dp-space-3) var(--dp-space-4) var(--dp-space-3)
+    calc(var(--dp-space-5) + 1.125em);
   background: var(--dp-subtle);
 }
 /* 1 行目の真ん中にそろえる (`1lh` は 1 行の高さ)。大きさは字に合わせる (`.small` の通知では小さく) */
 .notice::before {
   content: "";
   position: absolute;
-  top: calc(0.75rem + (1lh - 1.125em) / 2);
-  left: 1rem;
+  top: calc(var(--dp-space-3) + (1lh - 1.125em) / 2);
+  left: var(--dp-space-4);
   width: 1.125em;
   height: 1.125em;
   background: var(--notice-mark-color);
@@ -1770,7 +1824,7 @@ button[aria-busy="true"]::after {
 }
 
 /*
- * 文の続きとして読める、地も枠も無い小さなボタン (エンコーダの「確かめ直す」)。
+ * 文の続きとして読める、地も枠も無い小さなボタン (エンコーダの「再確認」)。
  * 押せることは下線で示す。上の `aria-busy` より後に置き、送信中も字は控えた色のまま。
  *
  * **ボタンのトークンをここで字のものに戻す。** ボタンの規則 (上の「ボタン」) は地と字を `--pico-background-color`・
@@ -1782,7 +1836,7 @@ button.text-button {
   --pico-color: var(--dp-muted);
   display: inline;
   width: auto;
-  margin: 0 0 0 0.25rem;
+  margin: 0 0 0 var(--dp-space-1);
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -1824,7 +1878,7 @@ button.text-button:hover {
    * 項目の角は面の角から内側の余白を引いた丸み (入れ子。下の `.menu-item`)。
    * **余白と項目の間は、映像の上のメニュー・プルダウンの一覧と同じ** (どのメニューも同じ形。色だけ層で変わる)
    */
-  --menu-pad: 0.5rem;
+  --menu-pad: var(--dp-space-2);
   padding: var(--menu-pad);
   gap: 0.125rem;
   border-radius: var(--dp-radius-lg);
@@ -1857,7 +1911,7 @@ button.text-button:hover {
 }
 /* メニューの中のまとまりは線ではなく余白で分ける (docs/design.md の「メニュー・ダイアログ・検索の候補」) */
 .menu hr {
-  margin: 0.25rem 0;
+  margin: var(--dp-space-1) 0;
   border: 0;
 }
 .menu[data-align="end"] {
@@ -1866,11 +1920,11 @@ button.text-button:hover {
 /* 引き金から 4px 離し、入りきる側へ広げる */
 .menu[data-side="top"] {
   --menu-rise: 0.375rem;
-  margin-bottom: 4px;
+  margin-bottom: var(--dp-space-1);
   transform-origin: bottom left;
 }
 .menu[data-side="bottom"] {
-  margin-top: 4px;
+  margin-top: var(--dp-space-1);
 }
 .menu[data-side="top"][data-align="end"] {
   transform-origin: bottom right;
@@ -1904,12 +1958,12 @@ button.text-button:hover {
 .menu-item {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
   width: 100%;
   margin: 0;
-  padding: 0.5rem 0.75rem;
+  padding: var(--dp-space-2) var(--dp-space-3);
   border: 0;
-  border-radius: calc(var(--dp-radius-lg) - var(--menu-pad, 0.5rem));
+  border-radius: calc(var(--dp-radius-lg) - var(--menu-pad, var(--dp-space-2)));
   box-shadow: none;
   background: transparent;
   color: inherit;
@@ -1935,6 +1989,18 @@ button.text-button:hover {
 .menu-item[data-disabled] {
   cursor: not-allowed;
   opacity: 0.5;
+}
+/* 戻せない操作の確定 (「削除を確定」)。指している間も赤い字 */
+.menu-item.menu-danger {
+  color: var(--dp-rec-text);
+}
+/*
+ * 押せない一言 (押せない項目のわけ・外せない理由)。項目と同じ余白で並べる。
+ * メニューの幅より長いので折り返す (1 行に詰めると、メニューの中に横のスクロールバーが出る)
+ */
+.menu-note {
+  margin: 0;
+  padding: var(--dp-space-2) var(--dp-space-3);
 }
 /*
  * **選んでいる項目** (いまの画面・選んでいる日・番組表のジャンル)。ほかの選んでいるものと同じく塗らずに左の縦線と主の色の太字
@@ -1967,8 +2033,8 @@ button.text-button:hover {
 .s-switch {
   position: relative;
   flex-shrink: 0;
-  width: 2rem;
-  height: 1.125rem;
+  width: 2.25rem;
+  height: 1.25rem;
   margin-inline-start: auto;
   border-radius: var(--dp-radius-full);
   background: var(--dp-line-strong);
@@ -1977,10 +2043,10 @@ button.text-button:hover {
 .s-switch::after {
   content: "";
   position: absolute;
-  top: 0.1875rem;
-  left: 0.1875rem;
-  width: 0.75rem;
-  height: 0.75rem;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 1rem;
+  height: 1rem;
   border-radius: var(--dp-radius-full);
   background: #fff;
   transition: transform var(--dp-duration-move) var(--dp-ease-spring);
@@ -1989,7 +2055,7 @@ button.text-button:hover {
   background: var(--pico-primary-background);
 }
 .s-switch.on::after {
-  transform: translateX(0.875rem);
+  transform: translateX(1rem);
 }
 
 /*
@@ -2008,7 +2074,7 @@ button.text-button:hover {
     }
     select {
       /* 選択肢は欄 (`select`) から受け継ぐので、内側の余白はここに置く (一覧の `::picker` に置くと選択肢に届かない) */
-      --menu-pad: 0.5rem;
+      --menu-pad: var(--dp-space-2);
       align-items: center;
     }
     select::picker-icon {
@@ -2016,7 +2082,7 @@ button.text-button:hover {
     }
     select::picker(select) {
       min-width: anchor-size(width);
-      margin-block: 4px;
+      margin-block: var(--dp-space-1);
       padding: var(--menu-pad);
       border: 0;
       border-radius: var(--dp-radius-lg);
@@ -2048,7 +2114,7 @@ button.text-button:hover {
     /* 選択肢は `.menu-item` と同じ。選んでいるものは、ほかの選んでいるものと同じく塗らずに左の縦線と主の色の太字 */
     select option {
       position: relative;
-      padding: 0.5rem 0.75rem;
+      padding: var(--dp-space-2) var(--dp-space-3);
       border-radius: calc(var(--dp-radius-lg) - var(--menu-pad));
       background: transparent;
       color: inherit;
@@ -2110,18 +2176,18 @@ button.text-button:hover {
     background: var(--dp-video-panel);
   }
 }
-.overlay-menu .option[data-active] {
+.overlay-menu .option[aria-checked="true"] {
   color: var(--dp-on-video-on);
   font-weight: var(--dp-weight-bold);
 }
 /* 左の縦線は `.menu-item` の選んでいる項目と同じ (`menuitemradio`)。色だけ空色の字に合わせる */
-.overlay-menu .option[data-active]::before {
+.overlay-menu .option[aria-checked="true"]::before {
   background: currentColor;
 }
 /* 映像の上に出す短い通知 (`StageNote`・追っかけの「続きは観る画面で」・ライブの「録画が始まったため、局を切り替えました」) */
 .stage-note {
   max-width: 100%;
-  padding: 0.25rem 0.75rem;
+  padding: var(--dp-space-1) var(--dp-space-3);
   border-radius: var(--dp-radius-lg);
   background: var(--dp-video-veil);
   font-size: var(--dp-text-xs);
@@ -2159,9 +2225,12 @@ dialog {
 .modal-box:focus {
   outline: none;
 }
+/* 見出しのすぐ下の説明 (`IssueDialog`・`AgentDialog`・`ContractDialog`)。見出しに寄せ、下の中身とは離す */
+.modal-box .intro {
+  margin: var(--dp-space-1) 0 var(--dp-space-4);
+}
 /*
- * 幕を押したら閉じる窓 (`LogoZoom`・`IssueDialog`・`ContractDialog`) は、箱の後ろに全面のボタンを敷く (Tab では止まらない `tabindex="-1"`)。
- * 右上の ✕ は箱の角に置き、見出しはその分だけ右を空ける
+ * 幕を押したら閉じる窓 (`LogoZoom`・`IssueDialog`・`AgentDialog`・`ContractDialog`) は、箱の後ろに全面のボタンを敷く (Tab では止まらない `tabindex="-1"`)
  */
 .modal-backdrop {
   position: fixed;
@@ -2176,22 +2245,25 @@ dialog {
   box-shadow: none;
   cursor: default;
 }
-.modal-close {
-  position: absolute;
-  top: var(--dp-space-3);
-  right: var(--dp-space-3);
-  z-index: 1;
-  color: var(--dp-muted);
+/*
+ * **閉じるのは左下の「閉じる」** (どの窓も同じ。番組の詳細の `.detail-actions` も同じ並べ方)。
+ * 窓の下の段 (`.modal-foot`) の左端に「閉じる」、右に残りの並び (`.modal-actions`)。
+ * 並びが折り返して上の段へ伸びても、「閉じる」は下の段に残る
+ */
+.modal-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--dp-space-2);
+  margin: var(--dp-space-5) 0 0;
 }
-.modal-close:hover {
-  color: inherit;
+.modal-foot > .modal-close {
+  flex: none;
+  margin: 0;
 }
-.modal-close svg {
-  width: 1.125rem;
-  height: 1.125rem;
-}
-.modal-close ~ h2 {
-  margin: 0 2.5rem 0 0;
+.modal-foot > .modal-actions {
+  flex: 1 1 0%;
+  min-width: 0;
+  margin: 0;
 }
 .modal-actions {
   display: flex;
@@ -2332,7 +2404,8 @@ dialog[open] > article {
 .lead.indent + .more-body {
   margin-inline-start: 1.75rem;
 }
-.check:has(> [role="switch"]) ~ :is(.lead.indent, .lead.indent + .more-body) {
+:is(.check, .check-row):has(> [role="switch"])
+  ~ :is(.lead.indent, .lead.indent + .more-body) {
   margin-inline-start: 2.75rem;
 }
 /* 設定の表 (チューナー・チャンネル)。入りきらなければ横に巻き、欄の間は詰める。`.wide` の列が余った幅を取る */
@@ -2344,7 +2417,7 @@ dialog[open] > article {
 }
 .table-wrap th,
 .table-wrap td {
-  padding: 0.35rem 0.5rem;
+  padding: 0.375rem var(--dp-space-2);
 }
 .table-wrap .wide {
   width: 100%;
@@ -2353,7 +2426,7 @@ dialog[open] > article {
  * **広い画面では「名前 (左) ｜ 操作 (右)」の 2 段組の行にする** (`.setting-rows` の中の `.field`)。
  * 名前・操作・説明を縦に積んでいた頃は、項目ごとに 3〜4 段の高さを取り、画面が縦に長くなっていた。
  * 名前 (`.field-label`) だけが左、それ以外 (欄・チェック・ボタンと、その下の説明) は右。
- * 説明を狭い左の列に入れていた頃は、数文字ずつで折り返し、右の欄と頭の高さもずれていた (GitHub の設定と同じ置き方)。
+ * 説明を狭い左の列に入れていた頃は、数文字ずつで折り返し、右の欄と先頭の高さもずれていた (GitHub の設定と同じ置き方)。
  * 狭い画面は縦に積んだまま。**切り替えは画面の幅ではなく右の列の幅で** (設定の `.main-inner` が container)。
  * 左に一覧が付くので、768px の画面でも右の列は 480px ほどしかない
  */
@@ -2418,17 +2491,17 @@ dialog[open] > article {
   --pico-background-color: transparent;
   --pico-color: var(--dp-btn-text);
   --pico-box-shadow: none;
-  --pick-inset: 0.75rem;
+  --pick-inset: var(--dp-space-3);
   --pick-bottom: 0.3rem;
   position: relative;
   display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.375rem;
   width: auto;
   min-height: var(--dp-btn-h-sm);
   margin: 0;
-  padding: 0 0.75rem;
+  padding: 0 var(--dp-space-3);
   border: 0;
   border-radius: var(--dp-radius-full);
   background-color: var(--pico-background-color);
@@ -2464,6 +2537,15 @@ dialog[open] > article {
   outline: 2px solid var(--pico-primary);
   outline-offset: 2px;
 }
+/* 選べない切り替え (チューナーの機材が受けられない種別) は、押せない日と同じ控えた字にして、乗せても地を付けない */
+.chip:has(input:disabled) {
+  --pico-background-color: transparent;
+  color: var(--dp-muted);
+  cursor: default;
+}
+.chip input[type="checkbox"]:disabled {
+  cursor: default;
+}
 /* 入っているものは塗らず、主の色の太字と字の幅いっぱいの下線。下線は `.pick-line` と同じ疑似要素 1 本 */
 .chip:has(input:checked) {
   color: var(--dp-primary-text);
@@ -2471,7 +2553,7 @@ dialog[open] > article {
 }
 
 /*
- * **一覧と右の列** (`.with-side` と、右の列に付ける `.side-column`)。録画の一覧 (ホーム) と切り抜きで同じ。
+ * **一覧と右の列** (`.with-side` と、右の列に付ける `.side-column`)。録画の一覧 (ホーム)・切り抜き・ルールで同じ。
  * スマホの形は一覧だけ (右の列は出さない)、広い形は一覧と 20rem の右の列 (1600px からは 22rem)
  */
 .with-side {
@@ -2488,7 +2570,8 @@ dialog[open] > article {
 }
 :where(html:not([data-phone])) .with-side > .side-column {
   display: flex;
-  padding-top: 0.25rem;
+  /* 上は空けない (`.side-panel` の上の余白も消す)。ヘッダーとの間は `--dp-header-space` が持っていて、ここでも空けると一覧の見出しより下がる */
+  padding-top: 0;
 }
 @media (min-width: 1600px) {
   :where(html:not([data-phone])) .with-side {
@@ -2502,7 +2585,7 @@ dialog[open] > article {
  * 幅と左右どちらに置くか (グリッドの列) は使う側で。
  *
  * - 窓の端とヘッダーに付ける。地・枠・影は付けない
- * - **線は引かない。** グループの境目は余白と見出しで分ける。見出しは本文の色の太字、上に 20px 空ける (最初のグループは 0)。
+ * - **線は引かない。** グループの境目は余白と見出しで分ける。見出しは本文の色の太字、上に 16px 空ける (最初のグループは 0)。
  *   **縦は詰める** (行は 48px のまま、見出しと余白で稼ぐ)。ホームはエンコードの行が出ると 1 行伸びるので、ふつうの窓の高さで巻かずに収まるように
  *   行は見出しより 12px 深く始め、塗りも一緒に動く
  * - **行はどの端末でも 48px** (車の中のタブレットでも押せる高さ。マウスとタブレットで詰め具合を変えない)
@@ -2514,8 +2597,8 @@ dialog[open] > article {
   min-height: 0;
   overflow-y: auto;
   /* 下の余白は名前で持つ。下端に貼り付ける行 (ルールの「ルールを作る」) が同じ値で打ち消す */
-  --dp-side-pad-end: 0.75rem;
-  padding: 0.75rem 0.625rem var(--dp-side-pad-end);
+  --dp-side-pad-end: var(--dp-space-3);
+  padding: var(--dp-space-3) var(--dp-space-3) var(--dp-side-pad-end);
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -2535,15 +2618,15 @@ dialog[open] > article {
 }
 /* スマホの形 (設定の 768〜999px、テーブルトップ) では下のタブが下端に重なるので、そのぶん下を空ける */
 :where(html[data-phone]) .side-panel {
-  --dp-side-pad-end: calc(0.75rem + var(--dp-tabbar, 0px));
+  --dp-side-pad-end: calc(var(--dp-space-3) + var(--dp-tabbar, 0px));
 }
 /* グループの見出し。リンクのときも見出しの顔のまま (設定) */
 .side-label {
   display: flex;
   align-items: center;
   min-height: 1.25rem;
-  margin: 1.25rem 0 0.125rem;
-  padding: 0 0.75rem;
+  margin: var(--dp-space-4) 0 0.125rem;
+  padding: 0 var(--dp-space-3);
   color: var(--dp-fg);
   font-size: var(--dp-text-sm);
   font-weight: var(--dp-weight-bold);
@@ -2559,7 +2642,7 @@ dialog[open] > article {
   flex-direction: column;
   gap: 1px;
   margin: 0;
-  padding: 0 0 0 0.75rem;
+  padding: 0 0 0 var(--dp-space-3);
   list-style: none;
   /*
    * 束ねるだけの `role="group"` (絞り込み・並び)。Pico は中のボタンに焦点が当たると束ごと影の枠で囲む
@@ -2576,11 +2659,11 @@ dialog[open] > article {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: var(--dp-space-3);
   width: 100%;
   min-height: 3rem;
   margin: 0;
-  padding: 0 0.75rem;
+  padding: 0 var(--dp-space-3);
   border: 0;
   border-radius: var(--dp-radius);
   background: transparent;
@@ -2629,7 +2712,7 @@ dialog[open] > article {
 /*
  * **選び直すと、左の縦線が前の場所から縦に滑る** (タブの下線と同じ「滑る印」。上の `.segmented` の説明)。
  * 並び (`.side-list`) の疑似要素 1 本を、選んでいる行に CSS のアンカーで付ける。行ごとに線を描くと、選び直したときに
- * 前の線が消えて次の線が出るだけで、滑らなかった (ライブの局を替えたとき)。並びをまたぐ (設定の別の節の束) ときはその場に出る。
+ * 前の線が消えて次の線が出るだけで、滑らなかった (ライブの局を替えたとき)。並びをまたぐ (設定でほかの節の束へ移る) ときはその場に出る。
  * 並びの外の行 (並びに入れずに使う `.side-item`) とアンカーに対応していないブラウザは、上の行ごとの線のまま
  */
 @supports (anchor-name: --a) {
@@ -2680,19 +2763,22 @@ dialog[open] > article {
 .side-item.static:hover {
   background: transparent;
 }
-/* 行の右の控えた値 (件数・値) */
-.side-item .side-sub {
+/* 行の右の控えた値 (件数・値)。同じ絞り込みをメニューに並べたとき (切り抜き) も同じ */
+:is(.side-item, .menu-item) .side-sub {
   display: inline-flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--dp-space-1);
   color: var(--dp-muted);
   font-size: var(--dp-text-xs);
+}
+.menu-item .side-sub {
+  margin-inline-start: auto;
 }
 /* いちばん下に置くもの (状態・主のボタン)。線では分けず、余白で下に押す */
 .side-foot {
   margin-top: auto;
-  padding-top: 1rem;
+  padding-top: var(--dp-space-4);
 }
 
 /*
@@ -2715,6 +2801,12 @@ dialog[open] > article {
 /* 見出しの行。本物と同じで、ここだけ濃い */
 .skeleton-head {
   background: var(--dp-line);
+}
+/* 番組表の局名 (局名の字の行と同じ高さ)。局の並びを待つ骨組み (`GuideSkeleton`) と、別の種別へ移る途中の番組表で同じ */
+.guide-frame .skeleton-head {
+  display: block;
+  width: 70%;
+  height: 1.25rem;
 }
 .skeleton::after {
   content: "";

@@ -12,6 +12,8 @@ import {
 
 import { COPY_NEVER_REASON } from "../format";
 import type { Reservation } from "../types";
+import { type CardNarrow, cardNarrower } from "./agent-cards";
+import { shareKey } from "./agent-channels";
 import { config } from "./config";
 import { assign, type Busy, type Capacity, capacityOf } from "./conflict";
 import { checkContracts } from "./contracts";
@@ -24,6 +26,7 @@ import {
   startRecording,
   stopRecording,
 } from "./recorder";
+import { plannedStartSql } from "./recording";
 import {
   HELD_STATES,
   programs,
@@ -34,13 +37,15 @@ import {
 } from "./schema";
 import { isDraining } from "./shutdown";
 import {
-  type AgentTuner,
-  getTuners,
   recordingHolds,
   recordingOf,
   recordingUse,
   type StreamUse,
+  tunerSnapshot,
 } from "./tuner";
+
+/** 割り振りでカードを訊くときに答えを待つ上限 (ms。振り分けの `ROUTE_ASK_WAIT` と同じ) */
+const CARD_ASK_WAIT = 3_000;
 
 interface Candidate extends Reservation {
   type: string;
@@ -55,21 +60,25 @@ interface Candidate extends Reservation {
  * - `capacity`: 動いているチューナーを、エージェントが選ぶ順 (`rank`) に組にしたもの (`Capacity`)
  * - `busy`: 録画中の予約が、いまどのチューナーにいて、いつ離すか (tuner.ts の `recordingHolds`)
  *
- * エージェントに繋がらないときは空 (「制限なし」) を返し、予約を勝手に conflict にしない (実際に
- * 録画が始まるときにあちらが弾くので、予約表を壊すより実行時に失敗させるほうが害が小さい)。
+ * 数えるのは全部のエージェントのチューナー (`tunerSnapshot`)。落ちているエージェントは最後に返した一覧で数える。
+ * どのエージェントにも繋がらないか、起動してから一度も一覧を返していないエージェントがあれば空 (「制限なし」) を返し、
+ * 予約を勝手に conflict にしない (実際に録画が始まるときにあちらが弾くので、予約表を壊すより実行時に失敗させるほうが害が小さい)。
  */
 export async function tunerState(): Promise<{
   capacity: Capacity;
   busy: Busy[];
+  narrow: CardNarrow;
 }> {
-  let tuners: AgentTuner[];
-  try {
-    tuners = await getTuners();
-  } catch {
-    return { capacity: [], busy: [] };
-  }
+  const keep: CardNarrow = (_service, places) => places;
+  const tuners = await tunerSnapshot();
+  if (tuners === null) return { capacity: [], busy: [], narrow: keep };
   const capacity = capacityOf(tuners);
-  if (capacity.length === 0) return { capacity, busy: [] };
+  if (capacity.length === 0) return { capacity, busy: [], narrow: keep };
+  // 録画の選局はカードの契約で絞って振り分ける (`tuner.route` の手順 1)。割り振りも同じ順で受けられる所を絞る
+  const narrow = await cardNarrower(
+    [...new Set(tuners.map((t) => t.agent))],
+    CARD_ASK_WAIT,
+  );
   const ids = tuners.flatMap((t) =>
     t.users.flatMap((u) => recordingOf(u.use) ?? []),
   );
@@ -87,19 +96,23 @@ export async function tunerState(): Promise<{
           .all()
           .map((rec) => [rec.id, recordingUntil(rec)] as const),
   );
-  return { capacity, busy: recordingHolds(tuners, (id) => until.get(id)) };
+  return {
+    capacity,
+    busy: recordingHolds(tuners, (id) => until.get(id)),
+    narrow,
+  };
 }
 
 export async function resolveConflicts(): Promise<{
   accepted: number;
   rejected: number;
 }> {
-  const { capacity, busy } = await tunerState();
+  const { capacity, busy, narrow } = await tunerState();
   const all: Candidate[] = orm()
     .select({
       ...getTableColumns(reservations),
       type: services.type,
-      channel: services.channel,
+      channel: shareKey(),
       copy_never: sql<boolean>`COALESCE(${programs.copy_never}, 0) = 1`.mapWith(
         Boolean,
       ),
@@ -122,7 +135,10 @@ export async function resolveConflicts(): Promise<{
    * 番組表が書き換わって禁止でなくなったものは、ここで割り振りに戻る
    */
   const skipped = all.filter((c) => c.copy_never);
-  const candidates = all.filter((c) => !c.copy_never);
+  // 受けられる所はカードの契約で絞る (振り分けと同じ順。`agent-cards.cardNarrower`)
+  const candidates = all
+    .filter((c) => !c.copy_never)
+    .map((c) => ({ ...c, channel: narrow(c.service_id, c.channel) }));
 
   // 前後のマージンぶんチューナーを使う時間は延びる。予約表と実行時のズレを無くすため
   // 同じ物差しで数える
@@ -208,7 +224,49 @@ export async function resolveConflicts(): Promise<{
 /** 有料放送の契約を確かめ直す間隔。契約の切り替わりは日の単位なので、1 日 2 回で足りる */
 const CONTRACT_SCAN_MS = 12 * 3_600_000;
 let lastContractScan = 0;
-let scanningContracts = false;
+
+/**
+ * 走らせる処理を 1 本ずつにする。走っている間に呼ばれたら、終わったあとに 1 回だけ走らせ直す
+ * (何回呼ばれても 1 回にまとめる)。返す Promise は、走らせ直した分まで終わったら済む。`run` は投げないこと
+ */
+export function oneAtATime(
+  run: () => Promise<void>,
+): (() => Promise<void>) & { readonly running: boolean } {
+  let current: Promise<void> | null = null;
+  let again = false;
+  const call = (): Promise<void> => {
+    if (current !== null) {
+      again = true;
+      return current;
+    }
+    current = (async () => {
+      do {
+        again = false;
+        await run();
+      } while (again);
+    })().finally(() => {
+      current = null;
+    });
+    return current;
+  };
+  return Object.defineProperty(call, "running", {
+    get: () => current !== null,
+  }) as (() => Promise<void>) & { readonly running: boolean };
+}
+
+/**
+ * 有料放送の契約を確かめ直す。12 時間ごとの `tick` と、カードが契約の更新 (EMM) を受け入れたという
+ * エージェントの通知 (`card`。runtime.ts) から呼ぶ。走っている間に呼ばれたら、終わったあとに 1 回だけ確かめ直す。
+ * カードが無ければ断られて、記録に 1 行出る
+ */
+export const recheckContracts = oneAtATime(async () => {
+  lastContractScan = now();
+  try {
+    await checkContracts();
+  } catch (error) {
+    console.warn(`[contracts] 契約を確かめ直せませんでした: ${error}`);
+  }
+});
 
 /**
  * `schedulerTick` (既定 5 秒) ごとに呼ばれる本体。開始時刻に達した予約を録画に移し、終了時刻を過ぎた録画を止める。
@@ -218,15 +276,9 @@ export async function tick(): Promise<void> {
   const at = now();
 
   // 有料放送の契約を確かめ直す (12 時間ごと)。自動予約は契約中と確かめた局しか録らないので、確かめ直さないと
-  // 契約を足しても切れても予約に効かない。カードが無ければ断られて、記録に 1 行出る
-  if (!scanningContracts && at - lastContractScan >= CONTRACT_SCAN_MS) {
-    lastContractScan = at;
-    scanningContracts = true;
-    void checkContracts()
-      .catch((error: unknown) =>
-        console.warn(`[contracts] 契約を確かめ直せませんでした: ${error}`),
-      )
-      .finally(() => (scanningContracts = false));
+  // 契約を足しても切れても予約に効かない
+  if (!recheckContracts.running && at - lastContractScan >= CONTRACT_SCAN_MS) {
+    void recheckContracts();
   }
 
   // 止めるほうを先にやる。次の番組が始まるときに前の録画がまだチューナーを
@@ -293,10 +345,7 @@ export async function tick(): Promise<void> {
       and(
         eq(reservations.state, "scheduled"),
         isNull(reservations.started_at),
-        lte(
-          sql`COALESCE(${reservations.record_from}, ${reservations.start_at} - ${config.startMargin})`,
-          at,
-        ),
+        lte(plannedStartSql(), at),
         gt(
           sql`COALESCE(${reservations.record_to}, ${reservations.end_at})`,
           at,

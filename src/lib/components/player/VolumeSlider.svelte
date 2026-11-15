@@ -161,11 +161,11 @@
 
 <style>
   /*
-     * カプセルは丸く閉じ (`--dp-radius-full`)、入れたぶんの塗りは中で切り取る。色は再生位置のバー (`SeekBar`) と
-     * 同じく透かした主の色 (`--dp-video-fill`。docs/design.md の「映像の上の操作」)。アイコンと字は白に小さな影 (塗りの上でも、空の所でも読める)。
-     * 的は縦なら幅、横なら高さ 44px (`--hit`)。縦のカプセルは少し細く見せ、的だけ左右へ広げる。
-     * `touch-action`。横のもの (⚙。指の端末) は縦にはメニューを送れるようにし、縦のものはページを動かさない
-     */
+   * カプセルは丸く閉じ (`--dp-radius-full`)、入れたぶんの塗りは中で切り取る。色は再生位置のバー (`SeekBar`) と
+   * 同じく透かした主の色 (`--dp-video-fill`。docs/design.md の「映像の上の操作」)。アイコンと字は白に小さな影 (塗りの上でも、空の所でも読める)。
+   * 押せる範囲は縦なら幅、横なら高さ 44px (`--hit`)。縦のカプセルは少し細く見せ、押せる範囲だけ左右へ広げる。
+   * `touch-action`。横のもの (⚙。指の端末) は縦にはメニューを送れるようにし、縦のものはページを動かさない
+   */
   .volume-slider {
     --hit: 2.75rem;
     position: relative;
@@ -187,10 +187,10 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
     width: 100%;
     height: 100%;
-    padding: 0 0.75rem;
+    padding: 0 var(--dp-space-3);
     overflow: hidden;
     border-radius: var(--dp-radius-full);
     box-shadow: var(--volume-shadow, none);
@@ -200,14 +200,14 @@
     flex-direction: column-reverse;
     justify-content: space-between;
     width: 2.5rem;
-    padding: 0.75rem 0;
+    padding: var(--dp-space-3) 0;
   }
   /*
-     * 塗りと空の所は、どちらも全体の大きさのまま `scale` で受け持つぶんだけ見せる (描き直さずに動かせる)。
-     * **空の所の面は、塗りの下には敷かない**。塗りは透かしてあるので、下に面があると映像ではなく面が透ける。
-     * 空の所: ⚙ の中ではメニューの面を黒で沈め、浮かべるときは映像の上の面 (`SoundButton` が渡す)。
-     * キーとホイールでは短く動いて追いつき、つまんでいる間は動かさずにそのまま付いてくる
-     */
+   * 塗りと空の所は、どちらも全体の大きさのまま `scale` で受け持つぶんだけ見せる (描き直さずに動かせる)。
+   * **空の所の面は、塗りの下には敷かない**。塗りは透かしてあるので、下に面があると映像ではなく面が透ける。
+   * 空の所は、⚙ の中ではメニューの面を黒で沈め、浮かべるときは映像の上の面 (`SoundButton` が渡す)。
+   * キーとホイールでは短く動いて追いつき、つまんでいる間は動かさずにそのまま付いてくる
+   */
   .empty,
   .fill {
     position: absolute;
@@ -215,7 +215,10 @@
     transition: transform var(--dp-duration) var(--dp-ease);
   }
   .empty {
-    background: var(--volume-empty, color-mix(in srgb, #000 40%, transparent));
+    background: var(
+      --volume-empty,
+      color-mix(in srgb, var(--dp-video) 40%, transparent)
+    );
     transform: scaleX(calc(1 - var(--level)));
     transform-origin: right center;
   }
@@ -239,7 +242,7 @@
   .name,
   .value {
     position: relative;
-    filter: drop-shadow(0 0 2px rgb(0 0 0 / 0.5));
+    filter: var(--dp-on-video-ink);
   }
   .icon {
     display: flex;
@@ -264,13 +267,13 @@
     transition: opacity var(--dp-duration) var(--dp-ease);
   }
   .volume-slider:has(input:focus-visible) .capsule {
-    outline: 2px solid var(--pico-primary);
+    outline: 2px solid var(--dp-video-focus);
     outline-offset: 2px;
   }
   /*
-     * 入力欄はカプセルの上に重ねて透かす。**指とマウスは受けない** (つまむのは外側が受け持つ)。
-     * 2 つのブラウザの擬似要素は 1 つの規則にまとめられない (片方に対応していないブラウザは規則ごと無視する)
-     */
+   * 入力欄はカプセルの上に重ねて透かす。**指とマウスは受けない** (つまむのは外側が受け持つ)。
+   * 2 つのブラウザの擬似要素は 1 つの規則にまとめられない (片方に対応していないブラウザは規則ごと無視する)
+   */
   input {
     position: absolute;
     inset: 0;

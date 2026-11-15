@@ -9,7 +9,6 @@ import {
   feedNotice,
   goto,
   openSettings,
-  pickCodec,
   syncEpg,
   test,
   wakeControls,
@@ -22,21 +21,21 @@ import {
  * 渡さず、放送のままの MPEG-2 と同じ worker でデコードして canvas に描く。ここは**描くところまで**見る —
  * 偽 ffmpeg に目印 (`stack.liveFmp4File`) を置くと、本物の H.264 + AAC・AV1 + Opus の fMP4 を流す
  * (`tests/fake/fmp4-loop.ts`)。映像は VideoDecoder が、音は WASM (`wasm/decoder.c`、28-live-raw と同じ
- * デコーダ。AAC は ADTS の頭を付けて、Opus は OpusHead で) がデコードする。
+ * デコーダ。AAC は ADTS の先頭を付けて、Opus は OpusHead で) がデコードする。
  *
- * H.264 は、走らせている Chromium の VideoDecoder がデコードできるときだけ描いて確かめる (デコードできなければ
- * 切り替えで選べないことを見る)。箱の読み方 (avcC・esds) は単体試験 (`ts/fmp4.test.ts`) が見る
+ * 描くのは AV1 (互換モードの自動は AV1 を先に選ぶ)。箱の読み方 (avcC・esds) は単体試験 (`ts/fmp4.test.ts`) が見る
  */
 
 const TESLA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Tesla/2026.32.1";
 
-/** 選局して、AV1 にしておく (H.264 を描けない端末では、自分で AV1 に寄せている) */
+/**
+ * 選局して、自動で AV1 になるのを待つ (互換モードの自動は AV1 → H.264 → MPEG-2)。GPU が無いので
+ * メニューに並ぶエンコードするものは H.264 で、AV1 は選べない
+ */
 async function watchAv1(page: Page): Promise<void> {
   await expect(page.getByTestId("live-title")).toBeVisible();
-  await wakeControls(page, "live-frame");
-  await pickCodec(page, "live", "av1");
-  await expect(page.getByTestId("live-codec")).toContainText("AV1");
+  await expect(page.getByTestId("live-codec")).toContainText("自動 (AV1)");
 }
 
 /** canvas に描いて、音も鳴らしていること (数が進む・映像が変わる) */
@@ -106,7 +105,7 @@ test.describe("互換モード", () => {
       await page.evaluate(() => localStorage.getItem("canvas-video")),
     ).toBeNull();
 
-    // 「わかりました」で入って、ページを読み直す
+    // 「了解」で入って、ページを読み直す
     await wakeControls(page, "live-frame");
     await openSettings(page, "live");
     await toggle.click();
@@ -127,29 +126,8 @@ test.describe("互換モード", () => {
     // 注意は入れたときに見せたので、ライブでは出さない
     await expect(page.getByTestId("drive-notice")).toBeHidden();
 
-    const h264 = await page.evaluate(
-      async () =>
-        (await VideoDecoder.isConfigSupported({ codec: "avc1.640029" }))
-          .supported === true,
-    );
-    if (h264) {
-      // 既定の H.264 をそのまま描く (AAC は ADTS の頭を付けて WASM へ)
-      await expect(page.getByTestId("live-codec")).toContainText("H.264");
-      await expectDrawn(page);
-    } else {
-      // 描けない形式は切り替えで選ばせない
-      await wakeControls(page, "live-frame");
-      await openSettings(page, "live");
-      await page.getByTestId("live-codec").click();
-      const option = page.locator(
-        '[data-testid="live-codec-option"][data-codec="h264"]',
-      );
-      await expect(option).toHaveAttribute("data-disabled");
-      await expect(option).toContainText("再生できません");
-      await page.keyboard.press("Escape");
-    }
-    // AV1 (Opus は WASM)
-    await watchAv1(page);
+    // 自動は描ける形式の先頭 (互換モードは AV1 → H.264 → MPEG-2。Opus は WASM)
+    await expect(page.getByTestId("live-codec")).toContainText("自動 (AV1)");
     await expectDrawn(page);
 
     // 止める・再開する (再開は放送の今から)
@@ -223,7 +201,7 @@ test.describe("互換モード", () => {
           send.call(this, data);
         };
       });
-      // 自動で開く (ほかのスペックは H.264 を選んだ端末として開く)
+      // 自動で開く (前のテストで選んだものを消す)
       await page.context().clearCookies();
       await goto(page, "/live");
       await page.getByTestId("drive-notice-accept").click();
@@ -353,8 +331,8 @@ test.describe("互換モードの追っかけ", () => {
 
     await goto(page, `/chase/${id}`);
     await expect(page.getByTestId("chase-title")).toBeVisible();
-    await wakeControls(page, "chase");
-    await pickCodec(page, "chase", "av1");
+    // 互換モードの自動は AV1 から (GPU が無いので、メニューに並ぶエンコードするものは H.264)
+    await expect(page.getByTestId("chase-codec")).toContainText("自動 (AV1)");
     await expectDrawn(page, "chase");
 
     // 速さは等速だけ (切り替えを出さない)
@@ -378,7 +356,7 @@ test.describe("互換モードの追っかけ", () => {
 
     /*
      * **リクエストし直したあとも再生位置が飛ばない。** シークバーを動かすと (溢れの読み直しと同じく) いまの位置から
-     * リクエストし直す。新しいストリームの時刻は 0 から数え直しになるので、再生位置はサーバが返す頭 (`timeline`) +
+     * リクエストし直す。新しいストリームの時刻は 0 から数え直しになるので、再生位置はサーバが返す先頭 (`timeline`) +
      * 新しいストリームの中の秒になる。前のストリームの秒を足したまま先へ飛んでいないことを見る
      */
     // 再生位置は読みものの「m:ss / m:ss」の左 (シークバーの値は録れている長さで頭打ちになるので使わない)
@@ -392,7 +370,7 @@ test.describe("互換モードの追っかけ", () => {
     };
     await expect.poll(where, { timeout: 30_000 }).toBeGreaterThanOrEqual(8);
     const before = await where();
-    // シークバーを動かすのと同じ (`seekBy`)。頭へ戻す。押したボタンにフォーカスがあると矢印は効かない (`keys.ts`) ので外す
+    // シークバーを動かすのと同じ (`seekBy`)。先頭へ戻す。押したボタンにフォーカスがあると矢印は効かない (`keys.ts`) ので外す
     await page.evaluate(() =>
       (document.activeElement as HTMLElement | null)?.blur(),
     );

@@ -4,7 +4,7 @@ using System.Globalization;
 namespace Denpa.Agent;
 
 /// <summary>
-/// PIX-DT295 を確かめる入口。**サーバを立てず、機材を 1 回だけ動かして統計を出す。**
+/// PIX-DT295 を確かめるコマンド。**サーバを立てず、機材を 1 回だけ動かして統計を出す。**
 ///
 /// <code>
 /// denpa-agent --dt295-probe --channel T25 --seconds 5
@@ -56,7 +56,7 @@ public static class Dt295NativeProbe
         {
             var device = acquire(timeline);
             var frontend = device.Frontend;
-            frontend.TuneTerrestrial((uint)((options.Tuning.Frequency + 500UL) / 1000));
+            frontend.TuneTerrestrial(ChannelTable.Khz(options.Tuning.Frequency));
             var samples = new List<(double Ms, byte[] Regs)>();
             var clock = Stopwatch.StartNew();
             double? lockedAt = null;
@@ -139,7 +139,7 @@ public static class Dt295NativeProbe
                     {
                         // 前の選局から離す。ロックは待たない
                         if (altTuning.Satellite) open.Frontend.TuneSatellite(altTuning.Frequency);
-                        else open.Frontend.TuneTerrestrial((uint)((altTuning.Frequency + 500UL) / 1000));
+                        else open.Frontend.TuneTerrestrial(ChannelTable.Khz(altTuning.Frequency));
                     }
                     catch (Exception error) when (error is IOException or InvalidOperationException)
                     {
@@ -150,7 +150,7 @@ public static class Dt295NativeProbe
                 var clock = Stopwatch.StartNew();
                 try
                 {
-                    tuner.Tune(options.Tuning, options.Tuning.StreamId);
+                    tuner.Tune(options.Tuning);
                     var total = clock.Elapsed.TotalMilliseconds;
                     var lockMs = timeline.Rows.Skip(before).Where(row => row.Name.StartsWith("受信の確認", StringComparison.Ordinal)).Select(row => row.Ms).DefaultIfEmpty(-1).Last();
                     results.Add((true, total, lockMs, null));
@@ -196,9 +196,14 @@ public static class Dt295NativeProbe
         }
         if (options.Replug)
         {
+            if (UsbHost.Current.PowerCycle is not { } cycle)
+            {
+                Console.Error.WriteLine("この OS ではポートの電源を入れ直せません。機材を挿し直してください");
+                return 1;
+            }
             try
             {
-                UsbSysfs.PowerCycle(UsbSysfs.Devices, port, TimeSpan.FromSeconds(10));
+                cycle(port, TimeSpan.FromSeconds(10));
                 Thread.Sleep(500);
             }
             catch (IOException error)
@@ -272,7 +277,7 @@ public static class Dt295NativeProbe
         var problem = (string?)null;
         long firstTsMs = -1;
         var streaming = TimeSpan.Zero;
-        // 平均の Mbps は、最初に読めた時刻から最後に読めた時刻までで割る (最初の読みのぶんは除く)。窓の秒数や止めるまでの読みには左右されない
+        // 平均の Mbps は、最初に読めた時刻から最後に読めた時刻までで割る (最初の読み出しのぶんは除く)。決めた秒数や止めるまでの読み出しには左右されない
         var firstRead = TimeSpan.MinValue;
         var lastRead = TimeSpan.Zero;
         long firstChunk = 0;
@@ -288,7 +293,7 @@ public static class Dt295NativeProbe
         try
         {
             var tuneClock = Stopwatch.StartNew();
-            tuner.Tune(options.Tuning, options.Tuning.StreamId);
+            tuner.Tune(options.Tuning);
             device = tuner.Device;
             Step($"{options.Channel} を選局しました (選局から最初の TS まで {tuneClock.ElapsedMilliseconds} ms)");
             if (device is not null)
@@ -311,7 +316,7 @@ public static class Dt295NativeProbe
                         var got = tsStream.Read(buffer, 0, buffer.Length);
                         if (got == 0)
                         {
-                            if (!Volatile.Read(ref stopReading)) problem = "TS の読みが終わりました";
+                            if (!Volatile.Read(ref stopReading)) problem = "TS の読み出しが終わりました";
                             return;
                         }
                         file?.Write(buffer, 0, got);
@@ -339,11 +344,11 @@ public static class Dt295NativeProbe
             var lastSignal = TimeSpan.Zero;
             void ShowSignal()
             {
-                // C/N の生の値 (dB には直していない。仕様書に換算式もレジスタも無く、レジスタは TC90522 系の推定)
+                // C/N の生の値 (レジスタは TC90522 系の推定。dB は TunerSignal.Tc90522Db の式で併記する)
                 if (tuner.Signal() is { } signal)
                 {
                     output.WriteLine($"信号 ({reading.Elapsed.TotalSeconds:F1} 秒): {(signal.Locked ? "受信中" : "受信していない")}、"
-                        + $"C/N の生の値 0x{signal.CnRaw.ToString($"X{signal.CnBytes * 2}")} ({signal.CnRaw}。{(signal.Satellite ? "衛星 0xBC" : "地上波 0x8B")} から {signal.CnBytes} バイト。dB には直していません)");
+                        + $"C/N の生の値 0x{signal.CnRaw.ToString($"X{signal.CnBytes * 2}")} ({signal.CnRaw}。{(signal.Satellite ? "衛星 0xBC" : "地上波 0x8B")} から {signal.CnBytes} バイト。TC90522 系の式で {(TunerSignal.Tc90522Db(signal.Satellite, signal.CnRaw) is { } db ? $"{db:F1} dB" : "式の外")})");
                 }
                 lastSignal = reading.Elapsed;
             }
@@ -390,11 +395,11 @@ public static class Dt295NativeProbe
         var receiving = firstRead == TimeSpan.MinValue ? TimeSpan.Zero : lastRead - firstRead;
         if (firstRead != TimeSpan.MinValue && receiving > TimeSpan.Zero)
         {
-            output.WriteLine($"受信の平均: {(stats.Bytes - firstChunk) * 8 / receiving.TotalSeconds / 1e6:F2} Mbps (最初の読みから最後の読みまで {receiving.TotalSeconds:F1} 秒。決めた秒数は {streaming.TotalSeconds:F1} 秒)");
+            output.WriteLine($"受信の平均: {(stats.Bytes - firstChunk) * 8 / receiving.TotalSeconds / 1e6:F2} Mbps (最初の読み出しから最後の読み出しまで {receiving.TotalSeconds:F1} 秒。決めた秒数は {streaming.TotalSeconds:F1} 秒)");
         }
         else if (stats.Bytes > 0)
         {
-            output.WriteLine("受信の平均: 求められません (読みが 1 回だけで、最初の読みから最後の読みまでの時間がありません)");
+            output.WriteLine("受信の平均: 求められません (読み出しが 1 回だけで、最初の読み出しから最後の読み出しまでの時間がありません)");
         }
         if (stats.Bytes > 0)
         {
@@ -407,7 +412,7 @@ public static class Dt295NativeProbe
             output.WriteLine($"最初の TS: {(firstTsMs < 0 ? "来なかった" : "届いたが読めなかった")}");
         }
         if (firstTsMs >= 0 && stats.Bytes > 0) output.WriteLine($"最初の TS: 選局から {firstTsMs} ms");
-        if (problem is not null) output.WriteLine($"TS の読みで止まった: {problem}");
+        if (problem is not null) output.WriteLine($"TS の読み出しで止まった: {problem}");
         if (timeline is not null)
         {
             output.WriteLine();
@@ -419,7 +424,7 @@ public static class Dt295NativeProbe
 
     /// <summary>
     /// カードの準備が選局と並んで済んだ時間と、ID を読むまでの時間を出す。時間は機材を開き始めてからで、最初の TS と同じ物差し。
-    /// ID は、準備済みのカードに Reset と BCas の読みをして得る (TS が届いたときに復号を始める場合にかかる時間)
+    /// ID は、準備済みのカードに Reset と BCas の読み出しをして得る (TS が届いたときに復号を始める場合にかかる時間)
     /// </summary>
     private static void MeasureCard(Dt295NativeDevice device, long firstTsMs, Func<ICardLink>? openCard, TextWriter output)
     {
@@ -435,7 +440,7 @@ public static class Dt295NativeProbe
             var init = BCas.Read(link);
             var read = clock.ElapsedMilliseconds;
             var ready = Math.Max(Math.Max(device.CardReadyMs, 0), firstTsMs);
-            output.WriteLine($"カードの ID: Reset {reset} ms、ID の読みまで {read} ms。TS が届いたときに復号を始めるなら、開き始めてから約 {ready + read} ms で ID が読める "
+            output.WriteLine($"カードの ID: Reset {reset} ms、ID の読み出しまで {read} ms。TS が届いたときに復号を始めるなら、開き始めてから約 {ready + read} ms で ID が読める "
                 + $"(カード {string.Join(" / ", init.Ids.Select(id => id.ToString("D16")))}、CA_system_id 0x{init.CaSystemId:X4})");
         }
         catch (Exception error) when (error is IOException or TimeoutException or InvalidOperationException)
@@ -463,7 +468,7 @@ public static class Dt295NativeProbe
             var clock = Stopwatch.StartNew();
             try
             {
-                tuner.Tune(tuning, tuning.StreamId);
+                tuner.Tune(tuning);
                 output.WriteLine($"  {previous.Name} → {name} ({(previous.Satellite == tuning.Satellite ? "同じ種別" : "種別が替わる")}): {clock.ElapsedMilliseconds} ms、制御転送 {(device?.Link.Controls ?? 0) - controls} 回");
             }
             catch (Exception error) when (error is IOException or InvalidOperationException or TimeoutException)

@@ -1,7 +1,7 @@
 /**
  * TS の土台 (パケットの切り出し・セクションの組み立て・PAT/PMT) と、局の一覧。
  * 局の一覧はチャンネルスキャンで「この物理チャンネルに何が入っているか」を知るために使い、
- * 読むのは NIT と SDT の 2 つ。
+ * 読むのは NIT と SDT の 2 つ。ケーブルでは、局の無い TS を見分けるのに PAT も読む (`ServiceReader`)。
  *
  * - NIT (PID 0x0010) … ネットワーク ID と、地上波ならリモコン番号。衛星はネットワークの全部の TS
  *   (TSID・周波数・サービスの一覧) が載っている (`NitReader`)
@@ -25,18 +25,20 @@ export function packetPid(packet: Uint8Array): number {
 
 /** PAT。どの PID に PMT があるかを持つ。**入口はいつもここ** */
 export const PID_PAT = 0x0000;
-export const PID_NIT = 0x0010;
+const PID_NIT = 0x0010;
 export const PID_SDT = 0x0011;
 
 export const TABLE_PAT = 0x00;
 export const TABLE_PMT = 0x02;
-export const TABLE_NIT_ACTUAL = 0x40;
-export const TABLE_NIT_OTHER = 0x41;
+const TABLE_NIT_ACTUAL = 0x40;
+const TABLE_NIT_OTHER = 0x41;
 export const TABLE_SDT_ACTUAL = 0x42;
-export const TABLE_SDT_OTHER = 0x46;
+const TABLE_SDT_OTHER = 0x46;
 
+const DESC_NETWORK_NAME = 0x40;
 const DESC_SERVICE_LIST = 0x41;
 const DESC_SATELLITE_DELIVERY = 0x43;
+const DESC_CABLE_DELIVERY = 0x44;
 const DESC_TERRESTRIAL_DELIVERY = 0xfa;
 const DESC_SERVICE = 0x48;
 const DESC_TS_INFORMATION = 0xcd;
@@ -64,7 +66,7 @@ const CRC32_TABLE = (() => {
 })();
 
 /** MPEG-2 の CRC32。セクション末尾の 4 バイトを含めて回すと 0 になる */
-function crc32(data: Uint8Array): number {
+export function crc32(data: Uint8Array): number {
   let crc = 0xffffffff;
   for (const byte of data) {
     crc =
@@ -76,8 +78,8 @@ function crc32(data: Uint8Array): number {
 /**
  * セクション本体に CRC32 を付けて仕上げる。`section_length` も実長に直す。
  *
- * **書く側が 2 つある。** PAT を書き直して流す `service-filter.ts` と、
- * 偽の放送を組み立てる `synth.ts`。長さの直し方を間違えると読む側が黙って
+ * **書く側が 3 つある。** PAT を書き直して流す `service-filter.ts` と、
+ * 偽の放送を組み立てる `synth.ts`・`synth-mmt.ts`。長さの直し方を間違えると読む側が黙って
  * 捨てるだけなので、1 箇所に置く。
  */
 export function withCrc(body: number[]): Uint8Array {
@@ -107,11 +109,12 @@ export interface TransportInfo {
 
 export interface NetworkInfo {
   networkId: number;
+  /** 最初の TS のリモコン番号。地上波の NIT は自分の TS 1 つだけを載せる */
   remoteControlKeyId: number | null;
-  transportStreams: TransportInfo[];
+  transportStreams: NetworkTransport[];
 }
 
-/** 何も組み上がらなかったときの返り。使い回すので凍らせてある */
+/** 何も組み上がらなかったときの返り。使い回すので `Object.freeze` してある */
 const NONE: readonly Uint8Array[] = Object.freeze([]);
 
 /**
@@ -119,7 +122,7 @@ const NONE: readonly Uint8Array[] = Object.freeze([]);
  *
  * セクションは TS パケットをまたいで運ばれ、パケットの切れ目とは無関係な
  * 位置で終わる。payload_unit_start_indicator と pointer_field を見て
- * 頭を合わせ、section_length ぶん溜まったら 1 本として返す。
+ * 先頭を合わせ、section_length ぶん溜まったら 1 本として返す。
  */
 export class SectionAssembler {
   private buffer = new Uint8Array(0);
@@ -165,7 +168,7 @@ export class SectionAssembler {
       // pointer_field の手前は前のセクションの続き
       this.append(payload.subarray(1, 1 + pointer));
       const done = this.flush();
-      // 写す。パケットは届いた塊の上の窓で、塊は使い回される (PacketStream)
+      // コピーする。パケットは届いたチャンクの一部を指し、チャンクのバッファは使い回される (PacketStream)
       this.buffer = payload.slice(1 + pointer);
       const next = this.flush();
       if (done.length === 0) return next;
@@ -205,7 +208,7 @@ export class SectionAssembler {
 
 /**
  * 同期が取れているとみなすのに必要な連続パケット数。
- * 1 つだけでは中身のたまたまの 0x47 を頭と誤認する
+ * 1 つだけでは中身にたまたまある 0x47 をパケットの先頭と誤認する
  */
 const CONFIRM = 3;
 
@@ -230,22 +233,22 @@ export function findSync(
 /**
  * 任意の長さで届くバイト列を 188 バイトのパケットに切り分ける。
  *
- * 頭が必ずパケットの先頭とは限らず、電波が弱いと途中で数バイト落ちる。
- * ずれたままだと**以降ずっと 1 パケットも読めなくなる**ので、頭が 0x47 でなければ
+ * 渡されたバイト列の先頭がパケットの先頭とは限らず、電波が弱いと途中で数バイト落ちる。
+ * ずれたままだと**以降ずっと 1 パケットも読めなくなる**ので、先頭が 0x47 でなければ
  * 取り直す。普段は先頭が 0x47 なので、探しに行くのはずれたときだけ。
  *
- * **出すパケットは渡された塊の上の窓** (写しではない。写すと録画の処理の 1/3 を食う)。
- * 塊の入れ物を使い回す呼び出し側がある
- * (denpa の `server/recorded-bml.ts`) ので、**次の `feed` より後まで持つなら写すこと**。
- * いまのパーサ (`SectionAssembler`・`PesDemuxer`) は溜めるときに写している
+ * **出すパケットは渡されたチャンクの一部を指す** (コピーではない。コピーすると録画の処理時間の 1/3 を使う)。
+ * チャンクのバッファを使い回す呼び出し側がある
+ * (denpa の `server/recorded-bml.ts`) ので、**次の `feed` より後まで持つならコピーすること**。
+ * いまのパーサ (`SectionAssembler`・`PesDemuxer`) は溜めるときにコピーしている
  */
 export class PacketStream {
   private rest = new Uint8Array(0);
 
   *feed(chunk: Uint8Array): Generator<Uint8Array> {
     /*
-     * 前の残り (`rest`) と塊を繋いだ並びの上を歩く。位置 `at` はその並びでの位置。
-     * 繋ぐのは**残りに頭があるパケットを読むのに要るぶんだけ** (頭を探すのに
+     * 前の残り (`rest`) とチャンクを繋いだ並びを順に読む。位置 `at` はその並びでの位置。
+     * 繋ぐのは**残りに先頭があるパケットを読むのに要るぶんだけ** (先頭を探すのに
      * 3 パケットぶん先まで見る)
      */
     const split = this.rest.length;
@@ -261,7 +264,7 @@ export class PacketStream {
       while (at < split && at + PACKET <= total) {
         if (head[at] !== SYNC) {
           const found = findSync(head, at, split);
-          // 残りの中には無い。塊のほうを探す
+          // 残りの中には無い。チャンクのほうを探す
           if (found < 0) {
             lost = true;
             break;
@@ -295,12 +298,12 @@ export class PacketStream {
       at = split + offset;
     }
 
-    // 同期が取れないまま溜め込まないよう、頭を探せるぶんだけ残す
+    // 同期が取れないまま溜め込まないよう、先頭を探せるぶんだけ残す
     const from = Math.max(at, total - PACKET * CONFIRM);
     if (from >= split) {
       this.rest = chunk.slice(from - split);
     } else {
-      // 塊が短くて、前の残りにまだ食い込んでいる
+      // チャンクが短くて、前の残りの途中から残す
       const rest = new Uint8Array(total - from);
       rest.set(this.rest.subarray(from));
       rest.set(chunk, split - from);
@@ -380,10 +383,10 @@ export function pmtProgramInfo(section: Uint8Array): Uint8Array {
 /**
  * PMT の ES の並びを `[stream_type, PID, 記述子]` で返す。
  *
- * **`stream_type` では物を見分けられません。** データ放送も AIT もロゴも同じ
+ * **`stream_type` では中身を見分けられない。** データ放送も AIT もロゴも同じ
  * DSM-CC セクション (0x0D) を名乗るので、見分けるのは記述子のほう
- * (component_tag や application_signalling) です。だからここは**素通しで並べる
- * だけ**にして、選り分けは呼ぶ側に置いてあります。
+ * (component_tag や application_signalling)。だからここは**素通しで並べる
+ * だけ**にして、選り分けは呼ぶ側に置いてある。
  */
 export function* pmtStreams(
   section: Uint8Array,
@@ -416,7 +419,7 @@ export function parsePat(section: Uint8Array): Map<number, number> {
 /**
  * SDT のサービスの並びを (service_id, 記述子の並び) に切り分ける。
  *
- * **読む側が 2 つある。** 局名 (`parseSdt`) とロゴの対応 (denpa の `ts/logo.ts`) で、
+ * **読む側が 2 つある。** 局名 (`sdtTransport`) とロゴの対応 (denpa の `ts/logo.ts`) で、
  * 欲しい記述子が違うだけで歩き方は同じ。並びの読み方をここ 1 箇所に置く。
  */
 export function* sdtServices(
@@ -466,18 +469,8 @@ function sdtTransport(section: Uint8Array): TransportInfo {
 }
 
 /** SDT からサービスの一覧を読む。自分の TS のものだけ */
-export function parseSdt(section: Uint8Array): TransportInfo | null {
+function parseSdt(section: Uint8Array): TransportInfo | null {
   return section[0] === TABLE_SDT_ACTUAL ? sdtTransport(section) : null;
-}
-
-/**
- * SDT[other] からサービスの一覧を読む。**ほかの TS のもの。**
- *
- * 衛星は、どの TS にもネットワークのほかの TS の局名を流している (番組表の EIT[other] と同じ考え)。
- * 開いていない TS の局名をこれで知る。TS ごとに別のセクションで来るので、集めるのは `SdtReader`
- */
-export function parseSdtOther(section: Uint8Array): TransportInfo | null {
-  return section[0] === TABLE_SDT_OTHER ? sdtTransport(section) : null;
 }
 
 /** 衛星の分配の記述子 (0x43)。どの周波数で流れているか */
@@ -513,11 +506,36 @@ export interface TerrestrialDelivery {
   frequencies: number[];
 }
 
-export type Delivery = SatelliteDelivery | TerrestrialDelivery;
+/**
+ * ケーブルの分配の記述子 (0x44)。どの周波数で、どう変調して流れているか。
+ *
+ * **並びは推定。** 有線の告示にある 0x44 の本文は読めていない。同じ系統の有線複数搬送波伝送分配システム記述子 (0xF3。総務省の告示の改正案) は
+ * 周波数 (32)・0xFF (8)・多重フレーム型式番号 (4)・外符号 (4)・変調 (8)・シンボルレート (28)・内符号 (4) の並びで、0x44 も同じと見ている。
+ * DVB (EN 300 468) では、多重フレーム型式番号の 4 ビットは reserved
+ */
+export interface CableDelivery {
+  kind: "cable";
+  /** 周波数 (Hz)。放送は MHz の BCD 8 桁 (小数 4 桁) で書くので、100 Hz 単位 */
+  frequency: number;
+  /** 多重フレーム型式番号。0x1 は TSMF (53 スロット・最大 15 TS)、0xF は TS が 1 つの搬送波 */
+  frameType: number;
+  /** 外符号。0x2 は RS(204,188) */
+  fecOuter: number;
+  /** 変調。0x03 は 64QAM、0x05 は 256QAM */
+  modulation: number;
+  /** シンボルレート (シンボル/秒)。ISDB-C は 5274000 */
+  symbolRate: number;
+  /** 内符号。0xF は内符号なし */
+  fecInner: number;
+}
+
+export type Delivery = SatelliteDelivery | TerrestrialDelivery | CableDelivery;
 
 /** NIT の TS の 1 件。サービスの一覧に、どこで流れているかが付く */
 export interface NetworkTransport extends TransportInfo {
   delivery: Delivery | null;
+  /** その TS のリモコン番号 (TS 情報記述子)。載せていなければ null */
+  remoteControlKeyId: number | null;
 }
 
 /** BCD の桁を左から `digits` 桁ぶん読んで、10 進の整数にする */
@@ -567,22 +585,41 @@ function terrestrialDelivery(
   };
 }
 
+/**
+ * ケーブルの分配の記述子を読む。周波数は 8 桁の BCD で、上から 4 桁が MHz (0111.0000 MHz)。
+ * シンボルレートは 7 桁で、上から 3 桁が Msym/s (005.2740)
+ */
+function cableDelivery(descriptor: Uint8Array): CableDelivery | null {
+  if (descriptor.length < 11) return null;
+  return {
+    kind: "cable",
+    frequency: bcdDigits(descriptor, 0, 8) * 100,
+    frameType: descriptor[5]! >> 4,
+    fecOuter: descriptor[5]! & 0x0f,
+    modulation: descriptor[6]!,
+    symbolRate: bcdDigits(descriptor, 7, 7) * 100,
+    fecInner: descriptor[10]! & 0x0f,
+  };
+}
+
 /** NIT のセクション 1 つ。表は何本かのセクションに分かれて来るので、そろえるのは `NitReader` */
-export interface NitSection {
+interface NitSection {
   /** NIT[other] (ほかのネットワークのもの) なら true */
   other: boolean;
   networkId: number;
   version: number;
-  /** current_next_indicator。0 (これから使う表) のものは `NitReader` が読まない */
-  current: boolean;
   sectionNumber: number;
   lastSectionNumber: number;
+  /** ネットワーク名 (0x40)。載っていなければ null */
+  name: string | null;
   remoteControlKeyId: number | null;
   transportStreams: NetworkTransport[];
+  /** セクションのバイト列 (CRC まで) */
+  raw: Uint8Array;
 }
 
 /** NIT のセクションを 1 つ読む。actual (0x40) と other (0x41) のどちらも */
-export function parseNitSection(section: Uint8Array): NitSection | null {
+function parseNitSection(section: Uint8Array): NitSection | null {
   const tableId = section[0];
   if (tableId !== TABLE_NIT_ACTUAL && tableId !== TABLE_NIT_OTHER) return null;
   if (section.length < 16) return null;
@@ -590,6 +627,10 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
   const networkLength = u16(section, 8) & 0x0fff;
   let at = 10 + networkLength;
   if (at + 2 > section.length) return null;
+  let name: string | null = null;
+  for (const [tag, descriptor] of descriptors(section.subarray(10, at))) {
+    if (tag === DESC_NETWORK_NAME) name ??= decodeAribText(descriptor);
+  }
   at += 2; // transport_stream_loop_length
 
   let remoteControlKeyId: number | null = null;
@@ -604,13 +645,11 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
 
     const services: Service[] = [];
     let delivery: Delivery | null = null;
+    let remote: number | null = null;
     for (const [tag, descriptor] of descriptors(body)) {
-      if (
-        tag === DESC_TS_INFORMATION &&
-        descriptor.length > 0 &&
-        remoteControlKeyId === null
-      ) {
-        remoteControlKeyId = descriptor[0]!;
+      if (tag === DESC_TS_INFORMATION && descriptor.length > 0) {
+        remote ??= descriptor[0]!;
+        remoteControlKeyId ??= remote;
       } else if (tag === DESC_SERVICE_LIST) {
         for (let i = 0; i + 3 <= descriptor.length; i += 3) {
           services.push({
@@ -623,6 +662,8 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
         delivery = satelliteDelivery(descriptor) ?? delivery;
       } else if (tag === DESC_TERRESTRIAL_DELIVERY) {
         delivery = terrestrialDelivery(descriptor) ?? delivery;
+      } else if (tag === DESC_CABLE_DELIVERY) {
+        delivery = cableDelivery(descriptor) ?? delivery;
       }
     }
     transportStreams.push({
@@ -630,6 +671,7 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
       originalNetworkId,
       services,
       delivery,
+      remoteControlKeyId: remote,
     });
   }
 
@@ -637,11 +679,12 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
     other: tableId === TABLE_NIT_OTHER,
     networkId: u16(section, 3),
     version: (section[5]! >> 1) & 0x1f,
-    current: (section[5]! & 0x01) !== 0,
     sectionNumber: section[6]!,
     lastSectionNumber: section[7]!,
+    name,
     remoteControlKeyId,
     transportStreams,
+    raw: section.slice(),
   };
 }
 
@@ -649,7 +692,7 @@ export function parseNitSection(section: Uint8Array): NitSection | null {
  * NIT からネットワーク ID とリモコン番号、他の TS の顔ぶれを読む。**セクション 1 つぶん。**
  * スキャンで「どのネットワークか」を知るにはこれで足りる。ネットワークの全部の TS が要るなら `NitReader`
  */
-export function parseNit(section: Uint8Array): NetworkInfo | null {
+function parseNit(section: Uint8Array): NetworkInfo | null {
   if (section[0] !== TABLE_NIT_ACTUAL) return null;
   const parsed = parseNitSection(section);
   if (parsed === null) return null;
@@ -693,8 +736,12 @@ export interface Network {
   other: boolean;
   networkId: number;
   version: number;
+  /** ネットワーク名 (0x40)。載っていなければ null。`NitReader` を通さずに作った表では省いてよい */
+  name?: string | null;
   remoteControlKeyId: number | null;
   transportStreams: NetworkTransport[];
+  /** セクションのバイト列 (section_number の順)。読み方を確かめるために記録に出す (ケーブルのスキャン)。省いてよい */
+  sections?: Uint8Array[];
 }
 
 /**
@@ -763,10 +810,12 @@ export class NitReader {
       other: section.other,
       networkId: section.networkId,
       version: section.version,
+      name: parts.find((part) => part.name !== null)?.name ?? null,
       remoteControlKeyId:
         parts.find((part) => part.remoteControlKeyId !== null)
           ?.remoteControlKeyId ?? null,
       transportStreams: parts.flatMap((part) => part.transportStreams),
+      sections: parts.map((part) => part.raw),
     });
     return true;
   }
@@ -881,17 +930,33 @@ export interface FoundService extends Service {
  * Mirakurun のスキャンと同じで、**両方**揃って初めてそのチャンネルを
  * 「受信できた」とみなす。SDT だけ取れても、どのネットワークのものか
  * 分からないと設定に書けない。
+ *
+ * **ケーブル (`requireNit: false`) は SDT[actual] だけで揃ったとみなす。** 1 つのネットワークが
+ * 地上波・BS の再送信と自主放送の TS をまとめて流していて、NIT は CATV のネットワークのもの
+ * (局の元の放送とは別)。どの放送の局かは SDT の original_network_id で分かる。
+ * NIT が先に来ていれば、その TS のリモコン番号だけを使う。
+ * PAT に局が 1 つも無い TS (データだけの TS) も揃ったとみなし、局は返さない (`empty`)
  */
 export class ServiceReader {
   private readonly nit = new SectionAssembler(PID_NIT);
   private readonly sdt = new SectionAssembler(PID_SDT);
+  private readonly pat = new SectionAssembler(PID_PAT);
   private readonly packets = new PacketStream();
+  private readonly requireNit: boolean;
 
   network: NetworkInfo | null = null;
   transport: TransportInfo | null = null;
+  /** PAT に局が 1 つも無かった (`requireNit: false` のときだけ読む) */
+  empty = false;
+
+  constructor({ requireNit = true }: { requireNit?: boolean } = {}) {
+    this.requireNit = requireNit;
+  }
 
   get complete(): boolean {
-    return this.network !== null && this.transport !== null;
+    return this.requireNit
+      ? this.network !== null && this.transport !== null
+      : this.transport !== null || this.empty;
   }
 
   /** 任意の長さのバイト列を渡す。揃ったら true */
@@ -907,22 +972,42 @@ export class ServiceReader {
           this.transport = parseSdt(section) ?? this.transport;
         }
       }
+      if (!this.requireNit && !this.empty && this.transport === null) {
+        for (const section of this.pat.feed(packet)) {
+          if (section[0] === TABLE_PAT && parsePat(section).size === 0)
+            this.empty = true;
+        }
+      }
     }
     return this.complete;
   }
 
   /** 録るに値するサービスだけ。リモコン番号は NIT のものを配る */
   services(): FoundService[] {
-    if (this.network === null || this.transport === null) return [];
-    const { networkId, remoteControlKeyId } = this.network;
-    const { transportStreamId } = this.transport;
-    return this.transport.services
-      .filter((service) => SERVICE_TYPES.has(service.serviceType))
-      .map((service) => ({
-        ...service,
-        networkId,
-        transportStreamId,
-        remoteControlKeyId,
-      }));
+    const transport = this.transport;
+    if (transport === null) return [];
+    const { transportStreamId, originalNetworkId } = transport;
+    const found = (
+      networkId: number,
+      remoteControlKeyId: number | null,
+    ): FoundService[] =>
+      transport.services
+        .filter((service) => SERVICE_TYPES.has(service.serviceType))
+        .map((service) => ({
+          ...service,
+          networkId,
+          transportStreamId,
+          remoteControlKeyId,
+        }));
+    if (this.requireNit) {
+      if (this.network === null) return [];
+      return found(this.network.networkId, this.network.remoteControlKeyId);
+    }
+    const own = this.network?.transportStreams.find(
+      (ts) =>
+        ts.transportStreamId === transportStreamId &&
+        ts.originalNetworkId === originalNetworkId,
+    );
+    return found(originalNetworkId, own?.remoteControlKeyId ?? null);
   }
 }

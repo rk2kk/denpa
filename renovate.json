@@ -11,11 +11,35 @@
       ]
     },
     {
-      "description": "入れ方 (install.sh は Mac で px4-userland / siano-userland を、install.ps1 は Windows で px4-userland / siano-userland を取ってくる) の `# renovate:` 付きの変数 (sh は `NAME=1.2.3`、PowerShell は `$Name = '1.2.3'`)。Dockerfile と同じ px4-userland / siano-userland を指していて、同じ依存なので1つの PR で揃って上がる",
+      "description": "scripts/build-wdi-simple.ps1 の `# renovate:` 付きの変数 (PowerShell の `$Name = '1.2.3'`)。Windows のエージェントの zip に入れる wdi-simple.exe をビルドする libwdi のバージョン",
       "customType": "regex",
-      "managerFilePatterns": ["/^install\\.(sh|ps1)$/"],
+      "managerFilePatterns": ["/^scripts/build-wdi-simple\\.ps1$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?\\s+(?:[A-Z0-9_]+=|\\$\\w+ = ')(?<currentValue>[^'\\s]+)"
+      ]
+    },
+    {
+      "description": ".github/openssl-android.sh の `# renovate:` 付きの変数 (`OPENSSL_VERSION=3.5.9`)。Android 向けのエージェントに静的に入れる OpenSSL のバージョン",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/openssl-android\\.sh$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?\\s+[A-Z0-9_]+=(?<currentValue>\\S+)"
+      ]
+    },
+    {
+      "description": ".github/asicen-android.sh の `# renovate:` 付きの変数 (`ASICEN_USERLAND_VERSION=1.0.0-beta`)。Android のアプリに入れる asicen-userland のバージョン。agent/Dockerfile と同じグループの PR になる (下の packageRules)",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/asicen-android\\.sh$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?(?: versioning=(?<versioning>\\S+?))?\\s+[A-Z0-9_]+=(?<currentValue>\\S+)"
+      ]
+    },
+    {
+      "description": ".github/bun-android.sh の `# renovate:` 付きの変数 (`BUN_VERSION=1.4.4`)。Android のアプリに入れる bun の公式の Android 版のバージョン。別のグループの PR になる (下の packageRules)",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/bun-android\\.sh$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?\\s+[A-Z0-9_]+=(?<currentValue>\\S+)"
       ]
     },
     {
@@ -26,6 +50,15 @@
         "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: extractVersion=(?<extractVersion>\\S+?))?\\s+[A-Z0-9_]+=(?<currentValue>\\S+)",
         "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)\\s+image: \\S+?:(?<currentValue>\\S+)"
       ]
+    },
+    {
+      "description": "Android のアプリを組む JDK (.github/workflows/android.yml の `java-version`)。メジャーだけで留め、新しいメジャーが出たら上げる。Gradle・AGP・Kotlin・依存は android/gradle/ にあり、Renovate の gradle と gradle-wrapper が自分で見つける",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/android\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)\\s+java-version: \"(?<currentValue>\\d+)\""
+      ],
+      "extractVersionTemplate": "^(?<version>\\d+)"
     }
   ],
   "packageRules": [
@@ -36,17 +69,20 @@
       "pinDigests": true
     },
     {
-      "description": "dotnet/sdk の動く major タグ (`11.0`) は正式リリースより前からあり、11月の GA まではプレビューを指す (2026-09 時点で中身は 11.0.100-preview.1)。プレビューでもビルドできてしまうので CI は緑のまま通る。正式リリースが出たら上限を上げて、TargetFramework も一緒に上げる",
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["mcr.microsoft.com/dotnet/sdk"],
-      "allowedVersions": "<11"
-    },
-    {
-      "description": "asicen-userland (PX-W3U3、試験的) は agent/Dockerfile で 0.0.0 (= まだリリースが無い) にしてあり、バージョンが上がると初めてイメージに入る。最初のバージョンは配布物の名前・形式・ファームウェアの同梱を人が確かめてから入れたいので、自動ではマージしない (docs/tuners.md)。共有の設定は非 major を全部「all dependencies」の1つにまとめて自動マージするので、ここだけ別の PR に分ける (同じ PR に入ると、ほかの依存の自動マージまで止まる)",
+      "description": "asicen-userland (PX-W3U3 など、試験的) は agent/Dockerfile と .github/asicen-android.sh (Android のアプリ) でプレリリースの 1.0.0-beta に固定してある (versioning=semver で、次のプレリリースと正式版を追う)。エージェントは通信の形式の一部をこのバージョンの通信を記録して起こしていて、asicen-userland 1.0.0 でなければ断る。バージョンを上げるときは、通信を記録し直して Asicen.cs・AsicenUdtv.cs と Dockerfile・asicen-android.sh の SHA-256 を合わせる必要があるので、自動ではマージしない (docs/tuners.md。PR は SHA-256 が合わずに CI で落ちる)。共有の設定は非 major を全部「all dependencies」の1つにまとめて自動マージするので、ここだけ別の PR に分ける (同じ PR に入ると、ほかの依存の自動マージまで止まる)",
       "matchDatasources": ["github-releases"],
       "matchPackageNames": ["Khronos31/asicen-userland"],
       "groupName": "asicen-userland",
       "groupSlug": "asicen-userland",
+      "automerge": false,
+      "addLabels": ["needs-review"]
+    },
+    {
+      "description": "libwdi (scripts/build-wdi-simple.ps1。Windows でチューナーのドライバを WinUSB に替える wdi-simple.exe) は、タグのコミットもスクリプトに書いてあり、バージョンだけ上げるとビルドが止まる。コミットを人が確かめて書き換えるので、自動ではマージせず、別の PR に分ける。バージョンは vX.Y.Z のタグだけ (b755 のようなビルド番号のリリースは extractVersion で外れる)",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["pbatard/libwdi"],
+      "groupName": "libwdi",
+      "groupSlug": "libwdi",
       "automerge": false,
       "addLabels": ["needs-review"]
     },
@@ -61,6 +97,25 @@
       "matchDatasources": ["github-releases"],
       "matchPackageNames": ["danything/denpa-font"],
       "allowedVersions": "/^v\\d+\\.\\d+$/"
+    },
+    {
+      "description": "OpenSSL (.github/openssl-android.sh。Android 向けのエージェントに静的に入れる) は 3.5 系 (LTS) に留める。スクリプトにはアーカイブの SHA-256 も固定してあり、バージョンだけ上げると組めない。SHA-256 を人が入れ替えるので、自動ではマージせず、別の PR に分ける (Android の CI は必須チェックではないので、落ちても自動マージは止まらない)",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["openssl/openssl"],
+      "allowedVersions": "<3.6",
+      "groupName": "openssl-android",
+      "groupSlug": "openssl-android",
+      "automerge": false,
+      "addLabels": ["needs-review"]
+    },
+    {
+      "description": "bun の Android 版 (.github/bun-android.sh。Android のアプリに入れる) は、スクリプトにアーカイブと LICENSE.md の SHA-256 も固定してあり、バージョンだけ上げると組めない。SHA-256 を人が入れ替えるので、自動ではマージせず、別の PR に分ける。Dockerfile の oven/bun (docker) はこれまでどおり共有の設定で上がるが、ずれている間は Android の CI が落ちる (APK の denpa 本体もコンテナと同じ bun で動かすため)。両方の PR をそろえてからマージする",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["oven-sh/bun"],
+      "groupName": "bun-android",
+      "groupSlug": "bun-android",
+      "automerge": false,
+      "addLabels": ["needs-review"]
     }
   ]
 }

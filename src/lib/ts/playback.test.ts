@@ -200,6 +200,28 @@ describe("どれで観るか (pickOffer)", () => {
     });
   });
 
+  test("4K の局の元の録画の H.265 は詰め替えなので、変換に数えない。H.264 は変換", () => {
+    const broadcast: PlaybackInfo = {
+      ...h264Only,
+      offers: [
+        {
+          codec: "hevc",
+          way: "stream",
+          codecs: "hvc1.2.4.L153.B0,mp4a.40.2",
+        },
+        { codec: "h264", way: "stream", codecs: "avc1.640029,mp4a.40.2" },
+      ],
+      broadcast: "hevc",
+    };
+    const hevc = 'video/mp4; codecs="hvc1.2.4.L153.B0,mp4a.40.2"';
+    expect(
+      transcodes(broadcast, { way: "stream", codec: "hevc", type: hevc }),
+    ).toBe(false);
+    expect(
+      transcodes(broadcast, { way: "stream", codec: "h264", type: H264_LIVE }),
+    ).toBe(true);
+  });
+
   test("中身が分からないファイルは、ほかが無ければそのまま渡す。何も無ければ null", () => {
     const unknown: PlaybackInfo = {
       ...h264Only,
@@ -261,13 +283,13 @@ describe("コーデックのメニュー (codecChoices)", () => {
     ]);
   });
 
-  test("世帯の設定で外したもの (H.264・H.265) は並べない", () => {
+  test("外すと決めたもの (メニューでは H.264・H.265) は並べない", () => {
     expect(codecChoices(av1Only, chrome, ["h264", "hevc"])).toEqual(["av1"]);
     expect(codecChoices(av1Only, chrome, [])).toEqual(["av1", "h264"]);
   });
 });
 
-describe("溜まり方 (aheadOf / covers)", () => {
+describe("バッファの増え方 (aheadOf / covers)", () => {
   const ranges = [[100, 160]] as const;
 
   test("区間の中なら先に溜まっている長さ、外なら 0", () => {

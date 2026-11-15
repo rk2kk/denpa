@@ -2,13 +2,18 @@ import { mkdirSync } from "node:fs";
 
 import { SOCKET_PATH } from "#lib/live.js";
 
+import { followAgent } from "./agent-admin";
+import { forgetAgentCard } from "./agent-cards";
 import { listen } from "./agent-events";
+import { startDiscovery } from "./agent-mdns";
+import { adoptName } from "./agent-name";
+import { type Agent, listAgents, syncEnvAgentsOnBoot } from "./agents";
 import { warnIfClosed, warnIfProxyHidden } from "./auth";
 import { config } from "./config";
 import { pruneCodes } from "./device-auth";
 import { checkDisk } from "./disk";
 import { pump, requeueOrphanedJobs } from "./encoder";
-import { sync, syncServicesOnly } from "./epg";
+import { readChannels, sync, syncPending, syncServicesOnly } from "./epg";
 import { collectOnce } from "./epg-collect";
 import { emit } from "./events";
 import { pruneHistory, reconcile } from "./files";
@@ -19,12 +24,12 @@ import { checkPower, forgetWake } from "./power";
 import { activeRecordingIds, recoverOrphanedRecordings } from "./recorder";
 import { restoreWidths } from "./restore-width";
 import { fillSatellites } from "./satellite-lineup";
-import { tick } from "./scheduler";
+import { recheckContracts, tick } from "./scheduler";
+import { forgetRawProbe } from "./scramble";
 import { prune as pruneSessions } from "./session";
 import { beginDraining } from "./shutdown";
 import { redeem } from "./tickets";
 import { pruneTransfer, swapAtBoot } from "./transfer";
-import { getChannels } from "./tuner";
 import { checkForUpdate } from "./update";
 import { notify } from "./webhook";
 import { serve } from "./ws";
@@ -33,7 +38,8 @@ let started = false;
 /** スリープの様子を見る間隔 (ms。power.ts)。起こしてから録画を始めるまで (`WAKE_LEAD`。3 分) より十分短くする */
 const POWER_CHECK = 30_000;
 const timers: ReturnType<typeof setInterval>[] = [];
-let unlisten: (() => void) | null = null;
+/** エージェントごとの通知の購読を止めるもの (`agents.id` →) */
+const unlisten = new Map<number, () => void>();
 
 async function guard(
   name: string,
@@ -100,6 +106,12 @@ export function start(): void {
   }
   mkdirSync(config.rawDir, { recursive: true });
   mkdirSync(config.encodedDir, { recursive: true });
+
+  /*
+   * **`TUNER_AGENT_URL` と DB の `agents` を突き合わせる** (agents.ts)。環境変数から消したエージェントの行はここで消える。
+   * 読めない書き方なら起動は止めず、エージェントを呼ぶたびに同じ誤りを返す
+   */
+  syncEnvAgentsOnBoot();
 
   /*
    * **ログインする方法が無ければ、無いことを起動ログに出す。** 何も設定していなければ
@@ -170,7 +182,18 @@ export function start(): void {
    */
   nowAndEvery(config.epgCollectInterval, "epg-collect", collectOnce);
 
-  listenToAgent();
+  listenToAgents();
+
+  /*
+   * **LAN でエージェントを見つける** (mDNS。agent-mdns.ts)。設定の「エージェントを追加」に候補を出し、
+   * 画面から登録したエージェントのアドレスが変わったら、保存した証明書で繋がるときだけ付け替える (agent-admin.followAgent)。
+   * マルチキャストが届かない構成 (コンテナのブリッジ・Pod) では何も見つからないだけ
+   */
+  startDiscovery((found) => {
+    void followAgent(found).catch((error: unknown) => {
+      console.warn(`[agent] アドレスを追えませんでした: ${error}`);
+    });
+  });
 
   every(config.schedulerTick, "scheduler", async () => {
     await tick();
@@ -236,7 +259,7 @@ export function start(): void {
    * 起動のたびに、印 (`has_logo`) とファイルを突き合わせ直す。置き場ごと
    * 消えることは実際にあり、印だけ残っていると番組表に壊れた画像が並ぶ
    */
-  void guard("logo", logoReconcile);
+  void guard("logo", () => logoReconcile(true));
   every(config.logoSweepInterval, "logo", sweep);
 }
 
@@ -246,46 +269,122 @@ export function start(): void {
  * 次の周期 (`CHANNEL_SYNC_INTERVAL`、既定 1 分) で入る。放送の一覧を読むのは数十秒かかるので待たない
  */
 async function syncChannels(): Promise<void> {
-  const channels = await getChannels();
-  syncServicesOnly(channels);
-  void fillSatellites(channels).catch((error: unknown) => {
-    console.warn(`[channels] 衛星の局を入れられませんでした: ${error}`);
-  });
+  const read = await readChannels();
+  syncServicesOnly(read);
+  // 放送の一覧から入れるかは、エージェントごとにその控えで決める (預ける先もそのエージェント)。読めなかったエージェントは見送る
+  const all = listAgents();
+  for (const entry of read) {
+    const agent = all.find((a) => a.id === entry.agent);
+    if (agent === undefined) continue;
+    void fillSatellites(agent, entry.channels).catch((error: unknown) => {
+      console.warn(
+        `[channels] ${agent.name} の衛星の局を入れられませんでした: ${error}`,
+      );
+    });
+  }
+}
+
+/** 呼ばれてから `ms` 置いて `run` を 1 回呼ぶ。待っている間に呼ばれた分はまとめる */
+export function settleThen(ms: number, run: () => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return () => {
+    if (timer !== null) return;
+    timer = setTimeout(() => {
+      timer = null;
+      run();
+    }, ms);
+    timer.unref?.();
+  };
 }
 
 /**
- * エージェントからの通知を受け取る。
- *
- * チューナーの様子も局の入れ替わりも、これまでは決まった間隔で覗きに行っていた。
- * 覗きに行く方式だと「変わってから気付くまで」が必ず空くうえ、
- * 何も変わっていない時間帯も同じだけ呼ぶことになる。
- *
- * 上の定期実行は残してある。通知は繋ぎ直しはするものの、黙って止まる
- * 可能性まで消せるわけではないので、保険として置いておく。
+ * カードが契約の更新 (EMM) を受け入れたという通知 (`card`) から、契約を確かめ直すまでの間 (ms)。
+ * 1 回の受信で個別とグループの EMM を続けて受け入れることがあり (エージェントは 1 秒に 1 件ずつ渡す)、それを 1 回にまとめる
  */
-function listenToAgent(): void {
-  unlisten = listen(
+const CARD_SETTLE_MS = 10_000;
+const recheckAfterCard = settleThen(
+  CARD_SETTLE_MS,
+  () => void recheckContracts(),
+);
+
+/**
+ * 全部のエージェントからの通知を受け取る (agent-events.ts。1 台に 1 つずつ繋ぐ)。上の定期実行は、通知が途切れたときの保険として残す。
+ * 読めない `TUNER_AGENT_URL` のときは繋がない (起動は止めない。`start` の突き合わせと同じ)
+ */
+function listenToAgents(): void {
+  let all: Agent[];
+  try {
+    all = listAgents();
+  } catch (error) {
+    console.error(
+      `[agent] 通知を購読できません: ${error instanceof Error ? error.message : error}`,
+    );
+    return;
+  }
+  for (const agent of all) watchAgent(agent);
+}
+
+/**
+ * 1 台のエージェントの通知を購読する。もう購読していれば止めてから繋ぎ直す (付け替えで宛先が変わったとき)。
+ * 起動したときの全部のエージェントと、設定の「エージェント」で登録・付け替えしたときに呼ぶ (`agent-admin.ts`)。
+ * 自動の処理を止めている (`DENPA_AUTOSTART=0`) ときは購読しない
+ */
+export function watchAgent(agent: Agent): void {
+  if (!started || !config.autostart) return;
+  unlisten.get(agent.id)?.();
+  unlisten.set(agent.id, listenToAgent(agent));
+}
+
+/** 1 台のエージェントの購読を止める (設定の「エージェント」で削除したとき) */
+export function unwatchAgent(agent: number): void {
+  unlisten.get(agent)?.();
+  unlisten.delete(agent);
+}
+
+/** 行の今の名前 (画面で変えたら、購読を繋ぎ直さずに通知に入れる)。読めなければ購読を始めたときの名前 */
+function nameOf(agent: Agent): string {
+  try {
+    return listAgents().find((a) => a.id === agent.id)?.name ?? agent.name;
+  } catch {
+    return agent.name;
+  }
+}
+
+function listenToAgent(agent: Agent): () => void {
+  return listen(
+    agent,
     (event) => {
       switch (event.name) {
         case "tuners":
           emit("tuners");
           /*
            * 誰かがチューナーを開いた、かもしれない。そこへ同じチャンネルを
-           * 要求するとエージェントが選局を共有させるので、ロゴを只で読める。
+           * 要求するとエージェントが選局を共有させるので、チューナーを増やさずにロゴを読める。
            * 開いた瞬間に来る通知なので、ここで共有する
            */
           void guard("logo", ride);
           break;
         case "channels":
           /*
-           * スキャンで局が入れ替わった。取り込み直して番組表も取得し直す。
+           * スキャンで局が入れ替わった。このエージェントの控えだけ取り込み直して (ほかのエージェントは前の写しのまま)、番組表も取得し直す。
            * 局の取り込み (`sync`) が先。取得は全チャンネルで数分かかるので、局の一覧と予約はそれを待たずに変える
            * (取得も始めに局を取り込むので、`POST /api/sync` は逆の順で同じ結果になる)
            */
           void guard("epg", async () => {
-            await sync();
+            await sync(agent);
             await collectOnce();
           });
+          break;
+        case "card":
+          /*
+           * カードが契約の更新を受け入れた。番組表に契約の情報がある局は、カードに聞き直すと
+           * 更新後の状態と期限が入る (12 時間ごとの確かめ直しを待たない)
+           */
+          console.log(
+            "[contracts] カードが契約の更新を受け入れました。10 秒後に契約を確かめ直します",
+          );
+          forgetAgentCard(agent.id);
+          recheckAfterCard();
           break;
         default:
           break;
@@ -295,18 +394,42 @@ function listenToAgent(): void {
     // 次の録画が失敗するまで気付けなかったのを埋める (agent-events.ts が切り替えを判定)
     (up) => {
       if (up) {
-        console.log("[agent] チューナーに繋がりました");
+        // 落ちている間にカードや置き場が変わったかもしれない。振り分けと後からの復号の前に訊き直す
+        forgetAgentCard(agent.id);
+        forgetRawProbe(agent.id);
+        const name = nameOf(agent);
+        console.log(`[agent] ${name} に繋がりました`);
         notify({
           event: "agent.up",
-          text: "チューナーエージェントに繋がりました",
+          text: `エージェント「${name}」に繋がりました`,
         });
       } else {
-        console.error("[agent] チューナーに繋がりません");
+        const name = nameOf(agent);
+        console.error(`[agent] ${name} に繋がりません`);
         notify({
           event: "agent.down",
-          text: "エージェントに繋がりません。いまは録画できません",
+          text: `エージェント「${name}」に繋がりません。このエージェントのチューナーでは録画できません`,
         });
       }
+    },
+    /*
+     * 局と番組表の取り込みで、このエージェントの控えを読めていなかったなら、通知に繋がったところでやり直す。
+     * denpa とエージェントを同時に入れ替えると、denpa の起動直後はエージェントがまだ立っていない。
+     * 待つと、局は次の定期の取り込みまで、番組表は次の取得の周期まで入らない。読み直すのはこのエージェントの控えだけ
+     */
+    () => {
+      // 環境変数から足したエージェントの名前を、エージェントが名乗る名前にする (`AGENT_NAME`。画面で変えた名前は残す)
+      void adoptName(agent).then((changed) => {
+        if (changed) emit("tuners");
+      });
+      if (!syncPending(agent.id)) return;
+      console.log(
+        `[epg] ${agent.name} の通知に繋がりました。読めていなかった局と番組表を取り込み直します`,
+      );
+      void guard("epg", async () => {
+        await sync(agent);
+        await collectOnce();
+      });
     },
   );
 }
@@ -314,8 +437,8 @@ function listenToAgent(): void {
 function stop(): void {
   for (const timer of timers) clearInterval(timer);
   timers.length = 0;
-  unlisten?.();
-  unlisten = null;
+  for (const off of unlisten.values()) off();
+  unlisten.clear();
   // Mac: 録画の前に起こす予約を取り消す (止まった本体のために起こさない。power.ts)
   forgetWake();
   started = false;
@@ -329,19 +452,19 @@ const HELD = "__denpaHeldSignal";
 /**
  * Pod の入れ替えなどで止められたときの後始末。
  *
- * **録画中は、終わるまで居座ってから止まる。** 追記で開いているので落ちても
+ * **録画中は、終わるまで待ってから止まる。** 追記で開いているので落ちても
  * 次の起動で続きから録れるが、入れ替わるまでの十数秒はどうやっても落ちる。
  * ArgoCD の同期は待てるが、放送は待ってくれない。
  *
  * **待っている間も、始まる録画は始める** (`scheduler.ts`)。始めないでいた頃は、
- * 居座りの間に始まる番組の先頭が丸ごと落ちていた。そのぶん居座りは伸びるが、
+ * 待っている間に始まる番組の先頭が丸ごと落ちていた。そのぶん待つ時間は伸びるが、
  * Pod はどのみち残っているので、新しく待たせるものは無い。
  * エンコードは待たない (再起動でやり直せる)。
  *
  * 待つのをやめる上限が `SHUTDOWN_WAIT`。0 にすると待たずに止まる。
  * **Kubernetes 側の `terminationGracePeriodSeconds` と docker compose の
  * `stop_grace_period` を、これ以上に伸ばしておくこと。** 伸ばさないと、
- * 待っている途中で SIGKILL され、居座った意味が無くなる。
+ * 待っている途中で SIGKILL され、待った意味が無くなる。
  */
 function installShutdownHooks(): void {
   /*
@@ -384,7 +507,7 @@ function installShutdownHooks(): void {
  * 停止のシグナルを**こちらで受け取る**。先に入っていた後始末は外す。
  *
  * 外す相手は adapter (adapter-bun。前は adapter-node) で、SIGTERM を受けた**その場で listen を閉じる**。
- * 両方残すと、録画が終わるまで居座っている間、プロセスは生きているのにポートだけ
+ * 両方残すと、録画が終わるのを待っている間、プロセスは生きているのにポートだけ
  * 閉じて画面がどこからも開けなかった (実機で 34 分。`/proc/net/tcp` に listen が
  * 1 つも無く、当時の前段 (Traefik) は「no available server」)。
  *

@@ -29,7 +29,7 @@ const REALTIME = 30000 / 1001;
 /** 同時に動かす本数の上限 */
 const PARALLEL_MOST = 8;
 
-export type BenchEncoder = "hevc_rkmpp" | "h264_rkmpp" | "libx264";
+type BenchEncoder = "hevc_rkmpp" | "h264_rkmpp" | "libx264";
 
 /**
  * 段 1〜3 の映像のフィルタとエンコーダ (`-c:v` のあと)。`live.ts` の `rungVideo` と同じ (GPU は Rockchip MPP、
@@ -63,6 +63,8 @@ export function benchVideo(
       ],
     };
   }
+  // 上限 (`-maxrate`) が段の値になるよう、目標を 16/17 にする (`hwenc.liveHwArgs` の `cap`)
+  const target = Math.round((bps * 16) / 17);
   return {
     filter: [...cpu, "format=nv12"].join(","),
     encoder: [
@@ -70,11 +72,11 @@ export function benchVideo(
       "-rc",
       "avbr",
       "-b:v",
-      String(bps),
+      String(target),
       "-maxrate",
-      String(Math.round((bps * 17) / 16)),
+      String(Math.round((target * 17) / 16)),
       "-minrate",
-      String(Math.round(bps / 16)),
+      String(Math.round(target / 16)),
       ...gop,
       ...(encoder === "hevc_rkmpp" ? ["-tag:v", "hvc1"] : []),
     ],

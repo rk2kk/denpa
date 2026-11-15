@@ -22,34 +22,61 @@ describe("DecodeBudget", () => {
     expect(budget.p95).toBe(10);
   });
 
-  test("重いのが 3 秒続いたら打ち切る。**1 回の重さでは戻さない**", () => {
+  test("デコードが重く、映像が遅れていくのが 3 秒続いたら打ち切る。**1 回の重さでは戻さない**", () => {
     const budget = new DecodeBudget();
     budget.tick(0, 33.4, 0);
-    const results = [1, 2, 3].map((s) => second(budget, s * WINDOW, 30));
+    const results = [1, 2, 3].map((s) =>
+      second(budget, s * WINDOW, 40, 0.1 + s * 0.3),
+    );
     expect(results).toEqual([false, false, true]);
     expect(STRIKES).toBe(3);
   });
 
-  /** B フレームを飛ばしている間は、デコードする枚数が減るぶん 1 枚に掛けてよい時間を伸ばす (`worker.ts` の `thin`) */
-  test("B を飛ばしている間は 1 枚に 2 倍まで掛けてよい", () => {
+  test("1 秒に数枚しかデコードできない端末も、遅れで 3 秒で打ち切る", () => {
     const budget = new DecodeBudget();
     budget.tick(0, 33.4, 0);
-    const window = (s: number, stretch: number) => {
-      for (let i = 0; i < 10; i++) budget.record(40);
-      return budget.tick(s * WINDOW, 33.4, 0, 0, 0, stretch);
+    const results = [1, 2, 3].map((s) => {
+      for (let i = 0; i < 5; i++) budget.record(200);
+      return budget.tick(s * WINDOW, 33.4, s * 0.8);
+    });
+    expect(results).toEqual([false, false, true]);
+    expect(budget.why().split(" / ")[0]).toBe(
+      "デコード 200.0 ms (目安 26.7 ms)、映像の遅れ 0.80 秒 (目安 0.25 秒)",
+    );
+  });
+
+  /*
+   * **デコードする時間だけが目安を超えても打ち切らない** (#2604)。時間は経過時間なので worker が割り込まれた間も入り、
+   * 95 パーセンタイルは I フレームにほぼ当たる。Galaxy S25 では、映像が崩れていないまま打ち切っていた
+   */
+  test("デコードする時間が目安を超えても、遅れず捨てもしなければ打ち切らない", () => {
+    const budget = new DecodeBudget();
+    budget.tick(0, 33.4, 0, 0, 0);
+    for (let s = 1; s <= 20; s++) {
+      for (let i = 0; i < 30; i++) budget.record(30);
+      // 1 秒に 1 枚は捨てる (3%)。目安 (15%) には掛からない
+      expect(budget.tick(s * WINDOW, 33.4, 0.1, 0, s)).toBe(false);
+    }
+    // 操作バーにはそのまま出す
+    expect(budget.p95).toBe(30);
+  });
+
+  /** B フレームを飛ばしている間は、デコードする枚数が減るぶん 1 枚に掛けてよい時間を伸ばす (`worker.ts` の `thin`) */
+  test("B を飛ばしている間は、1 枚に 2 倍まで掛けてよいとして条件を返す", () => {
+    const window = (stretch: number) => {
+      const budget = new DecodeBudget();
+      budget.tick(0, 33.4, 0);
+      for (let s = 1; s <= STRIKES; s++) {
+        for (let i = 0; i < 10; i++) budget.record(40);
+        budget.tick(s * WINDOW, 33.4, 0.3, 0, 0, stretch);
+      }
+      return budget.why().split(" / ")[0];
     };
     // 1 枚 40ms は 1 コマ (33.4ms) の 8 割を超えるが、2 倍までなら間に合っている
-    expect([window(1, 2), window(2, 2), window(3, 2), window(4, 2)]).toEqual([
-      false,
-      false,
-      false,
-      false,
-    ]);
-    expect([window(5, 1), window(6, 1), window(7, 1)]).toEqual([
-      false,
-      false,
-      true,
-    ]);
+    expect(window(2)).toBe("映像の遅れ 0.30 秒 (目安 0.25 秒)");
+    expect(window(1)).toBe(
+      "デコード 40.0 ms (目安 26.7 ms)、映像の遅れ 0.30 秒 (目安 0.25 秒)",
+    );
   });
 
   /*
@@ -81,10 +108,11 @@ describe("DecodeBudget", () => {
   test("途中で間に合えば数え直す", () => {
     const budget = new DecodeBudget();
     budget.tick(0, 33.4, 0);
-    for (const s of [1, 2]) second(budget, s * WINDOW, 30);
+    for (const s of [1, 2]) second(budget, s * WINDOW, 30, 0.5);
     expect(second(budget, 3 * WINDOW, 10)).toBe(false);
-    for (const s of [4, 5]) expect(second(budget, s * WINDOW, 30)).toBe(false);
-    expect(second(budget, 6 * WINDOW, 30)).toBe(true);
+    for (const s of [4, 5])
+      expect(second(budget, s * WINDOW, 30, 0.5)).toBe(false);
+    expect(second(budget, 6 * WINDOW, 30, 0.5)).toBe(true);
   });
 
   test("デコードする時間が軽くても、映像が遅れ続けていれば打ち切る", () => {
@@ -116,6 +144,28 @@ describe("DecodeBudget", () => {
     // 追いついたあとも遅れ続けるなら、いつもどおり 3 秒で打ち切る
     const results = [7, 8, 9].map((s) => second(budget, s * WINDOW, 5, 0.5));
     expect(results).toEqual([false, false, true]);
+  });
+
+  /*
+   * **回線が詰まってデータが届いていない間 (`pause`) は数えない。** 家の中の Wi-Fi で放送のまま受けると一瞬の詰まりは
+   * 起きやすく、その遅れを数えて変換した映像へ早めに戻っていた。デコードが本当に遅いぶんの打ち切りの回数は残す
+   */
+  test("届いていない間 (`pause`) の遅れは数えず、それまでの打ち切りの回数は残す", () => {
+    const budget = new DecodeBudget();
+    budget.tick(0, 33.4, 0);
+    // 詰まりが 1 秒ごとに来ても、そのたびに止めて数えないので打ち切らない
+    for (let s = 1; s <= 10; s++) {
+      budget.pause(s * WINDOW + 500);
+      expect(second(budget, s * WINDOW, 5, 1)).toBe(false);
+    }
+    // デコードが間に合わずに遅れるのを 2 回数えたところで詰まっても、届いたあと 1 回数えれば打ち切る
+    // (止めたあとの最初の刻みは窓の始まりで、数えない)
+    expect(second(budget, 12 * WINDOW, 30, 0.5)).toBe(false);
+    expect(second(budget, 13 * WINDOW, 30, 0.5)).toBe(false);
+    expect(second(budget, 14 * WINDOW, 30, 0.5)).toBe(false);
+    budget.pause(15 * WINDOW);
+    expect(second(budget, 15 * WINDOW, 30, 0.5)).toBe(false);
+    expect(second(budget, 16 * WINDOW, 30, 0.5)).toBe(true);
   });
 });
 
@@ -154,5 +204,57 @@ describe("DecodeBudget (WebCodecs の経路)", () => {
       webSecond(budget, s * WINDOW, 5, [QUEUE_STUCK, QUEUE_STUCK + 2]),
     );
     expect(results).toEqual([false, false, true]);
+  });
+
+  test("デコーダが 1 枚も出さずに詰まったままでも、3 秒続いたら打ち切る", () => {
+    const budget = new DecodeBudget(false);
+    budget.tick(0, 16.7, 0, QUEUE_STUCK);
+    const results = [1, 2, 3].map((s) =>
+      budget.tick(s * WINDOW, 16.7, 0, QUEUE_STUCK),
+    );
+    expect(results).toEqual([false, false, true]);
+  });
+
+  /** どの条件で打ち切ったかを外から読めるように、窓ごとに掛かった条件を返す (`why`。画面がコンソールに出力する) */
+  test("打ち切ったら、窓ごとに掛かった条件を返す", () => {
+    const budget = new DecodeBudget();
+    budget.tick(0, 33.4, 0);
+    // デコードする時間だけが目安を超えた窓は数えない
+    expect(second(budget, 1 * WINDOW, 30)).toBe(false);
+    expect(second(budget, 2 * WINDOW, 30, 0.4)).toBe(false);
+    expect(second(budget, 3 * WINDOW, 30, 0.5)).toBe(false);
+    expect(second(budget, 4 * WINDOW, 10, 0.3)).toBe(true);
+    expect(budget.why()).toBe(
+      [
+        "デコード 30.0 ms (目安 26.7 ms)、映像の遅れ 0.40 秒 (目安 0.25 秒)",
+        "デコード 30.0 ms (目安 26.7 ms)、映像の遅れ 0.50 秒 (目安 0.25 秒)",
+        "映像の遅れ 0.30 秒 (目安 0.25 秒)",
+      ].join(" / "),
+    );
+  });
+
+  test("間に合った窓が挟まれば、それまでの条件は忘れる", () => {
+    const budget = new DecodeBudget();
+    budget.tick(0, 33.4, 0);
+    second(budget, 1 * WINDOW, 30, 0.5);
+    second(budget, 2 * WINDOW, 10);
+    second(budget, 3 * WINDOW, 30, 0.5);
+    second(budget, 4 * WINDOW, 30, 0.5);
+    expect(second(budget, 5 * WINDOW, 30, 0.5)).toBe(true);
+    expect(budget.why().split(" / ")).toHaveLength(STRIKES);
+  });
+
+  test("捨てたコマとデコーダの詰まりも条件の名前で返す", () => {
+    const budget = new DecodeBudget(false);
+    budget.tick(0, 33.4, 0, QUEUE_STUCK, 0);
+    let out = false;
+    for (let s = 1; s <= STRIKES; s++) {
+      for (let i = 0; i < 30; i++) budget.record(5);
+      out = budget.tick(s * WINDOW, 33.4, 0, QUEUE_STUCK, s * 10);
+    }
+    expect(out).toBe(true);
+    expect(budget.why().split(" / ")[0]).toBe(
+      `デコーダに残ったまま ${QUEUE_STUCK} 枚、捨てたコマ 10 枚 (目安 5 枚)`,
+    );
   });
 });

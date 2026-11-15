@@ -10,37 +10,55 @@ import { indoorHost } from "../host";
 import type { LiveCodec } from "../live";
 import {
   autoCodec,
-  HIDDEN_CODECS,
+  type BroadcastCodec,
+  broadcastFormat,
+  hiddenCodecs,
   type LiveChoice,
   type LiveFormat,
   readChoice,
 } from "../live-choice";
 import { parseRung, type Rung } from "../rungs";
-import { liveHevc, parsePlayable, rungCodec } from "./live";
+import {
+  liveHevc,
+  liveRealtime,
+  liveRungCodec,
+  parsePlayable,
+  type rungCodec,
+} from "./live";
 import { settings } from "./settings";
 
 /** 観るときの決まり。画面の load と `GET /api/playback/options` が同じものを返す */
 interface ViewingOptions {
   /** 開いた名前が家の中か */
   indoor: boolean;
-  /** コーデックのメニューから外すもの (世帯の設定。外さないなら空) */
-  hidden: (typeof HIDDEN_CODECS)[number][];
   /**
-   * ライブで H.265 を出せるか。**ライブのエンコーダが GPU のときだけ** (`live.liveHevc`)。出せなければメニューに並べず、
-   * 「自動」でも選ばない
+   * ライブでその場でエンコードできるコーデック (`live.liveRealtime`。AV1 → H.265 → H.264 の順)。画面はこの先頭から
+   * 端末で再生できるものを 1 つだけメニューに並べる (`#lib/live-choice.ts` の `shownCodec`)
+   */
+  liveCodecs: LiveCodec[];
+  /**
+   * テレビのアプリのメニューから外すもの。エンコードするコーデックのうち `liveCodecs` の先頭以外 (`hiddenCodecs`)。
+   * アプリは端末で再生できるかを見ずにこれを外す
+   */
+  hidden: LiveCodec[];
+  /**
+   * ライブで H.265 を出せるか。**ライブのエンコーダが GPU のときだけ** (`liveCodecs` に H.265 があるか)。出せなければ「自動」で選ばない
    */
   hevc: boolean;
 }
 
 /**
- * リクエストの URL (`event.url`。名前は `Host` か `HOST_HEADER` から) で決める。`hevc` はテストで差し替えるときだけ渡す
+ * リクエストの URL (`event.url`。名前は `Host` か `HOST_HEADER` から) で決める。`live` はテストで差し替えるときだけ渡す
  */
-export function viewingOptions(url: URL, hevc = liveHevc()): ViewingOptions {
-  const current = settings();
+export function viewingOptions(
+  url: URL,
+  live: LiveCodec[] = liveRealtime(),
+): ViewingOptions {
   return {
     indoor: indoorOf(url),
-    hidden: current.hideH264Hevc ? [...HIDDEN_CODECS] : [],
-    hevc,
+    liveCodecs: live,
+    hidden: hiddenCodecs(live),
+    hevc: live.includes("hevc"),
   };
 }
 
@@ -79,6 +97,10 @@ type AutoScene = "live" | "chase";
  * **`codec=auto` で流す形式。** 段 0 は `autoCodec` (家の中なら MPEG-2 → H.264 → AV1 → H.265、外なら AV1 → H.265 → H.264) で、
  * 端末が再生できて (`formats`)、その場面で出せる最初のもの。H.265 はライブで、エンコーダが GPU のとき (`hevc`) だけ。
  * 段を下げるなら、今までどおり `rungCodec` (`raw` は並びから外す)。選べなければ null。
+ *
+ * **4K の局 (`broadcast` が `hevc`。TLV と、TS で送る局) は、放送のままが HEVC の詰め替え** (`#lib/live-choice.ts` の `BroadcastCodec`)。家の中は HEVC → H.264 → AV1、
+ * 外は AV1 → H.264。`hevc` は「放送の HEVC (2160p・10 ビット・HLG) を再生できる」の意味で、GPU は要らない。`raw` (MPEG-2 の TS を読める) は候補にしない。
+ * 段を下げるときは H.265 を外して選ぶ (`live.liveRungCodec`)。
  * `hevc` と `pick` はテストで差し替えるときだけ渡す
  */
 export function autoFormat(o: {
@@ -86,25 +108,31 @@ export function autoFormat(o: {
   formats: readonly LiveFormat[];
   indoor: boolean;
   rung: Rung;
+  broadcast?: BroadcastCodec;
   hevc?: boolean;
   pick?: Parameters<typeof rungCodec>[2];
 }): LiveFormat | null {
+  const uhd = o.broadcast === "hevc";
   if (o.rung !== 0) {
     const codecs = o.formats.filter(
-      (format): format is LiveCodec => format !== "raw",
+      (format): format is LiveCodec =>
+        format !== "raw" && !(uhd && format === "hevc"),
     );
     // `rungCodec` は何も合わなければ H.264 を返す。端末が H.264 を再生できないと言っていれば選ばない
-    const codec = rungCodec(codecs, true, o.pick);
+    const codec = liveRungCodec(codecs, o.broadcast ?? "mpeg2", o.pick);
     return codecs.includes(codec) ? codec : null;
   }
   const has = (format: LiveFormat) => o.formats.includes(format);
   return autoCodec({
     indoor: o.indoor,
-    rawOk: has("raw"),
+    rawOk: !uhd && has("raw"),
     av1: has("av1"),
-    hevc: o.scene === "live" && has("hevc") && (o.hevc ?? liveHevc()),
+    // 4K の局の H.265 は放送の HEVC の詰め替えなので、追っかけ (4K の局の録画) でも出す
+    hevc:
+      has("hevc") && (uhd || (o.scene === "live" && (o.hevc ?? liveHevc()))),
     h264: has("h264"),
     compat: false,
+    broadcast: uhd ? "hevc" : "mpeg2",
   });
 }
 
@@ -115,6 +143,8 @@ export function autoFormat(o: {
  * - `codec=h264` (省いたとき・知らない値も) / `av1` / `raw`、ライブなら `hevc` も … そのまま。H.265 を出せなければ H.264 にする
  *   (応答ヘッダで分かる。WebSocket の `tune` と同じ)。段を下げるならコーデックは `rungCodec` が `?playable=` から選ぶ
  * - `raw` は段を下げない
+ * - 4K の局 (`broadcast` が `hevc`) の `hevc` は放送の HEVC の詰め替えで、GPU は要らない。`raw` は元の TS か、1 局に絞った TLV。
+ *   追っかけでも同じ (4K の局の録画 `.mmts` を読む)
  *
  * `hevc` と `pick` はテストで差し替えるときだけ渡す
  */
@@ -122,6 +152,7 @@ export function askedFormat(
   url: URL,
   scene: AutoScene,
   test: { hevc?: boolean; pick?: Parameters<typeof rungCodec>[2] } = {},
+  broadcast: BroadcastCodec = "mpeg2",
 ): { codec: LiveFormat; rung: Rung } | null {
   const query = url.searchParams;
   const asked = query.get("codec");
@@ -134,15 +165,16 @@ export function askedFormat(
       formats,
       indoor: indoorOf(url),
       rung,
+      broadcast,
       ...test,
     });
     return codec === null ? null : { codec, rung: codec === "raw" ? 0 : rung };
   }
-  const hevc = scene === "live" && asked === "hevc";
+  const hevc = asked === "hevc" && (scene === "live" || broadcast === "hevc");
   const plain: LiveFormat =
     asked === "av1" || asked === "raw"
       ? asked
-      : hevc && (test.hevc ?? liveHevc())
+      : hevc && (broadcast === "hevc" || (test.hevc ?? liveHevc()))
         ? "hevc"
         : "h264";
   if (plain === "raw") return { codec: "raw", rung: 0 };
@@ -151,9 +183,9 @@ export function askedFormat(
     codec:
       rung === 0
         ? plain
-        : rungCodec(
+        : liveRungCodec(
             parsePlayable(query.get("playable"), plain),
-            true,
+            broadcast,
             test.pick,
           ),
     rung,
@@ -172,6 +204,8 @@ export function liveAudioOnly(url: URL): { codec: "audio"; rung: Rung } | null {
 
 /** 前回の局と選択の控え (`LAST_COOKIE`)。前の形式 (`codec`・`raw`) は読まない */
 interface Kept {
+  /** 前回の局。無い (前のバージョンの控え) か一覧から消えていれば、種別とチャンネルで探す */
+  serviceId?: number;
   channelType?: string;
   channel?: string;
   audio?: string;
@@ -180,17 +214,30 @@ interface Kept {
 
 /**
  * cookie を読む。**壊れていても無視するだけ**で、覚えていないときと同じく、自動と一覧の先頭になる。
- * 選択 (`choice`) は局と別に読む (局が一覧から消えても、その端末で出るかの話は残る)
+ * 選択 (`choice`) は局と別に読む (局が一覧から消えても、その端末で出るかの話は残る)。
+ * エンコードするもので、いまその場でエンコードできない (`live` に無い。`viewingOptions` の `liveCodecs`) ものは自動として読む
+ * (メニューに並ばないので。先回り `warmFormat` もそれで決める)。並んでいても端末が再生できなければ、画面が自動として扱う (`keptChoice`)
  */
-export function readKept(raw: string | undefined, hidden: boolean): Kept {
+export function readKept(
+  raw: string | undefined,
+  live: readonly LiveCodec[] = ["av1", "hevc", "h264"],
+): Kept {
   if (raw === undefined) return { choice: "auto" };
   try {
     const saved = JSON.parse(raw) as Record<string, unknown>;
-    const kept: Kept = { choice: readChoice(saved["choice"], hidden) };
+    const read = readChoice(saved["choice"]);
+    const kept: Kept = {
+      choice:
+        read === "auto" || read === "raw" || live.includes(read)
+          ? read
+          : "auto",
+    };
     for (const key of ["channelType", "channel", "audio"] as const) {
       const value = saved[key];
       if (typeof value === "string") kept[key] = value;
     }
+    const id = saved["serviceId"];
+    if (typeof id === "number" && Number.isInteger(id)) kept.serviceId = id;
     return kept;
   } catch {
     return { choice: "auto" };
@@ -199,20 +246,29 @@ export function readKept(raw: string | undefined, hidden: boolean): Kept {
 
 /**
  * **開いたときに先回りする形式** (`live.warm`)。選んだものがあればそれ、自動なら `autoCodec` を、
- * 端末が何でも受け取れるとみて決める (家の中なら MPEG-2、外なら AV1)。外れても画面は自分で決めた形式で
- * リクエストし直すだけで、温めたものは誰も来なければ畳まれる
+ * 端末が何でも受け取れるとみて決める (家の中なら MPEG-2、外なら AV1)。外れたら画面は自分で決めた形式で
+ * リクエストし、先回りしたものはそのリクエストがチューナーを使えた時点で畳む (`live.ts` の `dropWarm`)。
+ * 4K の局 (`broadcast` が `hevc`) の放送のままは HEVC の詰め替え (家の中の自動も)。4K の局では H.265 にエンコードしないので、
+ * 選んでいた H.265 は自動として扱う (画面の `keptChoice` と同じ)
  */
-export function warmFormat(choice: LiveChoice, indoor: boolean): LiveFormat {
-  if (choice !== "auto") return choice;
+export function warmFormat(
+  choice: LiveChoice,
+  indoor: boolean,
+  broadcast: BroadcastCodec = "mpeg2",
+): LiveFormat {
+  if (choice === "raw") return broadcastFormat(broadcast);
+  if (choice !== "auto" && !(broadcast === "hevc" && choice === "hevc"))
+    return choice;
   return (
     autoCodec({
       indoor,
       rawOk: true,
+      // どれも受け取れるとみるので、家の中は放送のまま、外は AV1 が先に当たる (H.265・H.264 まで下りない)
       av1: true,
-      // AV1 が先なので、自動で H.265 を温めることは無い。選んだ H.265 を出せなければ H.264 で温める (`live.warm`)
       hevc: true,
       h264: true,
       compat: false,
+      broadcast,
     }) ?? "h264"
   );
 }
@@ -225,6 +281,8 @@ interface LiveStart {
   audio?: string;
   codec?: LiveCodec;
   raw?: boolean;
+  /** 放送のコーデック (`Tuned.broadcast`)。MPEG-2 の局は省く */
+  broadcast?: BroadcastCodec;
 }
 
 /**
@@ -233,7 +291,12 @@ interface LiveStart {
  * (`warmFormat`)。局が無ければ null
  */
 export function liveStart(
-  channels: readonly { id: number; type: string; channel: string }[],
+  channels: readonly {
+    id: number;
+    type: string;
+    channel: string;
+    broadcast?: BroadcastCodec;
+  }[],
   asked: number,
   kept: Kept,
   indoor: boolean,
@@ -241,15 +304,17 @@ export function liveStart(
   const named = channels.find((channel) => channel.id === asked);
   const saved =
     named === undefined
-      ? channels.find(
+      ? (channels.find((channel) => channel.id === kept.serviceId) ??
+        channels.find(
           (channel) =>
             channel.type === kept.channelType &&
             channel.channel === kept.channel,
-        )
+        ))
       : undefined;
   const target = named ?? saved ?? channels[0];
   if (target === undefined) return null;
-  const format = warmFormat(kept.choice, indoor);
+  const broadcast = target.broadcast ?? "mpeg2";
+  const format = warmFormat(kept.choice, indoor, broadcast);
   return {
     channelType: target.type,
     channel: target.channel,
@@ -258,5 +323,6 @@ export function liveStart(
       ? { audio: kept.audio }
       : {}),
     ...(format === "raw" ? { raw: true } : { codec: format }),
+    ...(broadcast === "mpeg2" ? {} : { broadcast }),
   };
 }

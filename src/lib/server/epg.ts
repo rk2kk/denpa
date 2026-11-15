@@ -10,13 +10,27 @@ import {
   lt,
   lte,
   ne,
+  not,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
 
 import { toHalfWidth } from "../fold";
 import { type Airing, mainOf, splitOf, type Station } from "../subchannels";
-import { CHANNEL_TYPES } from "../types";
+import {
+  ALL_CHANNEL_TYPES,
+  type ChannelType,
+  undecodableReason,
+} from "../types";
+import {
+  type AgentChannels,
+  retainedServices,
+  serviceChannel,
+  storeAgentChannels,
+  unreceivableService,
+} from "./agent-channels";
+import { type Agent, listAgents, NO_AGENT } from "./agents";
 import { config } from "./config";
 import { affected, now, orm } from "./db";
 import { emit } from "./events";
@@ -31,42 +45,99 @@ import {
   reservations,
   services,
 } from "./schema";
-import {
-  type AgentChannel,
-  getChannels,
-  programKey,
-  serviceKey,
-} from "./tuner";
+import { getChannels, programKey, serviceAbilities, serviceKey } from "./tuner";
 
 /**
  * 「いまエージェントの一覧にある局」だけに絞る条件。
  *
  * 局の行は消さない。消すと、その局で録った録画や過去の予約が辿れなくなるため
  * ([data.md](../../../docs/data.md))。代わりに、**直近の取り込みで見かけなかった
- * 局は画面に出さない**。
- *
- * 取り込みでは同じ時刻を全件に入れるので、いちばん新しい `updated_at` が
- * 「最後に取り込んだ時刻」になる。それに満たないものが取り残しにあたる。
+ * 局と、設定から消した種別の局は画面に出さない** (`services.listed`)。
  *
  * 実機では、スキャンをやり直した結果、エージェントの一覧は 32 局なのに denpa 側には
  * 120 局が残っていて、番組表に空の列が並んでいた。
  */
 export function currentServices() {
-  return sql`${services.updated_at} >= (SELECT MAX(${services.updated_at}) FROM ${services})`;
+  return eq(services.listed, true);
 }
 
 /**
- * いま選局できる局の数を種別ごとに。局が無いときの案内に使う (`#lib/channel-notice.ts`)。
- * 局が 1 つも無い種別は入らない
+ * **設定から消した種別の局を、その場で一覧から外す** (`scan.removeType`)。番組表と、まだ始めていない予約も片付ける。
+ *
+ * 取り込みに任せないのは、最後の 1 種別を消すとエージェントの一覧が空になり、取り込みが何もしないため
+ * (空の一覧は不調でも返るので、`syncServices` は 1 局も取れなかった回を読まない)。局の行と録画は残る
+ *
+ * @returns 取り消した予約の数
+ */
+export function unlistType(type: ChannelType): number {
+  const at = now();
+  let canceled = 0;
+  orm().transaction((tx) => {
+    const ids = tx
+      .select({ id: services.id })
+      .from(services)
+      .where(and(eq(services.type, type), eq(services.listed, true)))
+      .all()
+      .map((row) => row.id);
+    for (const id of ids) canceled += clearBelongings(at, id).reservations;
+    tx.update(services)
+      .set({ listed: false })
+      .where(eq(services.type, type))
+      .run();
+  });
+  if (canceled > 0) emit("reservations");
+  emit("programs");
+  return canceled;
+}
+
+/**
+ * 番組表に出す局の数を種別ごとに。番組表のタブ (`#lib/types.ts` の `guideTabs`) と、局が無いときの案内に使う (`#lib/channel-notice.ts`)。
+ * 局が 1 つも無い種別は入らない。番組表を読めない局 (EIT がスクランブルされた SKY の局など) は番組表に出ないので数えない (`services.epg_readable`)
  */
 export function serviceCounts(): Record<string, number> {
   const rows = orm()
     .select({ type: services.type, n: count() })
     .from(services)
-    .where(currentServices())
+    .where(and(currentServices(), eq(services.epg_readable, true)))
     .groupBy(services.type)
     .all();
   return Object.fromEntries(rows.map((row) => [row.type, row.n]));
+}
+
+/**
+ * いま選局できる局の数。**復号できない局も数える** (受信の設定の「受信できるチャンネル」に並ぶ局)。
+ * 局が無いときの案内で、スキャンへ案内するか、復号できる局が無いことを言うかを分けるのに使う (`#lib/channel-notice.ts`)
+ */
+export function listedServices(): number {
+  return (
+    orm().select({ n: count() }).from(services).where(currentServices()).get()
+      ?.n ?? 0
+  );
+}
+
+/**
+ * **番組表に出すが観られない局** (番組表を読めるが復号できない局。`types.epgReadableService`) と、観られないわけ (`types.undecodableReason`)。
+ * 番組表の列の「観られません」と、番組の詳細で予約とライブのボタンの代わりに出す文に使う (番組表・検索)
+ */
+export function unwatchableServices(): Record<number, string> {
+  const rows = orm()
+    .select({
+      id: services.id,
+      type: services.type,
+      transport: services.transport,
+    })
+    .from(services)
+    .where(
+      and(
+        currentServices(),
+        eq(services.epg_readable, true),
+        eq(services.decodable, false),
+      ),
+    )
+    .all();
+  return Object.fromEntries(
+    rows.map((row) => [row.id, undecodableReason(row.type, row.transport)]),
+  );
 }
 
 /**
@@ -81,52 +152,46 @@ export function serviceCounts(): Record<string, number> {
  */
 export const SERVICE_ORDER =
   "remote_control_key IS NULL, remote_control_key, service_id";
-/** 種別ごとの順。地上波 → BS → CS。テレビの切り替えもこの順 */
-export const SERVICE_TYPE_ORDER = `CASE type WHEN 'GR' THEN 0 WHEN 'BS' THEN 1 ELSE 2 END`;
-/** 地上波 → BS → CS を JS で並べるときのキー。知らない種別は後ろ */
+/** 種別ごとの順 (SQL)。地上波 → BS → CS → CATV → SKY (`ALL_CHANNEL_TYPES` の順。`typeRank` と同じ)。テレビの切り替えもこの順 */
+export const SERVICE_TYPE_ORDER = `CASE type ${ALL_CHANNEL_TYPES.map((type, rank) => `WHEN '${type}' THEN ${rank}`).join(" ")} ELSE ${ALL_CHANNEL_TYPES.length} END`;
+/** 地上波 → BS → CS → CATV → SKY を JS で並べるときのキー。知らない種別は後ろ */
 export function typeRank(type: string): number {
-  const at = (CHANNEL_TYPES as readonly string[]).indexOf(type);
-  return at === -1 ? CHANNEL_TYPES.length : at;
+  const at = (ALL_CHANNEL_TYPES as readonly string[]).indexOf(type);
+  return at === -1 ? ALL_CHANNEL_TYPES.length : at;
 }
 
 /**
- * 番組表とライブに出す局。**名前の付いた番組が 1 つも無い局は出さない。**
+ * 番組表とライブに出す局。
+ *
+ * - **本チャンネルは、番組が無くても出す。** スキャンしたばかりのケーブルの局のように、番組表がまだ無い局も
+ *   選べるようにする。入れたばかりで番組表がまだ空のときも、ここから先へ進める
+ * - **終わったチャンネルは出さない。** 局名が空か「-」だけの局。BS103 (旧 NHK BSプレミアム) は
+ *   2024 年 3 月で放送を終えたが、SDT には枠が残っていて、局名は「-」に消されている
+ * - **サブチャンネルは、分割放送の間だけ出す** (`splitOf`。番組表と同じ決め方)。NHK総合2 や Eテレ2/3 は、
+ *   マルチ編成をしていないときは本チャンネルと同じ映像を流していて、EIT には名前の無い番組か、
+ *   重なる時間の本チャンネルの番組と同じ名前の番組が並ぶ。番組が 1 つも無いサブも、同じ番組を流しているものとして外す
  *
  * 番組表はこれを放送局 (同じ TS) ごとに当てる (サブチャンネルの列は分割放送のある日だけ立てる。
  * `#lib/subchannels.ts`)。
  *
- * 出したくないものが 2 種類ある。どちらも「枠はあるが放送していない」。
- *
- * - **終わったチャンネル。** BS103 (旧 NHK BSプレミアム) は 2024 年 3 月で放送を
- *   終えたが、SDT には枠が残っている (局名も消されて「-」)。番組は 1 つも来ない
- * - **本チャンネルと同じ番組を流しているサブチャンネル。** NHK総合2 や Eテレ2/3 は、マルチ編成をして
- *   いないときは本チャンネルと同じ映像を流していて、EIT には**名前の無い番組**が
- *   並ぶ。**名前が付いていても本チャンネルと同じ番組**のこともある (重なる時間の
- *   本チャンネルの番組と同じ名前)。どちらも同じ番組を流しているものとして外す。決め方は番組表と同じ
- *   (`splitOf`)
- *
  * **局の行も、スキャンの結果も消さない。** マルチ編成が始まればその日の番組表に
- * 名前が付いて出てくるし、放送が再開されれば勝手に戻る。
- *
- * **1 局も残らないときは全部出す。** 入れたばかりで番組表がまだ空のときに
- * 列ごと消えると、何も映らない画面から先へ進めない
+ * 名前が付いて出てくるし、放送が再開されれば局名が戻って出てくる
  */
-export function airing<S extends Station, P extends Omit<Airing, "id">>(
-  services: S[],
-  programs: P[],
-): S[] {
+export function airing<
+  S extends Station & { name: string },
+  P extends Omit<Airing, "id">,
+>(services: S[], programs: P[]): S[] {
   const main = mainOf(services);
   const split = splitOf(programs, main);
-  const named = new Set(
-    programs.filter((program) => program.name !== "").map((p) => p.service_id),
+  return services.filter((service) =>
+    main.get(service.id) === service.id
+      ? !ENDED_NAME.test(service.name)
+      : split.has(service.id),
   );
-  const shown = services.filter(
-    (service) =>
-      named.has(service.id) &&
-      (main.get(service.id) === service.id || split.has(service.id)),
-  );
-  return shown.length === 0 ? services : shown;
 }
+
+/** 放送を終えた枠の局名。空か「-」だけ (BS103。全角の「－」で来ても同じに見る) */
+const ENDED_NAME = /^[\s\-－]*$/u;
 
 /**
  * **いまライブで選べる局。** 番組の詳細に「視聴」を出すかどうかに使う
@@ -137,8 +202,9 @@ export function airing<S extends Station, P extends Omit<Airing, "id">>(
  * 別の局が映る**。実機の NHKEテレ2/3 で起きた (本チャンネルと同じ番組を流しているサブチャンネルは、
  * 分割放送をしていない間は名前の無い枠が並ぶ)。
  *
- * 局は種別で絞らない。ライブ画面が地上波・BS・CS をまとめて扱っているので、
- * 絞ると `airing` の「1 局も残らなければ全部出す」の効き方がずれる。
+ * 局は種別で絞らない (ライブ画面も全種別をまとめて扱っている)。
+ * 外すのは、ライブ画面も外している復号できない局 (`services.decodable`) と、チャンネルの分からない局
+ * (どのエージェントの控えにも無い。エージェントを消した直後など) だけ
  *
  * **出す画面ごとに書かない。** 番組表と検索で別々に書いていると、片方だけ
  * 直したときに同じ番組の詳細でも「視聴」が出たり出なかったりする
@@ -148,12 +214,21 @@ export function watchableServices(at: number): number[] {
     orm()
       .select({
         id: services.id,
+        name: services.name,
         service_id: services.service_id,
-        channel: services.channel,
+        network_id: services.network_id,
+        transport_stream_id: services.transport_stream_id,
         type: services.type,
       })
       .from(services)
-      .where(currentServices())
+      // 復号できない局とチャンネルの分からない局はライブに出さない
+      .where(
+        and(
+          currentServices(),
+          eq(services.decodable, true),
+          sql`${serviceChannel()} IS NOT NULL`,
+        ),
+      )
       .all(),
     orm()
       .select({
@@ -168,7 +243,18 @@ export function watchableServices(at: number): number[] {
   ).map((service) => service.id);
 }
 
-export function syncServices(channels: AgentChannel[]): number {
+/** 中身が違うと警告を出した局。同じ警告を取り込みのたびに出さない */
+const warnedShapes = new Set<number>();
+
+/**
+ * 局の一覧を、エージェントが返した控えから取り込む (`read` はエージェントの並びの順)。
+ *
+ * - **控えはエージェントごとに `agent_channels` へ写す** (`agent-channels.ts`)。局 (`services`) は局の ID で 1 行
+ * - **一覧を返さなかったエージェント (`read` に無い・空を返した) の写しは前のまま残し、その TS の局も見かけたことにする。**
+ *   1 台が落ちている間に、その台にしか無い局を片付けないため。空の一覧は不調でも返る
+ * - 同じ局を複数のエージェントが返し、中身 (局名・リモコン番号・形式) が違えば、並びの先のエージェントのものを使い、警告を出す
+ */
+export function syncServices(read: readonly AgentChannels[]): number {
   const at = now();
   let count = 0;
   const dropped: number[] = [];
@@ -176,14 +262,20 @@ export function syncServices(channels: AgentChannel[]): number {
    * この回で見かけた局。**時刻では数えない** (2 回の取り込みが同じミリ秒に入ることがある)
    */
   const seen = new Set<number>();
+  /** この回で局の行を書いたエージェント (局 → エージェント)。先に書いたエージェントのものを残す */
+  const writtenBy = new Map<number, { agent: number; shape: string }>();
+  const answered = read.filter((r) => r.channels.length > 0);
   let canceled = 0;
   /*
-   * **受信できないチャンネルの局は見かけなかったことにする** (`reception.ts`)。番組表とライブに出なくなり、
-   * しばらくすると番組と予約も片付く (`forgetMissing`)。受信できれば次の取り込みで戻る
+   * **受信できないチャンネルの局は見かけなかったことにする** (`reception.ts`。エージェントごと)。ほかのエージェントで受信できれば見かけたことになる。
+   * どこでも受信できなければ番組表とライブに出なくなり、しばらくすると番組と予約も片付く (`forgetMissing`)。受信できれば次の取り込みで戻る
    */
-  pruneReception(channels);
-  const blocked = unreceivableChannels();
+  for (const r of answered) pruneReception(r.agent, r.channels);
+  const blocked = new Map(
+    answered.map((r) => [r.agent, unreceivableChannels(r.agent)]),
+  );
   orm().transaction((tx) => {
+    for (const r of answered) storeAgentChannels(r);
     const known = new Map(
       tx
         .select({ id: services.id, name: services.name })
@@ -191,47 +283,78 @@ export function syncServices(channels: AgentChannel[]): number {
         .all()
         .map((row) => [row.id, row.name]),
     );
-    for (const channel of channels) {
-      if (blocked.has(`${channel.type}:${channel.channel}`)) continue;
-      for (const service of channel.services) {
-        const id = serviceKey(channel.networkId, service.serviceId);
-        // 映像の入っていないサービスは録っても仕方がない
-        if (service.serviceType !== DIGITAL_TV) {
-          dropped.push(id);
+    for (const { agent, channels } of answered) {
+      for (const channel of channels) {
+        if (blocked.get(agent)?.has(`${channel.type}:${channel.channel}`))
           continue;
+        for (const service of channel.services) {
+          const id = serviceKey(
+            channel.networkId,
+            service.serviceId,
+            channel.type,
+          );
+          // 映像の入っていないサービスは録っても仕方がない
+          if (service.serviceType !== DIGITAL_TV) {
+            dropped.push(id);
+            continue;
+          }
+          seen.add(id);
+          const abilities = serviceAbilities(channel, service);
+          const shape = `${service.name}|${channel.remoteControlKeyId}|${channel.transport ?? "ts"}`;
+          const first = writtenBy.get(id);
+          if (first !== undefined && first.agent !== agent) {
+            if (first.shape !== shape && !warnedShapes.has(id)) {
+              warnedShapes.add(id);
+              console.warn(
+                `[epg] 局 ${id} の中身 (局名・リモコン番号・形式) がエージェントによって違います。並びの先のエージェントのものを使います`,
+              );
+            }
+            continue;
+          }
+          writtenBy.set(id, { agent, shape });
+          tx.insert(services)
+            .values({
+              id,
+              service_id: service.serviceId,
+              network_id: channel.networkId,
+              name: widthKept(known.get(id), service.name),
+              type: channel.type,
+              service_type: service.serviceType,
+              transport_stream_id: channel.transportStreamId,
+              remote_control_key: channel.remoteControlKeyId,
+              decodable: abilities.decodable,
+              epg_readable: abilities.epgReadable,
+              transport: channel.transport ?? "ts",
+              listed: true,
+              // ロゴは放送波から取得したときに立てる (logo.ts)
+              has_logo: false,
+              updated_at: at,
+            })
+            .onConflictDoUpdate({
+              target: services.id,
+              set: {
+                service_id: sql`excluded.service_id`,
+                network_id: sql`excluded.network_id`,
+                name: sql`excluded.name`,
+                type: sql`excluded.type`,
+                service_type: sql`excluded.service_type`,
+                transport_stream_id: sql`excluded.transport_stream_id`,
+                remote_control_key: sql`excluded.remote_control_key`,
+                decodable: sql`excluded.decodable`,
+                epg_readable: sql`excluded.epg_readable`,
+                transport: sql`excluded.transport`,
+                listed: true,
+                updated_at: sql`excluded.updated_at`,
+              },
+            })
+            .run();
+          count++;
         }
-        seen.add(id);
-        tx.insert(services)
-          .values({
-            id,
-            service_id: service.serviceId,
-            network_id: channel.networkId,
-            name: widthKept(known.get(id), service.name),
-            type: channel.type,
-            service_type: service.serviceType,
-            channel: channel.channel,
-            remote_control_key: channel.remoteControlKeyId,
-            // ロゴは放送波から取得したときに立てる (logo.ts)
-            has_logo: false,
-            updated_at: at,
-          })
-          .onConflictDoUpdate({
-            target: services.id,
-            set: {
-              service_id: sql`excluded.service_id`,
-              network_id: sql`excluded.network_id`,
-              name: sql`excluded.name`,
-              type: sql`excluded.type`,
-              service_type: sql`excluded.service_type`,
-              channel: sql`excluded.channel`,
-              remote_control_key: sql`excluded.remote_control_key`,
-              updated_at: sql`excluded.updated_at`,
-            },
-          })
-          .run();
-        count++;
       }
     }
+    // 一覧を返さなかったエージェントの局は、前の写しのとおりに見かけたことにする (その台で受信できないと決めたチャンネルは除く)
+    for (const id of retainedServices(answered.map((r) => r.agent)))
+      seen.add(id);
     /*
      * 以前の取り込みで入ってしまったデータ放送やワンセグを片付ける。
      * 残っていると番組表に並び続け、ルールが引っかけて録画が失敗する。
@@ -244,8 +367,15 @@ export function syncServices(channels: AgentChannel[]): number {
       clearBelongings(at, id);
       tx.delete(services).where(eq(services.id, id)).run();
     }
-    // この回で見かけなかった局の持ち物を片付ける
-    if (count > 0) canceled = forgetMissing(at, seen);
+    // この回で見かけなかった局を一覧から外し、長く見かけない局の持ち物を片付ける
+    if (count > 0) {
+      // 1 局も取れなかった回は外さない (不調で空の一覧が返ることがある)
+      tx.update(services)
+        .set({ listed: false })
+        .where(notInArray(services.id, [...seen]))
+        .run();
+      canceled = forgetMissing(at, seen);
+    }
   });
   // 取り消した予約は一覧に出ている。同じものを見ている端末が食い違わないように
   if (canceled > 0) emit("reservations");
@@ -280,11 +410,13 @@ function widthKept(current: string | undefined, incoming: string): string {
 export function widenServices(
   networkId: number,
   found: { serviceId: number; name: string }[],
+  /** 読んだチャンネルの種別。CATV の局はアンテナの局と ID が違う (`tuner.serviceKey`) */
+  type: ChannelType,
 ): number {
   let changed = 0;
   orm().transaction((tx) => {
     for (const service of found) {
-      const id = serviceKey(networkId, service.serviceId);
+      const id = serviceKey(networkId, service.serviceId, type);
       const row = tx
         .select({ name: services.name })
         .from(services)
@@ -399,7 +531,7 @@ function forgetMissing(at: number, seen: Set<number>): number {
   if (programs === 0 && reservations === 0) return 0;
   console.log(
     `[epg] 選局できなくなった局を片付けました: ${names.join(", ")} ` +
-      `(番組 ${programs} 件 / 予約 ${reservations} 件を取り消し)`,
+      `(番組 ${programs} 件を削除、予約 ${reservations} 件を取消)`,
   );
   return reservations;
 }
@@ -411,17 +543,14 @@ function forgetMissing(at: number, seen: Set<number>): number {
  * 局によっては数分かかる。局だけ先に出しておかないと、スキャンの直後に
  * 番組表が空のまま何も出ない時間が続く。
  */
-export function syncServicesOnly(channels: AgentChannel[]): number {
-  const current = () =>
-    orm().select({ n: count() }).from(services).where(currentServices()).get()
-      ?.n ?? 0;
-  const before = current();
-  const synced = syncServices(channels);
+export function syncServicesOnly(read: readonly AgentChannels[]): number {
+  const before = listedServices();
+  const synced = syncServices(read);
   /*
    * 数が変わったときだけ知らせる。毎回知らせると、番組表を開いている端末が
    * 何も変わっていないのに 1 分おきに読み直すことになる
    */
-  if (current() !== before) emit("services");
+  if (listedServices() !== before) emit("services");
   return synced;
 }
 
@@ -432,23 +561,32 @@ export function syncServicesOnly(channels: AgentChannel[]): number {
  * 内部 ID (例: 3239123608) とは別物。そのまま入れると番組表の JOIN が 1 件も当たらず、
  * 番組が丸ごと出なくなる。networkId と合わせて引き直す。
  *
- * **受信できないチャンネルの局は入れない** (`reception.ts`)。衛星はほかの中継器からもその局の番組表が届くので、
- * 入れるとルールが録れない予約を立てる
+ * **全部のエージェントで受信できないチャンネルの局は入れない** (`reception.ts`)。衛星はほかの中継器からもその局の番組表が届くので、
+ * 入れるとルールが録れない予約を立てる。**番組表を読めない局も入れない** (`services.epg_readable`。番組表に出さない)。
+ * 読めるが復号できない局の番組は入れる (番組表に「観られません」で出す)。ルールはその番組に当てない (`rules.applyRules`)。
+ *
+ * **CATV の局とアンテナの局は分ける** (`indexKey`)。CATV が再送信する BS の EIT には、アンテナの BS と同じ
+ * original_network_id と service_id が入っている。分けないと、CATV で読んだ番組表がアンテナの局に入る
  */
 function serviceIdIndex(): Map<string, number> {
-  const blocked = unreceivableChannels();
   const rows = orm()
     .select({
       id: services.id,
       network_id: services.network_id,
       service_id: services.service_id,
       type: services.type,
-      channel: services.channel,
     })
     .from(services)
-    .all()
-    .filter((s) => !blocked.has(`${s.type}:${s.channel}`));
-  return new Map(rows.map((s) => [`${s.network_id}:${s.service_id}`, s.id]));
+    .where(and(eq(services.epg_readable, true), not(unreceivableService())))
+    .all();
+  return new Map(
+    rows.map((s) => [indexKey(s.type, s.network_id, s.service_id), s.id]),
+  );
+}
+
+/** `serviceIdIndex` のキー。CATV かどうか・original_network_id・service_id */
+function indexKey(type: string, networkId: number, serviceId: number): string {
+  return `${type === "CATV"}:${networkId}:${serviceId}`;
 }
 
 /**
@@ -456,11 +594,13 @@ function serviceIdIndex(): Map<string, number> {
  *
  * 書いた局には番組表を集めた時刻 (`services.epg_at`) を付ける。番組表の取得が次に行くかをこれで決める
  * (`epg-collect.lastCollected`)。ライブが写す p/f (`followOnAir`) は `onAir` を渡して付けない。
- * p/f は現在と次の番組だけで、その先の番組表は埋まっていないため
+ * p/f は現在と次の番組だけで、その先の番組表は埋まっていないため。
+ *
+ * `type` は番組表を読んだチャンネルの種別。CATV で読んだ番組は CATV の局にだけ書く (`serviceIdIndex`)
  */
 export function savePrograms(
   events: EitEvent[],
-  { onAir = false }: { onAir?: boolean } = {},
+  { type, onAir = false }: { type: string; onAir?: boolean },
 ): number {
   const index = serviceIdIndex();
   /** その表がシリーズを言っていれば (`series_said`) 新しい値、言っていなければ前のまま */
@@ -566,7 +706,7 @@ export function savePrograms(
       if (!timed(event)) continue;
       // チャンネル設定に無いサービスの番組は録れないので捨てる
       const serviceId = index.get(
-        `${event.originalNetworkId}:${event.serviceId}`,
+        indexKey(type, event.originalNetworkId, event.serviceId),
       );
       if (serviceId === undefined) continue;
       const extended =
@@ -575,6 +715,7 @@ export function savePrograms(
         event.originalNetworkId,
         event.serviceId,
         event.eventId,
+        type,
       );
       const endAt = event.startAt + event.duration;
       overlap.run({
@@ -659,9 +800,14 @@ export function savePrograms(
  * 食い違うのは延長・繰り下げ・差し替えのときだけ。通知を受けた画面 (ライブの一覧・
  * テレビのアプリ) が読み直す
  *
+ * `type` は開いているチャンネルの種別 (`savePrograms`)
+ *
  * @returns 書いたか
  */
-export function followOnAir(events: readonly EitEvent[]): boolean {
+export function followOnAir(
+  events: readonly EitEvent[],
+  type: string,
+): boolean {
   const differs = events.some((event) => {
     // 時刻や尺が未定の番組は写せない (`savePrograms` も捨てる)
     if (!timed(event)) return false;
@@ -675,7 +821,12 @@ export function followOnAir(events: readonly EitEvent[]): boolean {
       .where(
         eq(
           programs.id,
-          programKey(event.originalNetworkId, event.serviceId, event.eventId),
+          programKey(
+            event.originalNetworkId,
+            event.serviceId,
+            event.eventId,
+            type,
+          ),
         ),
       )
       .get();
@@ -688,7 +839,7 @@ export function followOnAir(events: readonly EitEvent[]): boolean {
     );
   });
   // 知らない局 (チャンネル設定に無い) のぶんは書かれない。書けなければ知らせない
-  if (!differs || savePrograms([...events], { onAir: true }) === 0)
+  if (!differs || savePrograms([...events], { type, onAir: true }) === 0)
     return false;
   emit("programs");
   return true;
@@ -785,14 +936,77 @@ export function settle(): SettleResult {
 }
 
 /**
- * 局と番組表を取り込み直す。E2E と docs の画像を撮るスクリプトが呼ぶとき (`/api/sync`)・起動直後・スキャンのあと。
+ * **局と番組表の取り込み (`sync`) で、控えを読めなかったエージェント** (`agents.id`)。読めたら消す。
+ * denpa とエージェントを同時に入れ替えると、起動直後はエージェントがまだ立っていないことがある。
+ * そのエージェントの通知に繋がったときに取り込み直す (`runtime.ts`)。
+ * 定期の局の取り込み (`syncServicesOnly`) では消さない。あちらは予約を組み直さないため
+ */
+const unsynced = new Set<number>();
+
+/** このエージェントの控えを、局と番組表の取り込み (`sync`) でまだ読めていないか */
+export function syncPending(agent: number): boolean {
+  return unsynced.has(agent);
+}
+
+/**
+ * 局と番組表を取り込み直す。E2E と docs の画像を撮るスクリプトが呼ぶとき (`/api/sync`)・起動直後・スキャンのあと・
+ * エージェントの `channels` の通知と、読めていなかったエージェントの通知に繋がったとき (`runtime.ts`)・種別を消したとき (`scan.removeType`)。
  *
  * 番組そのものを集めるのは `epg-collect.ts` で、こちらは**溜まっているものを
  * 使って予約を組み直すだけ**。
  */
-export async function sync(): Promise<SettleResult & { services: number }> {
-  const services = syncServices(await getChannels());
+export async function sync(
+  /** 渡せば、このエージェントの控えだけを読み直す (ほかのエージェントは前の写しのまま。`channels` の通知) */
+  only?: Agent,
+): Promise<SettleResult & { services: number }> {
+  const targets = only === undefined ? listAgents() : [only];
+  let read: AgentChannels[];
+  try {
+    read = await readChannels(only);
+  } catch (error) {
+    for (const agent of targets) unsynced.add(agent.id);
+    throw error;
+  }
+  for (const agent of targets) {
+    if (read.some((entry) => entry.agent === agent.id))
+      unsynced.delete(agent.id);
+    else unsynced.add(agent.id);
+  }
+  /*
+   * 局の数が変わったら画面に知らせる (`syncServicesOnly`)。通知に繋がったときの取り込み直しは
+   * 画面を開いたあとに来ることがあり、そのあとの定期の取り込みでは数が変わらないので知らせない
+   */
+  const services = syncServicesOnly(read);
   const result = { services, ...settle() };
   await resolveConflicts();
   return result;
+}
+
+/**
+ * エージェントの控えを読む (並びの順)。`only` を渡せばその 1 台だけ。
+ * **読めなかったエージェントは飛ばす** (`syncServices` が前の写しのまま残す)。1 台も読めなければ、最初の理由で reject する
+ */
+export async function readChannels(only?: Agent): Promise<AgentChannels[]> {
+  const targets = only === undefined ? listAgents() : [only];
+  if (targets.length === 0) throw new Error(NO_AGENT);
+  const results = await Promise.allSettled(
+    targets.map((agent) => getChannels(agent)),
+  );
+  const read: AgentChannels[] = [];
+  let failure: unknown = null;
+  results.forEach((result, i) => {
+    const agent = targets[i]!;
+    if (result.status === "fulfilled") {
+      read.push({ agent: agent.id, channels: result.value });
+      return;
+    }
+    failure ??= result.reason;
+    if (targets.length > 1) {
+      console.warn(
+        `[epg] ${agent.name} のチャンネルを読めませんでした (前の写しのまま使います): ${result.reason}`,
+      );
+    }
+  });
+  if (read.length === 0) throw failure;
+  return read;
 }

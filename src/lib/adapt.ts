@@ -13,20 +13,20 @@ import {
  *
  * 画面が刻むたびに測った値を渡し、動かすときだけ次の段と理由を受け取る。決めるだけで、
  * リクエストし直すのは画面の役目。DOM も時計も触らない (時刻は引数で受け取る) ので、ここだけ単体で確かめられる。
- * 端末のデコードが間に合うかは `raw/budget.ts` が見る。回線とは混ぜない。
+ * canvas に描くときに端末のデコードが間に合うかは `raw/budget.ts` が見る。回線とは混ぜない (`<video>` のデコードの遅れは `AdaptSample.behind` で受け取る)。
  *
  * ## 下げる
  *
  * 次のどれかで「足りない」と見る。
  *
  * - 詰まった (`waiting`)
- * - 先の溜まりが 2 秒を切って、減り続けている
+ * - 先のバッファが 2 秒を切って、減り続けている
  * - サーバの `backlog` が 3 秒続けて伸びた、または映像の塊を捨てた
  * - ライブで、放送に対する遅れ (`lag`) が 4 秒で 0.6 秒以上伸びた。届く速さが流している段の 85% ほどを切ると伸びる。
- *   サーバの `backlog` は、溜まりが中継・カーネル・リバースプロキシに隠れると 0 のままなので、画面が測れるこれも使う
- * - 観る画面で、測った速さ × 0.7 がいまの段に足りない状態が 10 秒続いた (先を 60 秒溜めるので、溜まりを使い切る前に下げる)
+ *   サーバの `backlog` は、バッファが中継・カーネル・リバースプロキシに隠れると 0 のままなので、画面が測れるこれも使う
+ * - 観る画面で、測った速さ × 0.7 がいまの段に足りない状態が 10 秒続いた (先を 60 秒溜めるので、バッファを使い切る前に下げる)
  *
- * 下げ先は「測った速さ × 0.7 − 音声」に収まるいちばん高い段。速さを測れていなければ 2 段下げる。
+ * 下げ先は「測った速さ × 0.7 − 音声」に収まるいちばん高い段。速さを測れていなければ 2 段下げる (段 0 からは段 1)。
  * 段 3 で、直近 15 秒のうち 3 割以上が足りない状態なら音声だけにする (車で聞くこともあるので、自動の最後の手)。
  * 「途切れずに 10 秒」では数えない。細い回線では止まっては少し動くを繰り返し、動いている刻みで数え直しになるため。
  * 段 3 に移って 10 秒たつまでは決めない。
@@ -36,7 +36,7 @@ import {
  * - 観る画面 (速さを測れる): 次の段の 2 倍以上の速さが 20 秒続いたら 1 段上げる
  * - ライブ・MPEG-2: 足りない兆しが 30 秒無く、そのあと画面が測った回線の速さ (`capacity`) が次の段の 1.2 倍以上なら
  *   1 段上げる。回線の速さは、再生中の段の受け取りの速さと、別に取った試しのデータの速さを足したもの。
- *   ライブは実時間でしか送られないので、受け取りの速さを見ても余裕は分からない。時間がたっただけでは上げない (溜まりが外に隠れると、足りない段へ上げて長く止まる)。
+ *   ライブは実時間でしか送られないので、受け取りの速さを見ても余裕は分からない。時間がたっただけでは上げない (バッファが外に隠れると、足りない段へ上げて長く止まる)。
  *   測りたいときは `wantProbe` が次の段を返す。測って足りなければ上げずに待ち直す (待ちは倍にしない)
  *
  * 上げて 1 分以内に足りなくなったら、上げる前の段に戻し、次に上げるまでの待ちを倍にする (上限 5 分)。
@@ -75,8 +75,9 @@ type AdaptRoute = "watch" | "live";
  * - `restored`: 回線が戻ったので上げた
  * - `encode`: サーバのエンコードが間に合わない。段はそのまま
  * - `pinned`: 回線が細いが、形式を手で選んでいるので段を動かさない
+ * - `decode`: 端末のデコードが追いつかないので下げた (`AdaptSample.behind`)
  */
-type AdaptReason = "slow" | "restored" | "encode" | "pinned";
+type AdaptReason = "slow" | "restored" | "encode" | "pinned" | "decode";
 
 export interface AdaptDecision {
   /** 次の段。`encode` と `pinned` ではいまの段のまま */
@@ -112,7 +113,7 @@ export interface AdaptSample {
   baseKbps: number | null;
   /**
    * ライブで、放送に対する遅れがここ `LAG_SPAN` で伸びた長さ (秒。`live-adapt.ts` の `LagMeter`)。測れなければ null・省略。
-   * 届いた映像の端の時刻と実時間の差なので、溜まりが回線のどこに隠れていても、届く速さが足りなければ伸びる
+   * 届いた映像の端の時刻と実時間の差なので、バッファが回線のどこに隠れていても、届く速さが足りなければ伸びる
    */
   lag?: number | null;
   /**
@@ -120,6 +121,11 @@ export interface AdaptSample {
    * (`GET /api/playback/probe`) の速さを足したもの。無ければ null・省略。ライブで上げてよいかを決めるのにだけ使う
    */
   capacity?: { bps: number; at: number } | null;
+  /**
+   * 端末のデコードが追いついていないか (`unslip.ts` の `DecodeLag`)。省略は false。「自動」なら 1 段下げ、
+   * その段から上へはもう上げない (`ceiling`)。手で選んだ段は動かさない
+   */
+  behind?: boolean;
 }
 
 /**
@@ -128,13 +134,23 @@ export interface AdaptSample {
  */
 export const ADAPT_NOTE = 6_000;
 
-/** 選局・シーク・切り替えの直後はこれだけ数えない (ms)。立ち上がりで溜まりが空なのを「足りない」と読まない */
+/**
+ * 形式を切り替えた (MPEG-2 を打ち切った・AV1 を再生できなかった、など) ときと、サーバの `notice` の断り書きを出しておく長さ (ms)。
+ * ライブ・追っかけ・観る画面で同じ。理由まで書く長い文なので、段の文 (`ADAPT_NOTE`) より長く出す
+ */
+export const SWITCH_NOTE = 10_000;
+
+/**
+ * 選局・シーク・切り替えの直後はこれだけ数えない (ms)。立ち上がりでバッファが空なのを「足りない」と読まない。
+ * ライブも同じ間は詰まりを数えない (`live-player.svelte.ts`)。MediaSource を作り直せば必ず `waiting` が上がり、
+ * 飛べば読み込み直しになる。宅外で本当に届かないのとは別ものなので、混ぜると遅延が伸びたまま戻らない
+ */
 export const GRACE = 3_000;
 /** 切り替えのあと、これだけ動かさない (ms)。行き来を止める */
 export const HOLD = 20_000;
-/** 先の溜まりがこれを切って減り続けたら足りない (秒)。詰まる前に下げる */
+/** 先のバッファがこれを切って減り続けたら足りない (秒)。詰まる前に下げる */
 const LOW = 2;
-/** 溜まりがこれだけ続けて減ったら「減り続けている」(ms) */
+/** バッファがこれだけ続けて減ったら「減り続けている」(ms) */
 const FALL = 2_000;
 /**
  * 減り続けた間の平均で、`FALL` あたりこれより少なく減ったなら数えない (秒)。ライブが遅れを詰めるために少し速く再生すると
@@ -218,6 +234,15 @@ export function stepLabel(step: Step, format: string): string {
 }
 
 /**
+ * **コーデックのメニューの「自動」の行の値** (「自動 (H.264 540p)」「自動 (MPEG-2)」)。ライブ・追っかけ・観る画面の 3 つともこれで組む。
+ * 添えるもの (`stepLabel`) が空なら「自動」だけ
+ */
+export function autoValue(step: Step, format: string): string {
+  const detail = stepLabel(step, format);
+  return detail === "" ? "自動" : `自動 (${detail})`;
+}
+
+/**
  * **断り書きに出す文** (docs/writing.md)。段を動かしたときは動かした先、`encode` と `pinned` は段を動かさない理由と、
  * 何をすればどうなるか。`from` は切り替える前の段。ライブも観る画面もこれを使う
  */
@@ -231,6 +256,8 @@ export function adaptNote(decision: AdaptDecision, from: Step): string {
   if (step === "audio") return "回線が細いため、音声だけにしました";
   const height = rungLabel(step);
   if (reason === "slow") return `回線が細いため、${height ?? ""} に下げました`;
+  if (reason === "decode")
+    return `再生が追いつかないため、${height ?? ""} に下げました`;
   if (height === null) return "回線が戻ったため、元の画質に戻しました";
   if (from === "audio") return `回線が戻ったため、${height} の映像に戻しました`;
   return `回線が戻ったため、${height} に上げました`;
@@ -264,7 +291,7 @@ export class RungAdapter {
   private prevAhead: number | null = null;
   private prevBacklog: number | null = null;
   private lastPace: Pace | null = null;
-  /** 溜まりが減り始めた時刻と、そのときの溜まり */
+  /** バッファが減り始めた時刻と、そのときのバッファ */
   private fall: { at: number; ahead: number } | null = null;
   /** `backlog` が伸び始める前の時刻と、最後に伸びた時刻 */
   private grow: { from: number; lastAt: number } | null = null;
@@ -282,6 +309,11 @@ export class RungAdapter {
   private readonly rates = new Map<Step, number>();
   /** ライブで、上げる前に測りたい回線の速さ (bit/s。`wantProbe`)。要らなければ null */
   private wanted: number | null = null;
+  /**
+   * デコードが追いつかなかった段 (`behind`)。**ここから上 (重い段) へは上げない。** 端末の重さは選局し直しても
+   * 変わらないので、`reset` でも捨てない
+   */
+  private ceiling: Step | null = null;
 
   /**
    * 刻むたびに呼ぶ。**段を動かすか、断り書きが要るときだけ返す。** null なら段はそのままで、断り書きも要らない。
@@ -313,7 +345,7 @@ export class RungAdapter {
       this.slowSince ??= now;
     else this.slowSince = null;
     if (this.slowSince !== null) {
-      // 溜まりが減るのも詰まるのもエンコードが遅いせい。回線のぶんとして数えない
+      // バッファが減るのも詰まるのもエンコードが遅いせい。回線のぶんとして数えない
       // この間にサーバが捨てた塊 (`dropped`) も数えない (回線のせいではない)
       this.clearStreaks();
       this.clearLow();
@@ -338,6 +370,14 @@ export class RungAdapter {
       return short ? { step: s.current, reason: "pinned" } : null;
     }
 
+    if (s.behind === true && s.current !== "audio") {
+      this.ceiling = s.current;
+      this.upSince = null;
+      this.probe = null;
+      if (now >= this.holdUntil && s.current !== LOWEST_RUNG)
+        return { step: (s.current + 1) as Rung, reason: "decode" };
+    }
+
     if (s.current === LOWEST_RUNG) this.markLow(now, tickMs, short);
     else this.clearLow();
 
@@ -359,6 +399,8 @@ export class RungAdapter {
 
     const up = upper(s.current);
     if (up === null) return null;
+    if (this.ceiling !== null && stepOrder(up) <= stepOrder(this.ceiling))
+      return null;
     const ok =
       s.route === "watch" && s.throughput !== null
         ? s.throughput >= UP_MARGIN * stepBps(up, s.baseKbps)
@@ -527,7 +569,7 @@ export class RungAdapter {
       this.thinSince ??= now;
     else this.thinSince = null;
     const thin = this.thinSince !== null && now - this.thinSince >= THIN;
-    // 放送に対する遅れが伸びている。溜まりが外に隠れていても、届く速さが足りなければこれが伸びる
+    // 放送に対する遅れが伸びている。バッファが外に隠れていても、届く速さが足りなければこれが伸びる
     const lagging = s.route === "live" && (s.lag ?? 0) >= LAG_GROW;
 
     return s.waiting || falling || growing || dropped || thin || lagging;

@@ -1,7 +1,6 @@
 <script lang="ts">
   import "@anyblades/blades/components/modal";
   import { untrack } from "svelte";
-  import X from "~icons/lucide/x";
 
   import { pad } from "#lib/format.js";
   import {
@@ -115,15 +114,6 @@
     onclick={() => dialog?.close()}
   ></button>
   <article class="modal-box" bind:this={box} tabindex="-1">
-    <button
-      type="button"
-      class="ghost icon small modal-close"
-      onclick={() => dialog?.close()}
-      aria-label="閉じる"
-      data-testid="issue-close"
-    >
-      <X aria-hidden="true" />
-    </button>
     <h2 id="issue-title">Issue にする</h2>
     <p class="small muted intro">
       GitHub の Issue
@@ -180,43 +170,54 @@
       >{#if link.dropped > 0}・長くなったので、ログの先頭の {link.dropped} 行を省いて開きます{/if}
     </p>
 
-    <footer class="modal-actions">
-      <span class="small muted copied" aria-live="polite">
-        {copied ? "コピーしました" : ""}
-      </span>
+    <footer class="modal-foot">
       <button
         type="button"
-        class="secondary"
-        onclick={download}
-        data-testid="issue-download">ダウンロード</button
+        class="secondary modal-close"
+        onclick={() => dialog?.close()}
+        data-testid="issue-close">閉じる</button
       >
-      <button
-        type="button"
-        class="secondary"
-        onclick={copy}
-        data-testid="issue-copy">コピー</button
-      >
-      <a
-        class="button"
-        href={link.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        data-testid="issue-open">GitHub で開く</a
-      >
+      <div class="modal-actions">
+        <span class="small muted copied" aria-live="polite">
+          {copied ? "コピーしました" : ""}
+        </span>
+        <button
+          type="button"
+          class="secondary"
+          onclick={download}
+          data-testid="issue-download">ダウンロード</button
+        >
+        <button
+          type="button"
+          class="secondary"
+          onclick={copy}
+          data-testid="issue-copy">コピー</button
+        >
+        <a
+          class="button"
+          href={link.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="issue-open">GitHub で開く</a
+        >
+      </div>
     </footer>
   </article>
 </dialog>
 
 <style>
-  .intro {
-    margin: var(--dp-space-1) 0 var(--dp-space-4);
-  }
   .fields {
     display: flex;
     flex-direction: column;
     gap: var(--dp-space-3);
     --pico-form-element-spacing-vertical: 0.25rem;
     --pico-form-element-spacing-horizontal: 0.625rem;
+  }
+  /* 指で押す端末では 40px 以上を保つ (設定の欄の `.sections` と同じ) */
+  @media (pointer: coarse) {
+    .fields {
+      --pico-form-element-spacing-vertical: 0.45rem;
+    }
   }
   .fields label {
     display: flex;

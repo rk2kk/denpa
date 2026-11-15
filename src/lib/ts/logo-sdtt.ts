@@ -2,7 +2,7 @@
  * SDTT (ソフトウェアダウンロードトリガーテーブル) から、**衛星のロゴがいま流れているか**だけを読む。
  *
  * 衛星のロゴは全受信機共通データとして、エンジニアリングサービス (929) のカルーセルで運ばれる
- * (`logo-dsmcc.ts`)。ARIB TR-B15 (第一部 BS デジタル放送ダウンロード運用規定 5.1.2.2・5.1.3.2・5.3.2) では、
+ * (`logo-dsmcc.ts`)。ARIB TR-B15 (第一部 第一編「BS デジタル放送 ダウンロード運用規定」5.1.2.2・5.1.3.2・5.3.2) では、
  * 共通データの SDTT は**予定 (開始時刻・長さ) を持たず、カルーセルを流している間だけ**送られる。
  * 予定を持つのは受信機のソフト更新の SDTT だけで、ロゴの時刻は前もって分からない。
  * なのでここで読むのは「いま共通データのダウンロードが出ているか」だけ (`server/logo-period.ts`)。
@@ -12,16 +12,14 @@
  * その component_tag で運ぶ ES が分かる。
  */
 
-import { u16 } from "@danything/arib/bytes";
-
-/** SDTT が乗る PID (ARIB STD-B10。地上波の 0x0028 は衛星では使わない) */
+/** SDTT を運ぶ PID (ARIB STD-B10。地上波の 0x0028 は衛星では使わない) */
 export const PID_SDTT = 0x0023;
 const TABLE_SDTT = 0xc3;
 const DESC_DOWNLOAD_CONTENT = 0xc9;
 
 /**
  * 全受信機共通データの maker_id / model_id。maker_id は 0xFF、model_id は 0xFE が本番、0xFD が送る前の試験
- * (TR-B15 5.1.2.2・7.1.8)。
+ * (TR-B15 第一部 第一編 5.1.2.2・7.1.8)。
  * 試験のものはロゴの印にしない
  */
 const COMMON_MAKER_ID = 0xff;
@@ -29,9 +27,7 @@ const COMMON_MODEL_ID = 0xfe;
 
 /** 中身 1 つ。ロゴの判断に使うものだけ */
 interface SdttContent {
-  /** 共通データのバージョン。共通データ全体で 1 つの番号 (TR-B15 5.1.6.2) */
-  newVersion: number;
-  /** 予定の数。共通データは 0 (TR-B15 5.1.2.2) */
+  /** 予定の数。共通データは 0 (TR-B15 第一部 第一編 5.1.2.2) */
   schedules: number;
   /** download_content_descriptor の component_tag。運ぶ ES の目印 */
   componentTags: number[];
@@ -40,8 +36,6 @@ interface SdttContent {
 interface Sdtt {
   makerId: number;
   modelId: number;
-  /** ダウンロードを運ぶサービス。いまは 929 だけ (TR-B15 5.1.2) */
-  serviceId: number;
   contents: SdttContent[];
 }
 
@@ -52,7 +46,6 @@ export function parseSdtt(section: Uint8Array): Sdtt | null {
   const contents: SdttContent[] = [];
   let at = 15;
   for (let n = section[14]!; n > 0 && at + 8 <= end; n--) {
-    const newVersion = (section[at + 2]! << 4) | (section[at + 3]! >> 4);
     const contentLength = (section[at + 4]! << 4) | (section[at + 5]! >> 4);
     const scheduleLength = (section[at + 6]! << 4) | (section[at + 7]! >> 4);
     const body = at + 8;
@@ -69,18 +62,12 @@ export function parseSdtt(section: Uint8Array): Sdtt | null {
       p += 2 + length;
     }
     contents.push({
-      newVersion,
       schedules: Math.floor(scheduleLength / 8),
       componentTags,
     });
     at = body + contentLength;
   }
-  return {
-    makerId: section[3]!,
-    modelId: section[4]!,
-    serviceId: u16(section, 12),
-    contents,
-  };
+  return { makerId: section[3]!, modelId: section[4]!, contents };
 }
 
 /**

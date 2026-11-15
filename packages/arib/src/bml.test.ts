@@ -70,7 +70,7 @@ function carousel(
   ];
 }
 
-/** 食わせて、出てきた通知を全部集める */
+/** 渡して、出てきた通知を全部集める */
 function decode(...parts: Uint8Array[]): ResponseMessage[] {
   const out: ResponseMessage[] = [];
   const decoder = new BmlDecoder((message) => out.push(message));
@@ -83,13 +83,46 @@ const head = bmlHead();
 describe("parseBxmlInfo", () => {
   test("入口の ES は起動のしかたまで持っている", () => {
     const descriptor = bxmlDescriptor();
-    // 記述子の頭 (tag/length) と data_component_id を落とした残り
+    // 記述子の先頭 (tag/length) と data_component_id を落とした残り
     const info = parseBxmlInfo(Uint8Array.from(descriptor.slice(4)));
     expect(info.entryPointFlag).toBe(true);
     expect(info.entryPointInfo?.autoStartFlag).toBe(true);
     // 0011 = 960x540。データ放送でいちばんよく使われる
     expect(info.entryPointInfo?.documentResolution).toBe(3);
     expect(info.additionalAribCarouselInfo?.dataEventId).toBe(0x0f);
+  });
+
+  test("TR-B14 表 2-3 のビットの並びで読む (バージョンを書いた地上波の入口)", () => {
+    // 0x33: transmission_format 00・entry_point_flag 1・auto_start_flag 1・document_resolution 0011
+    // 0x20: use_xml 0・default_version_flag 0・independent_flag 1・style_for_TV_flag 0・reserved
+    // 0003 0000: bml_major_version 3・bml_minor_version 0 (default_version_flag が 0 のときだけある)
+    // 0x18: data_event_id 1・event_section_flag 1。0x40: ondemand_retrieval_flag 0・file_storable_flag 1
+    const info = parseBxmlInfo(
+      Uint8Array.from([0x33, 0x20, 0x00, 0x03, 0x00, 0x00, 0x18, 0x40]),
+    );
+    expect(info.transmissionFormat).toBe(0);
+    expect(info.entryPointInfo).toEqual({
+      autoStartFlag: true,
+      documentResolution: 3,
+      useXML: false,
+      defaultVersionFlag: false,
+      independentFlag: true,
+      styleForTVFlag: false,
+      bmlMajorVersion: 3,
+      bmlMinorVersion: 0,
+    });
+    expect(info.additionalAribCarouselInfo).toEqual({
+      dataEventId: 1,
+      eventSectionFlag: true,
+      ondemandRetrievalFlag: false,
+      fileStorableFlag: true,
+      startPriority: 0,
+    });
+    // auto_start_flag だけを落とす (0x23)
+    expect(
+      parseBxmlInfo(Uint8Array.from([0x23, 0xe0, 0x18, 0x40])).entryPointInfo
+        ?.autoStartFlag,
+    ).toBe(false);
   });
 
   test("入口でない ES は起動のしかたを持たない", () => {
@@ -103,7 +136,7 @@ describe("parseBxmlInfo", () => {
 });
 
 describe("moduleFiles", () => {
-  test("multipart を1ファイルずつにデコードする", () => {
+  test("multipart を 1 ファイルずつにデコードする", () => {
     const files = moduleFiles(
       multipart([
         ["/startup.bml", "text/X-arib-bml", "<bml/>"],
@@ -122,7 +155,7 @@ describe("moduleFiles", () => {
   });
 
   /** 中身が 1 つのモジュールは包まれていない。置き場所は BML 側が知っている */
-  test("multipart でなければ丸ごと1ファイル", () => {
+  test("multipart でなければ丸ごと 1 ファイル", () => {
     const files = moduleFiles(new TextEncoder().encode("PNG"), "image/png");
     expect(files).toHaveLength(1);
     expect(files[0]!.contentLocation).toBeNull();
@@ -147,7 +180,7 @@ describe("inflate", () => {
     expect(inflate(new Uint8Array(4), { type: 9 })).toBeNull();
   });
 
-  test("伸ばせなければ null を返し、例外を投げない", () => {
+  test("展開できなければ null を返し、例外を投げない", () => {
     expect(inflate(Uint8Array.from([1, 2, 3, 4]), { type: 0 })).toBeNull();
   });
 
@@ -425,7 +458,7 @@ describe("BmlDecoder", () => {
   });
 
   /** 壊れたセクションで例外を投げない。**映像の付け足しが映像を止めてはいけない** */
-  test("でたらめを食べても投げない", () => {
+  test("でたらめを渡しても例外を投げない", () => {
     const junk = packetize(
       BML_PID,
       withCrc([0x3b, 0x00, 0x00, 0xff, 0xff, 0xc1, 0x00, 0x00, 1, 2, 3]),
@@ -504,10 +537,10 @@ describe("ModuleBuilder", () => {
   });
 
   /** DII の言う大きさを先に確保しない。来たブロックの終わりまでで足りる */
-  test("入れ物は届いたブロックのぶんだけ広げる", () => {
+  test("バッファは届いたブロックのぶんだけ広げる", () => {
     const builder = new ModuleBuilder(1, MAX_MODULE_SIZE, 4066);
     expect(builder.add(0, new Uint8Array(4066).fill(7))).toBe(false);
-    // 確保した大きさは外から見えないので、private の入れ物を覗いて確かめる
+    // 確保した大きさは外から見えないので、private のバッファを覗いて確かめる
     expect((builder as unknown as { buffer: Uint8Array }).buffer.length).toBe(
       4066,
     );

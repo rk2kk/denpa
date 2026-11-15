@@ -18,7 +18,7 @@ Mirakurun や EDCB、メディアサーバは要りません。番組表から�
   <tr>
     <td align="center"><a href="docs/screens.md#録画"><img src="docs/images/dashboard.webp" alt="録画" width="380"></a><br><sub><b>録画</b> — 予約と録画を 1 本の一覧に。サムネ付きで、押せばその場で観る</sub></td>
     <td align="center"><a href="docs/screens.md#ライブ"><img src="docs/images/live.webp" alt="ライブ" width="380"></a><br><sub><b>ライブ</b> — 字幕もデータ放送も。止めれば追っかけ</sub></td>
-    <td align="center"><a href="docs/screens.md#録画を観る"><img src="docs/images/watch.webp" alt="録画を観る" width="380"></a><br><sub><b>観る</b> — 放送どおりの字幕、CMは自動で飛ばす</sub></td>
+    <td align="center"><a href="docs/screens.md#録画を観る"><img src="docs/images/watch.webp" alt="録画を観る" width="380"></a><br><sub><b>観る</b> — 放送どおりの字幕、CM は自動で飛ばす</sub></td>
   </tr>
 </table>
 
@@ -33,7 +33,7 @@ denpa は、**自分の B-CAS カードで、自分の世帯の中で、私的�
 - カードを書き換えない
 
 端末 (ブラウザ) が外のサービスに直接繋ぐのは、設定でオンにしたときの実況のコメントだけです。NX-Jikkyo とニコニコ実況 過去ログ API に繋ぎ、相手には端末の IP とどの局をいつ観ているかが見えます ([docs/architecture.md](docs/architecture.md#端末が外へ繋ぐもの-実況のコメント))。
-ライブでは NX-Jikkyo に書き込めます。書いたものは公開され、消せません ([docs/watch.md](docs/watch.md#実況に書き込む))。
+ライブでは実況に書き込めます (ニコニコと連携している世帯では公式のニコニコ実況へ、ほかは NX-Jikkyo へ)。書いたものは公開され、消せません ([docs/watch.md](docs/watch.md#実況に書き込む))。
 
 考え方は [Discussion #760](https://github.com/danything/denpa/discussions/760) にまとめています (法律相談ではなく、議論のための整理です)。
 
@@ -43,24 +43,24 @@ denpa は、**自分の B-CAS カードで、自分の世帯の中で、私的�
 - **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする (GPU があれば H.265 も)。字幕は放送の ARIB 字幕のまま入れる。GPU (Intel・AMD・NVIDIA・Rockchip) があれば使う
 - **ライブ** — 放送から 1 秒ほどで。止めれば追っかけ、二カ国語・解説放送も選べる ([docs/watch.md](docs/watch.md#ライブ))
 - **データ放送** — テレビと同じ BML がブラウザで動く (d ボタン)。ライブでも録画でも
-- **観る** — 行を押せばその場で再生。CM は1コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存)
+- **観る** — 行を押せばその場で再生。CM は 1 コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存)
 - **字幕と放送の字** — 字幕は放送どおりの位置に描き、番組名・局名も含めて Denpa Font で外字まで崩さない
 - **端末に保存して観る** — 電波の無いところでも ([docs/offline.md](docs/offline.md))
 - **EPGStation・EDCB から引き継ぐ** — ルール・予約・録画 (EDCB は録画の履歴) ([docs/migrate.md](docs/migrate.md))
 - **別の機械へ移す** — ルール・予約・録画の一覧・設定を書き出して、新しい機械の denpa に取り込む ([docs/migrate.md](docs/migrate.md#別の機械へ移す))
 
 部品はチューナーで選局して素の TS を流す **チューナーエージェント** と、それ以外の全部 (番組表・予約・録画・
-エンコード・配信) をやる **denpa** の2つだけです ([docs/architecture.md](docs/architecture.md))。
+エンコード・配信) をやる **denpa** の 2 つだけです ([docs/architecture.md](docs/architecture.md))。
 
 ## 立てる
 
 ### 1. 要るもの
 
-チューナー・B-CASカードとカードリーダー・OS (Linux / Mac / Windows)・Docker (Linux だけ) が要ります。使えるチューナーの一覧と細かいことは [docs/tuners.md](docs/tuners.md#要るもの)。
+チューナー・B-CAS カードとカードリーダー・OS (Linux / Mac / Windows)・Docker (Linux だけ) が要ります。使えるチューナーの一覧と細かいことは [docs/tuners.md](docs/tuners.md#要るもの)。
 
 ### 2. 入れる
 
-**1行で、denpa 本体とチューナーのエージェントの両方が立ち上がり、ブラウザが開きます。** clone は要りません。
+**1 行で、denpa 本体とチューナーのエージェントの両方が立ち上がり、ブラウザが開きます。** clone は要りません。
 
 ```sh
 # Linux
@@ -83,11 +83,11 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 - **誰を通すか** — 設定するまで全部断ります。compose の `TRUSTED_NETWORKS` の初期値は家の中 (私設網) で、
   ここからはログインなしで通ります。範囲の変え方と、画面をログイン (OIDC) で守るときは
   [docs/install.md](docs/install.md#誰を通すか)
-- 設定の「受信」の「チューナー」で見つかったチューナーを確かめ、「チャンネル」で**スキャン**を押します (局が1つも無いうちは、録画・番組表・ライブの上に案内が出ます)。衛星は最初から局が入っていて、
+- 設定の「受信」の「チューナー」で見つかったチューナーを確かめ、「チャンネル」で**スキャン**を押します (局が 1 つも無いうちは、録画・番組表・ライブの上に案内が出ます)。衛星は最初から局が入っていて、
   地上波は十数分。終わると番組表を集めるので (数分)、あとは番組表から予約するだけです
 - **カードリーダーが NG のまま録ると、中身はスクランブルされたままです** (設定の「受信」の「チューナー」に出ます)
 
-1コンテナ (`denpa-aio`)・Helm・リバースプロキシの後ろに置くとき・困ったときは [docs/install.md](docs/install.md)、
+1 コンテナ (`denpa-aio`)・Helm・リバースプロキシの後ろに置くとき・困ったときは [docs/install.md](docs/install.md)、
 ログインの細かいことは [docs/auth.md](docs/auth.md)。
 
 ## 観る
@@ -100,9 +100,10 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 
 **はじめる**
 
-- [docs/install.md](docs/install.md) — **立てる** (入れ方の選択肢・1コンテナ・Helm・前段の後ろに置く)
+- [docs/install.md](docs/install.md) — **立てる** (入れ方の選択肢・1 コンテナ・Helm・前段の後ろに置く)
 - [docs/install-mac.md](docs/install-mac.md) — Mac に入れる
 - [docs/install-windows.md](docs/install-windows.md) — Windows に入れる
+- [docs/install-android.md](docs/install-android.md) — Android の端末にチューナーを挿し、1 台で denpa を動かすか、家の denpa のエージェントにする (実機で確かめていない)
 - [docs/install-talos.md](docs/install-talos.md) — Talos Linux の 1 台に、OS の設定から 1 行で入れる (PT3。実機で確かめていない)
 - [docs/screens.md](docs/screens.md) — 画面 (実機のスクリーンショット)
 - [docs/faq.md](docs/faq.md) — よくある質問
@@ -112,8 +113,8 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 
 - [docs/tuners.md](docs/tuners.md) — **使えるチューナー** (一覧・カードリーダー・B-CAS・直らないとき)
 - [docs/tuner-pt3.md](docs/tuner-pt3.md) — PT3 など (Linux DVB。実機で確かめていない機材も)
-- [docs/tuner-px4.md](docs/tuner-px4.md) — PX-Q3U4・PX-W3U4・PX-MLT (px4-userland)
-- [docs/tuner-px-s1ud.md](docs/tuner-px-s1ud.md) — PX-S1UD (siano-userland)
+- [docs/tuner-it930x.md](docs/tuner-it930x.md) — PX-MLT5 系・PX-Q3U4・PX-W3U4 など (IT930x の機材)
+- [docs/tuner-px-s1ud.md](docs/tuner-px-s1ud.md) — PX-S1UD
 
 **乗り換え**
 
@@ -144,7 +145,7 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 - [docs/player.md](docs/player.md) — 観る画面の作り
 - [docs/encode.md](docs/encode.md) — エンコード (字幕・AV1・GPU)
 - [docs/cm.md](docs/cm.md) — CM 検出
-- [docs/logo.md](docs/logo.md) — 局ロゴ (番組表の PNG と CM検出用に覚えたロゴ)
+- [docs/logo.md](docs/logo.md) — 局ロゴ (番組表の PNG と CM 検出用に覚えたロゴ)
 
 **手を入れる**
 
@@ -175,27 +176,33 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 - [@sirius128](https://github.com/sirius128) ([#775](https://github.com/danything/denpa/issues/775))
 - [@chiroru27](https://github.com/chiroru27) ([#1681](https://github.com/danything/denpa/issues/1681) [#1724](https://github.com/danything/denpa/issues/1724) [#1822](https://github.com/danything/denpa/issues/1822) [#1838](https://github.com/danything/denpa/issues/1838) [#2197](https://github.com/danything/denpa/issues/2197))
 - [@minetaro12](https://github.com/minetaro12) ([#1850](https://github.com/danything/denpa/issues/1850))
-- [@haruki0420](https://github.com/haruki0420) ([#2190](https://github.com/danything/denpa/issues/2190) [#2191](https://github.com/danything/denpa/issues/2191) [#2192](https://github.com/danything/denpa/issues/2192) [#2193](https://github.com/danything/denpa/issues/2193) [#2230](https://github.com/danything/denpa/issues/2230) [#2231](https://github.com/danything/denpa/issues/2231) [#2286](https://github.com/danything/denpa/issues/2286) [#2315](https://github.com/danything/denpa/issues/2315))
+- [@haruki0420](https://github.com/haruki0420) ([#2190](https://github.com/danything/denpa/issues/2190) [#2191](https://github.com/danything/denpa/issues/2191) [#2192](https://github.com/danything/denpa/issues/2192) [#2193](https://github.com/danything/denpa/issues/2193) [#2230](https://github.com/danything/denpa/issues/2230) [#2231](https://github.com/danything/denpa/issues/2231) [#2286](https://github.com/danything/denpa/issues/2286) [#2315](https://github.com/danything/denpa/issues/2315) [#2369](https://github.com/danything/denpa/issues/2369))
 
 **報告や提案をくれた人** (ありがとうございます):
 
 - [@Khronos31](https://github.com/Khronos31) ([#184](https://github.com/danything/denpa/issues/184) [#195](https://github.com/danything/denpa/issues/195) [#376](https://github.com/danything/denpa/issues/376) [#377](https://github.com/danything/denpa/issues/377))
 - [@unlimish](https://github.com/unlimish) ([#417](https://github.com/danything/denpa/issues/417) [#1834](https://github.com/danything/denpa/issues/1834))
-- [@kametani-mikihiro](https://github.com/kametani-mikihiro) ([#437](https://github.com/danything/denpa/issues/437) [#471](https://github.com/danything/denpa/issues/471) [#480](https://github.com/danything/denpa/issues/480) [#481](https://github.com/danything/denpa/issues/481) [#503](https://github.com/danything/denpa/issues/503) [#505](https://github.com/danything/denpa/issues/505) [#509](https://github.com/danything/denpa/issues/509) [#2157](https://github.com/danything/denpa/issues/2157))
+- [@kametani-mikihiro](https://github.com/kametani-mikihiro) ([#437](https://github.com/danything/denpa/issues/437) [#471](https://github.com/danything/denpa/issues/471) [#480](https://github.com/danything/denpa/issues/480) [#481](https://github.com/danything/denpa/issues/481) [#503](https://github.com/danything/denpa/issues/503) [#505](https://github.com/danything/denpa/issues/505) [#509](https://github.com/danything/denpa/issues/509) [#2157](https://github.com/danything/denpa/issues/2157) [#2754](https://github.com/danything/denpa/issues/2754))
 - [@fetburner](https://github.com/fetburner) ([#668](https://github.com/danything/denpa/issues/668))
-- [@shino-zxc](https://github.com/shino-zxc) ([#1210](https://github.com/danything/denpa/issues/1210) [#1713](https://github.com/danything/denpa/issues/1713) [#2209](https://github.com/danything/denpa/issues/2209))
-- [@eggplants](https://github.com/eggplants) ([#1617](https://github.com/danything/denpa/issues/1617) [#1709](https://github.com/danything/denpa/issues/1709) [#1930](https://github.com/danything/denpa/issues/1930) [#1931](https://github.com/danything/denpa/issues/1931) [#2152](https://github.com/danything/denpa/issues/2152))
+- [@shino-zxc](https://github.com/shino-zxc) ([#1210](https://github.com/danything/denpa/issues/1210) [#1713](https://github.com/danything/denpa/issues/1713) [#2209](https://github.com/danything/denpa/issues/2209) [#2729](https://github.com/danything/denpa/issues/2729))
+- [@eggplants](https://github.com/eggplants) ([#1617](https://github.com/danything/denpa/issues/1617) [#1709](https://github.com/danything/denpa/issues/1709) [#1930](https://github.com/danything/denpa/issues/1930) [#1931](https://github.com/danything/denpa/issues/1931) [#2152](https://github.com/danything/denpa/issues/2152) [#2386](https://github.com/danything/denpa/issues/2386))
 - [@ogatomo21](https://github.com/ogatomo21) ([#1708](https://github.com/danything/denpa/issues/1708))
 - [@yuki-untitled](https://github.com/yuki-untitled) ([#1806](https://github.com/danything/denpa/issues/1806))
 - [@orijie](https://github.com/orijie) ([#2188](https://github.com/danything/denpa/issues/2188))
-- [@emuiak](https://github.com/emuiak) ([#2189](https://github.com/danything/denpa/issues/2189) [#2218](https://github.com/danything/denpa/issues/2218))
-- [@haruki0420](https://github.com/haruki0420) ([#2221](https://github.com/danything/denpa/issues/2221) [#2239](https://github.com/danything/denpa/issues/2239))
+- [@emuiak](https://github.com/emuiak) ([#2189](https://github.com/danything/denpa/issues/2189) [#2218](https://github.com/danything/denpa/issues/2218) [#2387](https://github.com/danything/denpa/issues/2387) [#2488](https://github.com/danything/denpa/issues/2488) [#2604](https://github.com/danything/denpa/issues/2604) [#2605](https://github.com/danything/denpa/issues/2605))
+- [@haruki0420](https://github.com/haruki0420) ([#2221](https://github.com/danything/denpa/issues/2221) [#2239](https://github.com/danything/denpa/issues/2239) [#2343](https://github.com/danything/denpa/issues/2343) [#2346](https://github.com/danything/denpa/issues/2346) [#2367](https://github.com/danything/denpa/issues/2367) [#2385](https://github.com/danything/denpa/issues/2385) [#2443](https://github.com/danything/denpa/issues/2443) [#2474](https://github.com/danything/denpa/issues/2474))
+- [@masa592](https://github.com/masa592) ([#2342](https://github.com/danything/denpa/issues/2342))
+- [@tukiboshi389](https://github.com/tukiboshi389) ([#2654](https://github.com/danything/denpa/issues/2654))
+- [@strugglecrow](https://github.com/strugglecrow) ([#2684](https://github.com/danything/denpa/issues/2684))
+- [@iwkta](https://github.com/iwkta) ([#2727](https://github.com/danything/denpa/issues/2727) [#2728](https://github.com/danything/denpa/issues/2728))
+- [@junhayasaka](https://github.com/junhayasaka) ([#2755](https://github.com/danything/denpa/issues/2755))
+- [@pixnook](https://github.com/pixnook) ([#2771](https://github.com/danything/denpa/issues/2771))
 
 <!-- thanks:end -->
 
 **土台にしている仕事**:
 
-- [px4-userland](https://github.com/Khronos31/px4-userland) / [siano-userland](https://github.com/Khronos31/siano-userland) (@Khronos31) — ホストにドライバを入れずにチューナーを使えるのはこれのおかげです。PX-MLT5PE / DTV02A-5TS-P の対応は @siketyan
+- [px4-userland](https://github.com/Khronos31/px4-userland)・[siano-userland](https://github.com/Khronos31/siano-userland)・[asicen-userland](https://github.com/Khronos31/asicen-userland) (@Khronos31) が、ホストにドライバを入れずにチューナーを使う形を先に示してくれました。いまは asicen-userland を同梱しています (PX-W3U3 など。試験的)。
 
 ## ライセンス
 

@@ -3,7 +3,7 @@ namespace Denpa.Agent.Tests;
 /*
  * **読み出しが追いつかずに切った利用者も、読む側が去れば選局から抜ける。**
  *
- * 切ったあと (`Sink.Push` の `MaxLag`) に抜ける知らせが届かず、選局の利用者に残っていた。
+ * 切ったあと (`Sink.Push` の `MaxLag`) に抜けたことが選局に伝わらず、選局の利用者に残っていた。
  * そのチューナーは誰も読んでいないのに同じ優先度で塞がり続け、実機では番組表の取得が
  * 「BS のチューナーに空きがありません」と断られ続け、衛星の局ロゴは残りの 1 台を
  * 30 分ごとに番組表の取得に取り上げられて読み切れなかった。
@@ -44,8 +44,27 @@ public class SinkTests
         await Assert.That(TunerPool.IsPreempted("同期しません")).IsFalse();
     }
 
+    /// <summary>
+    /// **選局を共有する利用者どうしでは、先頭で待つ局をいちばん厳しい条件に合わせる** (<c>Lease.Services</c>)。
+    /// 局を決めない鍵の要る利用者 (録画) がいれば全部 (null)、ライブだけなら観る局を全部。鍵の要らない利用者は数えない
+    /// </summary>
     [Test]
-    public async Task ふつうに去っても1回だけ抜ける()
+    public async Task 共有する利用者のいちばん厳しい条件で局を待つ()
+    {
+        var lease = new Lease(0, "tuner0", "GR", "T27");
+        lease.Sinks.Add(new Sink("live GR/T27", 5, _ => { }) { Service = 1024 });
+        lease.Sinks.Add(new Sink("epg T27", 3, _ => { }));
+        await Assert.That(string.Join(",", lease.Services()!.Order())).IsEqualTo("1024");
+
+        lease.Sinks.Add(new Sink("live GR/T27", 5, _ => { }) { Service = 1025 });
+        await Assert.That(string.Join(",", lease.Services()!.Order())).IsEqualTo("1024,1025");
+
+        lease.Sinks.Add(new Sink("rec 12", 10, _ => { }));
+        await Assert.That(lease.Services()).IsNull();
+    }
+
+    [Test]
+    public async Task ふつうに去っても_1_回だけ抜ける()
     {
         var left = 0;
         var sink = new Sink("epg BS15:16625", 3, _ => left++);

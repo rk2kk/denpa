@@ -32,7 +32,7 @@ import { parseSearchFields, SEARCH_FIELDS } from "#lib/search.js";
 import { toHalfWidth } from "../fold";
 import { size as formatSize } from "../format";
 import type { Slot } from "../rule-time";
-import type { Recording } from "../types";
+import { ALL_CHANNEL_TYPES, type Recording } from "../types";
 import { config } from "./config";
 import { now, orm } from "./db";
 import { freeBytes } from "./disk";
@@ -59,6 +59,7 @@ import {
   services,
 } from "./schema";
 import { parseTitle } from "./title";
+import { busy as transferBusy, BUSY_MESSAGE } from "./transfer";
 
 export interface MigrateOptions {
   /** false なら何が起きるかを出すだけでファイルも DB も触らない */
@@ -287,7 +288,7 @@ export function chooseFile(recorded: EpgstationRecorded): VideoChoice | null {
     id: file.id,
     size: file.size,
     raw,
-    // 拡張子の無い名前で `lastIndexOf('.')` が -1 になると、末尾の 1 文字を拡張子と読んでしまう
+    // 拡張子の無い名前は、ファイルの種類から決める
     extension: extname(text(file["filename"])) || (raw ? ".m2ts" : ".mkv"),
   };
 }
@@ -412,9 +413,9 @@ async function importOne(
     return "missing";
   }
 
-  // 局は denpa の局から引く (EPGStation のチャンネル ID は denpa の局 ID と作り方が同じ)。知らない局なら名前だけ写す
+  // 局は denpa の局から引く (`serviceByChannel`)。知らない局なら名前だけ写す
   const channelId = isId(recorded.channelId) ? recorded.channelId : null;
-  const service = channelId === null ? undefined : serviceById(channelId);
+  const service = channelId === null ? undefined : serviceByChannel(channelId);
   const extended = isObject(recorded.rawExtended)
     ? Object.fromEntries(
         Object.entries(recorded.rawExtended).filter(
@@ -513,28 +514,49 @@ function historyImported(source: string): boolean {
 }
 
 /**
- * 局の内部 ID (`tuner.serviceKey`) で denpa の局を引く。知らない局なら undefined。
- * EPGStation のチャンネル ID は内部 ID と作り方が同じなのでそのまま、EDCB は ONID・SID から作って渡す
+ * 局を ONID・SID で引く。知らない局なら undefined。**アンテナの局を先に、無ければケーブルの局。**
+ * 引き継ぎ元は局を ONID・SID だけで持ち、アンテナとケーブルの再送信を分けない。
+ * denpa はケーブルの局の内部 ID だけをずらしている (`tuner.serviceKey`) ので、ID の小さいほうがアンテナの局
  */
-export function serviceById(
-  id: number,
+export function serviceOf(
+  networkId: number,
+  serviceId: number,
 ): { id: number; name: string } | undefined {
   return orm()
     .select({ id: services.id, name: services.name })
     .from(services)
-    .where(eq(services.id, id))
+    .where(
+      and(
+        eq(services.network_id, networkId),
+        eq(services.service_id, serviceId),
+      ),
+    )
+    .orderBy(services.id)
     .get();
 }
 
+/** EPGStation の ID を、下の 5 桁とそれより上に分ける。チャンネル ID は ONID×100000+SID、番組 ID はそれ×100000+event_id */
+function splitId(id: number): [upper: number, lower: number] {
+  const lower = id % 100000;
+  return [(id - lower) / 100000, lower];
+}
+
+/** EPGStation のチャンネル ID で denpa の局を引く (`serviceOf`) */
+function serviceByChannel(
+  channelId: number,
+): { id: number; name: string } | undefined {
+  return serviceOf(...splitId(channelId));
+}
+
 /** 引き継いだルールの値。優先度・`source`・作った時刻は {@link insertRule} が足す */
-type RuleValues = Omit<
+export type RuleValues = Omit<
   typeof rules.$inferInsert,
   "priority" | "source" | "created_at"
 >;
 
 /**
  * 引き継いだルールを入れる。**優先度は 1** (引き継ぎ元の優先度は比べる相手が違う)。
- * エンコードの設定は写さない。エンコードも CM も全体設定で、エンコードするときに読む
+ * エンコードの設定は写さない。エンコードは全体設定で、エンコードするときに読む
  */
 export function insertRule(values: RuleValues, source: string): void {
   orm()
@@ -545,14 +567,13 @@ export function insertRule(values: RuleValues, source: string): void {
 
 /**
  * 録画の履歴を 1 件入れる。**`sources` のどれかで取り込み済みなら飛ばす** (入れるときの `source` は先頭)。
- * 局の名前は denpa の局から引き、知らない局なら引き継ぎ元の名前 (`serviceName`) を写す。
+ * 局の名前 (`serviceName`) は、呼ぶ側が denpa の局から引き、知らない局なら引き継ぎ元の名前を渡す。
  * 下見なら件数だけ数える
  */
 export function addHistory(
   entry: {
     sources: readonly [string, ...string[]];
     name: string;
-    serviceId: number | null;
     serviceName: string;
     endAt: number;
   },
@@ -564,13 +585,11 @@ export function addHistory(
   }
   status_.history.imported++;
   if (!options.apply) return;
-  const service =
-    entry.serviceId === null ? undefined : serviceById(entry.serviceId);
   orm()
     .insert(recordedHistory)
     .values({
       name: entry.name,
-      service_name: service?.name ?? entry.serviceName,
+      service_name: entry.serviceName,
       end_at: entry.endAt,
       source: entry.sources[0],
     })
@@ -686,7 +705,7 @@ export function parseTimes(value: unknown): Slot | null {
  */
 export function convertRule(
   rule: EpgstationRule,
-  serviceOf: (id: number) => number | undefined,
+  serviceIdOf: (channelId: number) => number | undefined,
 ): { skip: string } | { values: RuleValues; notes: string[] } {
   const search: Record<string, unknown> = isObject(rule.searchOption)
     ? rule.searchOption
@@ -712,11 +731,9 @@ export function convertRule(
     return { skip: "検索期間のあるルールは取り込めません" };
   const times = parseTimes(search["times"]);
   if (times === null)
-    return { skip: "時間帯が 2 つ以上あるので取り込めません" };
+    return { skip: "時刻の違う時間帯が 2 つ以上あるので取り込めません" };
 
-  const types = (["GR", "BS", "CS", "SKY"] as const).filter((type) =>
-    flag(search[type]),
-  );
+  const types = ALL_CHANNEL_TYPES.filter((type) => flag(search[type]));
   if (flag(search["BS4K"])) {
     // 種別を空にすると全種別に当たる。BS4K だけで絞っていたルールは写せない
     if (types.length === 0)
@@ -727,7 +744,7 @@ export function convertRule(
   }
 
   const channelIds = list(search["channelIds"]).filter(isId);
-  const channels = channelIds.flatMap((id) => serviceOf(id) ?? []);
+  const channels = channelIds.flatMap((id) => serviceIdOf(id) ?? []);
   // 局を全部外すと全局に当たってしまう
   if (channelIds.length > 0 && channels.length === 0)
     return { skip: "局が 1 つも denpa に無いので取り込めません" };
@@ -784,7 +801,7 @@ function importRules(list_: EpgstationRule[], options: MigrateOptions): void {
       status_.rules.skipped++;
       continue;
     }
-    const converted = convertRule(rule, (id) => serviceById(id)?.id);
+    const converted = convertRule(rule, (id) => serviceByChannel(id)?.id);
     if ("skip" in converted) {
       record(`${converted.skip}: #${rule.id}`);
       status_.rules.skipped++;
@@ -803,7 +820,7 @@ function importRules(list_: EpgstationRule[], options: MigrateOptions): void {
  *
  * ルール由来の予約 (`ruleId` のあるもの) は、ルールを取り込んだあとに denpa が自分で立て直すので触らない。
  * 除外の印 (`isSkip`) のものも数えない。時刻だけの予約 (`isTimeSpecified`) は番組に結び付かないので飛ばす。
- * EPGStation の programId は denpa の番組 ID (`programKey`) と作り方が同じなので、直に照合できる。
+ * EPGStation の programId は ONID・SID・event_id から作る (`splitId`) ので、それで番組を引く。
  */
 async function importReservations(
   list_: EpgstationReserve[],
@@ -822,27 +839,41 @@ async function importReservations(
       status_.reservations.skipped++;
       continue;
     }
-    await importReservation(item.programId, name, options);
+    const [channelId, eventId] = splitId(item.programId);
+    await importReservation(
+      [...splitId(channelId), eventId],
+      name || String(item.programId),
+      options,
+    );
   }
 }
 
 /**
- * 番組 (`programId`) を予約して数える。番組表に無い・予約できないものは記録に残して飛ばす。
- * EDCB の取り込みも使う
+ * 番組を ONID・SID・event_id で引いて予約し、数える。番組表に無い・予約できないものは記録に残して飛ばす。
+ * 局と同じく**アンテナの局の番組を先に、無ければケーブルの局の番組** (`serviceOf`)。EDCB の取り込みも使う
  */
 export async function importReservation(
-  programId: number,
+  [networkId, serviceId, eventId]: [number, number, number],
   name: string,
   options: MigrateOptions,
 ): Promise<void> {
   const program = orm()
     .select({ id: programs.id })
     .from(programs)
-    .where(eq(programs.id, programId))
+    // programs.service_id は denpa の局 ID なので、SID は局の行で見る
+    .innerJoin(services, eq(services.id, programs.service_id))
+    .where(
+      and(
+        eq(services.network_id, networkId),
+        eq(services.service_id, serviceId),
+        eq(programs.event_id, eventId),
+      ),
+    )
+    .orderBy(programs.id)
     .get();
   if (program === undefined) {
     // 番組表を集める前だと出る。集めてからもう一度実行すれば入る
-    record(`番組表に無いので取り込めません: ${name || String(programId)}`);
+    record(`番組表に無いので取り込めません: ${name}`);
     status_.reservations.skipped++;
     return;
   }
@@ -882,8 +913,12 @@ function importRecordedHistory(
       {
         sources: [`epgstation:recorded:${item.id}`],
         name: text(item.name),
-        serviceId: channelId,
-        serviceName: channelId === null ? "" : (channels.get(channelId) ?? ""),
+        serviceName:
+          channelId === null
+            ? ""
+            : (serviceByChannel(channelId)?.name ??
+              channels.get(channelId) ??
+              ""),
         endAt: item.endAt,
       },
       options,
@@ -1195,8 +1230,9 @@ export async function start(
         message:
           "EPGStation v1 には対応していません。v2 か v3 にしてから実行してください",
       };
-    // 訊いている間に EDCB の引き継ぎが走り出していたら譲る (startEdcb と同じ)
+    // 訊いている間に EDCB の引き継ぎか、別の機械へ移す書き出し・取り込みが走り出していたら譲る (startEdcb と同じ)
     if (running()) return { started: false, message: "すでに実行中です" };
+    if (transferBusy()) return { started: false, message: BUSY_MESSAGE };
     controller = new AbortController();
     void runEpgstation(client, version, options, controller.signal);
     return {

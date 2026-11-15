@@ -1,7 +1,7 @@
 /**
  * 覚えておく場所 (NVRAM。`browser.readPersistentArray("nvram://local_web/0", "S:16B")`)。
  *
- * 放送が使う領域 (地上波は TR-B14 第二分冊 5.2、BS は TR-B15):
+ * 放送が使う領域は次のとおり (地上波は TR-B14 第二分冊 5.2、BS は TR-B15)。
  *
  * | URI | 誰のものか | ブロック |
  * | --- | --- | --- |
@@ -86,6 +86,10 @@ export function visibleFrom(key: string, who: Who): boolean {
     scope === scopeOf(area.scope, who)
   );
 }
+
+/** 受信機の設定で読めるもの (`Nvram` の `bytes`) */
+const RECEIVER_INFO =
+  /^nvram:\/\/receiverinfo\/(zipcode|prefecture|regioncode)$/;
 
 export class Nvram {
   constructor(
@@ -186,8 +190,8 @@ export class Nvram {
 
   /** `checkAccessInfoOfPersistentArray`。2 読み書き・1 読むだけ・NaN 使えない */
   check(uri: string): number {
-    // 受信機の設定は読むだけ (郵便番号は denpa の設定から渡す)
-    if (uri.startsWith("nvram://receiverinfo/")) return 1;
+    // 受信機の設定は読むだけ (郵便番号は denpa の設定から渡す)。読めるのは `bytes` が持つ 3 つ
+    if (RECEIVER_INFO.test(uri.trim())) return 1;
     return this.key(uri) === null ? Number.NaN : 2;
   }
 }

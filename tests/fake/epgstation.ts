@@ -11,14 +11,14 @@
  */
 
 /** 振る舞いを変えるつまみ。テストから途中で変える */
-export interface FakeMode {
+interface FakeMode {
   /** `/api/version` が返すもの。`2.10.0` (v2)・`3.0.0-beta4` (v3)・`1.7.6` (v1) など */
   version: string;
   /** ファイルを送るとき、この長さを送ったところで接続を切る (null なら切らない) */
   cutAt: number | null;
   /** 切るのは最初の何回か。0 なら切らない (取り直しが通るかを見る) */
   cutTimes: number;
-  /** Range を無視していつも頭から全部送る (Range を落とすプロキシの代わり) */
+  /** Range を無視していつも先頭から全部送る (Range を落とすプロキシの代わり) */
   ignoreRange: boolean;
   /** 送る中身をこれだけ短くする (`/recorded` の size とは食い違う)。ヘッダも短いほうに合わせる */
   shortBy: number;
@@ -32,11 +32,11 @@ export interface FakeMode {
   drift: boolean;
   /** ルールを足して、ページ送りが要る数にする */
   extraRules: number;
-  /** ルールの一覧で offset を無視して、いつも頭のページを返す */
+  /** ルールの一覧で offset を無視して、いつも先頭のページを返す */
   ignoreOffset: boolean;
 }
 
-export const DEFAULT_MODE: FakeMode = {
+const DEFAULT_MODE: FakeMode = {
   version: "3.0.0-beta4",
   cutAt: null,
   cutTimes: 0,
@@ -53,7 +53,7 @@ export const DEFAULT_MODE: FakeMode = {
 /** denpa の偽の放送にある局 (TOKYO MX。`tests/fake/services.ts`) */
 export const KNOWN_CHANNEL = 3239123608;
 /** denpa の知らない局。名前は `/channels` から写す */
-export const UNKNOWN_CHANNEL = 3273601024;
+const UNKNOWN_CHANNEL = 3273601024;
 
 const START = Date.UTC(2026, 8, 1, 12, 0, 0);
 const MINUTE = 60_000;
@@ -68,7 +68,7 @@ export const VIDEO_FILES = {
   21: { size: 160 * 1024, filename: "引き継ぎテスト #2.m2ts" },
 } as const;
 
-export function byteAt(fileId: number, index: number): number {
+function byteAt(fileId: number, index: number): number {
   return (index * 31 + fileId * 7) & 0xff;
 }
 
@@ -319,7 +319,7 @@ function page<T>(
   return { items: list.slice(offset, offset + limit), total: list.length };
 }
 
-export interface FakeEpgstation {
+interface FakeEpgstation {
   url: string;
   mode: FakeMode;
   /** 受けたファイルのリクエスト (Range ヘッダ。無ければ null) */

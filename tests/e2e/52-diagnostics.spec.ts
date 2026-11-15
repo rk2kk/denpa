@@ -24,7 +24,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await expect(page).toHaveTitle("その他 - 設定 - denpa");
 
     await expect(page.getByTestId("diag-version")).not.toBeEmpty();
-    await expect(page.getByTestId("diag-tuners")).toContainText("(GR");
+    await expect(page.getByTestId("diag-tuners")).toContainText("(地上波");
     await expect(page.getByTestId("diag-card")).toContainText(
       "Fake Card Reader (usb 1-1) (使用中)",
     );
@@ -64,7 +64,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
   });
 
   /** スマホでは、ログの押すものと絞り込みを 1 行にまとめ、節へ飛ぶ行のすぐ上に浮かべる (docs/design.md の「浮かせ方」) */
-  test("スマホではログの操作と絞り込みが下の1行に出る", async ({ page }) => {
+  test("スマホではログの操作と絞り込みが下の 1 行に出る", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await goto(page, "/settings/general#logs");
 
@@ -113,19 +113,20 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await expect(logs).not.toHaveValue(/192\.168\.10\.20/);
     await expect(logs).not.toHaveValue(/card-host/);
     await expect(logs).toHaveValue(/--- サーバのログ/);
-    await expect(logs).toHaveValue(/--- エージェントのログ/);
+    // エージェントは名前を付けて 1 台ずつ (名前のホスト名も伏せる)
+    await expect(logs).toHaveValue(/--- エージェント「[^」]+」のログ/);
     const environment = dialog.getByTestId("issue-field-environment");
     await expect(environment).toHaveValue(/チューナー: /);
     await expect(environment).toHaveValue(/ブラウザ: /);
     await expect(environment).toHaveValue(
-      /エージェント: v1\.0\.0・Linux 6\.12\.0-fake #1 SMP \(x64\)/,
+      /エージェント「[^」]+」: v1\.0\.0・Linux 6\.12\.0-fake #1 SMP \(x64\)/,
     );
 
     const issueUrl = async () =>
       new URL((await dialog.getByTestId("issue-open").getAttribute("href"))!);
     /*
      * 開いたときのログの欄は、URL に入るぶんだけ選んであるので、そのまま入る。
-     * タイトルを書き足したあとは、サーバのログが多ければ頭の行が削られる (下の「ログが長くても」が見る)
+     * タイトルを書き足したあとは、サーバのログが多ければ先頭の行が削られる (下の「ログが長くても」が見る)
      */
     expect((await issueUrl()).searchParams.get("logs")).toBe(
       await logs.inputValue(),
@@ -147,7 +148,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     );
     // 削られても、残りは欄の終わりのほうそのまま
     const [head, ...rest] = url.searchParams.get("logs")!.split("\n");
-    const kept = /^\(長いので頭の \d+ 行を省きました\)$/.test(head!)
+    const kept = /^\(長いので先頭の \d+ 行を省きました\)$/.test(head!)
       ? rest
       : [head, ...rest];
     expect((await logs.inputValue()).endsWith(kept.join("\n"))).toBe(true);
@@ -191,7 +192,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     // 選べない長さでも、エラーの行 (50 行ごと) はふつうの行より先に入る
     expect(logs).toContain("偽チューナー1950: 選局できません");
 
-    // 書き足して上限を超えたら、頭から削って収める
+    // 書き足して上限を超えたら、先頭から削って収める
     await dialog
       .getByTestId("issue-field-logs")
       .fill(
@@ -231,9 +232,11 @@ test.describe("設定のバージョンと環境・ログ", () => {
       .getByTestId("issue-dialog")
       .getByTestId("issue-field-environment");
     await expect(environment).toHaveValue(
-      /エージェント: v0\.9\.0 \(denpa とバージョンが違います\)・Darwin 25\.0\.0 .*\(arm64\)/,
+      /エージェント「[^」]+」: v0\.9\.0 \(denpa とバージョンが違います\)・Darwin 25\.0\.0 .*\(arm64\)/,
     );
-    await expect(environment).toHaveValue(/CCID ドライバ: macOS の標準のもの/);
+    await expect(environment).toHaveValue(
+      /CCID ドライバ「[^」]+」: macOS の標準のもの/,
+    );
   });
 
   test("エージェントからログを取れなくても、一言出して画面は止めない", async ({
@@ -259,7 +262,7 @@ test.describe("設定のバージョンと環境・ログ", () => {
     await expect(
       page.getByTestId("issue-dialog").getByTestId("issue-field-logs"),
     ).toHaveValue(
-      /--- エージェントのログ \(0 行\) ---\n\(エージェントからログを取得できません \(500\)\)/,
+      /--- エージェント「[^」]+」のログ \(0 行\) ---\n\(エージェントからログを取得できません \(500\)\)/,
     );
   });
 });

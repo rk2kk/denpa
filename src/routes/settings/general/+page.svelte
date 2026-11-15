@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { enhance, type SubmitFunction } from "$app/forms";
+  import { enhance } from "$app/forms";
   import { resolve } from "$app/paths";
 
-  import { submitting } from "#lib/actions.js";
   import { arming } from "#lib/arming.svelte.js";
+  import ArmedDelete from "#lib/components/ArmedDelete.svelte";
   import Lead from "#lib/components/Lead.svelte";
   import Toasts, { errorNotice } from "#lib/components/Toasts.svelte";
-  import { dateTime } from "#lib/format.js";
+  import { dateTime, typeNames } from "#lib/format.js";
   import { liveTuner } from "#lib/live-tuner.svelte.js";
+  import { held } from "#lib/live-updates.svelte.js";
   import { measure } from "#lib/measure.svelte.js";
+  import type { Outcome } from "#lib/server/logo.js";
   import {
     theme,
     THEME_LABEL,
@@ -20,13 +22,58 @@
 
   let { data, form } = $props();
 
+  /**
+   * ロゴの記録の終わり方 (`logo.ts` の `Outcome`) を画面の言葉で。終わり方を足したら型で落ちる。
+   * 記録は DB に残るので、前のバージョンが書いた知らない値はそのまま出す
+   */
+  const OUTCOME_WORDS: Record<Outcome, string> = {
+    done: "読み切った",
+    miss: "ロゴの無い中継",
+    ranOut: "上限まで開いた",
+    yielded: "譲った",
+    busy: "空きが無い",
+    stopped: "止めた",
+  };
+  function outcomeWord(outcome: string): string {
+    return Object.hasOwn(OUTCOME_WORDS, outcome)
+      ? OUTCOME_WORDS[outcome as Outcome]
+      : outcome;
+  }
+
   // この端末で覚えている名指しを読む (サーバには置かない)
   $effect(() => liveTuner.load());
 
-  // 覚えている名指しが一覧に無い (チューナーを外した、エージェントに繋がらない)
+  /**
+   * ライブのチューナーの選択肢。無効なものは出さない。画面を先に出し、エージェントの答えが届いたら入れる
+   * (「バージョンと環境」のチューナーと同じ 1 回の問い合わせ。届くまでは `undefined`)
+   */
+  const tuners = held(() => data.tuners);
+  const liveTuners = $derived(
+    (tuners.value?.list ?? []).filter((tuner) => !tuner.disabled),
+  );
+
+  /** 選択肢をエージェントごとにまとめたもの (一覧の並び = エージェントの並び) */
+  const agentGroups = $derived.by(() => {
+    const groups: {
+      agent: number;
+      name: string;
+      tuners: typeof liveTuners;
+    }[] = [];
+    for (const tuner of liveTuners) {
+      let group = groups.find((g) => g.agent === tuner.agent);
+      if (group === undefined) {
+        group = { agent: tuner.agent, name: tuner.agentName, tuners: [] };
+        groups.push(group);
+      }
+      group.tuners.push(tuner);
+    }
+    return groups;
+  });
+
+  // 覚えている名指しが一覧に無い (チューナーを外した、エージェントに繋がらない)。届く前は「一覧にありません」を付けない
   const unlisted = $derived(
     liveTuner.pin !== null &&
-      !data.liveTuners.some((tuner) => tuner.pin === liveTuner.pin),
+      !liveTuners.some((tuner) => tuner.pin === liveTuner.pin),
   );
 
   const notices = $derived.by(() => {
@@ -45,14 +92,10 @@
   });
 
   /**
-   * **2 回押させる** (削除と同じ `arming`)。押し間違えると、家族の端末まで入り直しになる。
-   * 押す場所は 1 つなので、`arm` に渡す値は 0 で足りる
+   * **2 回押させる** (削除と同じ `arming` と `ArmedDelete`)。押し間違えると、家族の端末まで入り直しになる。
+   * 押す場所は 1 つなので、`armKey` は 0 で足りる
    */
   const confirming = arming('[data-testid^="logout-others"]');
-  const sent: SubmitFunction = () => async (options) => {
-    await options.update();
-    confirming.fire();
-  };
 </script>
 
 <svelte:window onclick={confirming.stand} />
@@ -88,7 +131,7 @@
         {/each}
       </select>
       <Lead>
-        この端末だけの設定です。「端末に合わせる」は端末の明暗の設定に付いていきます
+        この端末だけの設定です。「端末に合わせる」は端末の明暗の設定に合わせて切り替わります
       </Lead>
     </section>
     <!--
@@ -117,7 +160,7 @@
         {#snippet more()}
           <p>
             <strong>この端末だけ</strong
-            >の設定で、サーバにも他の端末にも伝わりません。
+            >の設定で、サーバにもほかの端末にも伝わりません。
           </p>
           <p>
             出るのは「窓 / 枠 / 中身 = はみ出し」「dvh / svh / lvh / vh
@@ -150,13 +193,20 @@
         <!-- 覚えている名指しが一覧に無いとき (チューナーを外した、エージェントに繋がらない) は、効いたまま「自動」に見せない -->
         {#if unlisted}
           <option value={liveTuner.pin} selected
-            >{liveTuner.pin} (一覧にありません)</option
+            >{liveTuner.pin}{tuners.value === undefined
+              ? ""
+              : " (一覧にありません)"}</option
           >
         {/if}
-        {#each data.liveTuners as tuner (tuner.pin)}
-          <option value={tuner.pin} selected={liveTuner.pin === tuner.pin}
-            >{tuner.name} ({tuner.types.join("・")})</option
-          >
+        <!-- エージェントごとに見出しを付けて分ける (1 台でも付ける。設定の「チューナー」の表と同じ形) -->
+        {#each agentGroups as group (group.agent)}
+          <optgroup label={group.name}>
+            {#each group.tuners as tuner (tuner.pin)}
+              <option value={tuner.pin} selected={liveTuner.pin === tuner.pin}
+                >{tuner.name} ({typeNames(tuner.types)})</option
+              >
+            {/each}
+          </optgroup>
         {/each}
       </select>
       <Lead>
@@ -165,7 +215,7 @@
         {#snippet more()}
           <p>
             <strong>この端末だけ</strong
-            >の設定で、サーバにも他の端末にも伝わりません。録画と番組表の取得は、これまでどおりエージェントが選びます。
+            >の設定で、サーバにもほかの端末にも伝わりません。録画と番組表の取得は、これまでどおりエージェントが選びます。
           </p>
           <p>
             放送の種別を受けられないチューナーを選んだ局は、選局できません。同じ局をほかの人が「自動」で見ているときも、共有せずにこのチューナーで選局し直します。
@@ -237,7 +287,9 @@
           {#each data.logoRecords as record (record.id)}
             <li data-testid="logo-record-row">
               <span>{dateTime(record.started_at)}</span>
-              {record.channel}・{Math.round(record.opened_ms / 60_000)} 分・{record.outcome}・ロゴのデータ
+              {record.channel}・{Math.round(record.opened_ms / 60_000)} 分・{outcomeWord(
+                record.outcome,
+              )}・ロゴのデータ
               {record.es_packets} パケット・ダウンロードの通知 {record.sdtt} 回・{record.found}
               局
             </li>
@@ -279,24 +331,15 @@
         </form>
 
         <div class="others">
-          <form method="POST" action="?/logoutOthers" use:submitting={sent}>
-            {#if confirming.armed === 0}
-              <button
-                type="submit"
-                class="small danger"
-                data-testid="logout-others-confirm">ログアウトを確定</button
-              >
-            {:else}
-              <button
-                type="button"
-                class="small outline danger"
-                onclick={() => confirming.arm(0)}
-                data-testid="logout-others"
-              >
-                ほかの端末からもログアウト
-              </button>
-            {/if}
-          </form>
+          <ArmedDelete
+            deleting={confirming}
+            armKey={0}
+            action="?/logoutOthers"
+            class="small"
+            testid="logout-others"
+            label="ほかの端末からもログアウト"
+            confirmLabel="ログアウトを確定"
+          />
           <Lead>
             <span>
               {data.others === 0

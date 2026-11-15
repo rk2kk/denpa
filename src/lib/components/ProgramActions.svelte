@@ -2,12 +2,12 @@
   import type { SubmitFunction } from "$app/forms";
   import { resolve } from "$app/paths";
 
-  import { submitting } from "#lib/actions.js";
+  import ActionButton from "#lib/components/ActionButton.svelte";
   import { cancelable } from "#lib/format.js";
 
   /**
-   * **番組の詳細の下に並べるボタン** (番組表と検索。`ProgramDetail` の `actions` に入れる)。
-   * どちらも同じ番組の詳細なので、何を出すか・どれを主にするかをここ 1 か所で決める。
+   * **番組の詳細の下に並べるボタン** (番組表・検索・ホームの予約。`ProgramDetail` の `actions` に入れる)。
+   * どれも同じ番組の詳細なので、何を出すか・どれを主にするかをここ 1 か所で決める。
    *
    * - **並びは控えから主へ。** ルールを作る → 予約取消 → 視聴 → 再生 → 予約。主 (クラスの無いボタン) は
    *   いちばん右 (狭い画面では下の段の右端)。閉じるは左下 (`ProgramDetail`)
@@ -21,6 +21,7 @@
     cancel,
     recordingId = null,
     watchable,
+    refusal = null,
     clock,
     message = null,
     onsubmit,
@@ -34,12 +35,17 @@
       reservation_state: string | null;
       copy_never: boolean;
     };
-    /** 予約取消 (`?/cancel`) に一緒に送る隠し欄。番組表は番組の ID、検索は予約の ID */
+    /** 予約取消 (`?/cancel`) に一緒に送る隠し欄。番組表は番組の ID、検索とホームは予約の ID */
     cancel: Record<string, number>;
     /** 録れていてそのまま観られる録画 (`playableRecordingId`)。無ければ null */
     recordingId?: number | null;
     /** ライブ画面が持っている局か */
     watchable: boolean;
+    /**
+     * 番組表に出すが観られない局 (番組表を読めるが復号できない局) なら、そのわけ (`types.undecodableReason`)。
+     * 予約と視聴のボタンの代わりにこの文を出す (押しても断るだけ)。観られる局なら null
+     */
+    refusal?: string | null;
     /** いまの時刻 (画面の時計。分で刻む) */
     clock: number;
     /** この番組の詳細から送って断られた理由。無ければ null */
@@ -55,7 +61,10 @@
    * 押した先で別の局が映る (分割放送をしていない間のサブチャンネル)
    */
   const canWatch = $derived(
-    program.start_at <= clock && program.end_at > clock && watchable,
+    refusal === null &&
+      program.start_at <= clock &&
+      program.end_at > clock &&
+      watchable,
   );
   const canCancel = $derived(
     // サーバの取消 (`reservations.cancelProgram`) と同じ判定。録画中は止めて、そこまでを残す
@@ -63,7 +72,8 @@
   );
   /** 録画のしかたは選ばせない (`reservations.reserve`)。コピー禁止の番組には出さない (押しても断るだけ。理由は詳細の「コピー禁止」) */
   const canReserve = $derived(
-    !canCancel &&
+    refusal === null &&
+      !canCancel &&
       program.reservation_state === null &&
       program.end_at > clock &&
       !program.copy_never,
@@ -75,6 +85,11 @@
 
 {#if message !== null}
   <div class="notice error" data-testid="detail-refused">{message}</div>
+{/if}
+
+{#if refusal !== null}
+  <!-- 観られない局。予約と視聴のボタンを出さないわけを、ボタンの並びの場所で言う -->
+  <div class="notice info" data-testid="detail-unwatchable">{refusal}</div>
 {/if}
 
 <!--
@@ -91,14 +106,13 @@
 
 {#if canCancel}
   <!-- 予約したあと詳細から止められないと、わざわざ予約一覧まで行くことになる -->
-  <form method="POST" action="?/cancel" use:submitting={onsubmit}>
-    {#each Object.entries(cancel) as [name, value] (name)}
-      <input type="hidden" {name} {value} />
-    {/each}
-    <button type="submit" class="danger outline" data-testid="detail-cancel"
-      >予約取消</button
-    >
-  </form>
+  <ActionButton
+    action="?/cancel"
+    fields={cancel}
+    submit={onsubmit}
+    class="danger outline"
+    testid="detail-cancel">予約取消</ActionButton
+  >
 {/if}
 
 {#if canWatch}
@@ -125,8 +139,10 @@
 {/if}
 
 {#if canReserve}
-  <form method="POST" action="?/reserve" use:submitting={onsubmit}>
-    <input type="hidden" name="programId" value={program.id} />
-    <button type="submit" data-testid="detail-reserve">予約</button>
-  </form>
+  <ActionButton
+    action="?/reserve"
+    fields={{ programId: program.id }}
+    submit={onsubmit}
+    testid="detail-reserve">予約</ActionButton
+  >
 {/if}

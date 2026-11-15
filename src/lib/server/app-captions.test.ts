@@ -1,5 +1,14 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -12,13 +21,14 @@ import {
 
 import { CHANNEL } from "#lib/live.js";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * アプリ向けの字幕 API (`liveCaptions` / `recordingCaptions`)。
  *
- * ffmpeg は偽物に差し替える。偽物は入口の見出しを標準エラーへ書き、標準入力を読み切ってから、
- * 字幕を写した Matroska (`S_ARIBSUB`。ffmpeg が `-c:s copy` で書くのと同じ骨組み) を字幕の出口 (fd 3) へ流す。
+ * ffmpeg は偽物に差し替える。偽物は入力の見出しを標準エラーへ書き、標準入力を読み切ってから、
+ * 字幕を写した Matroska (`S_ARIBSUB`。ffmpeg が `-c:s copy` で書くのと同じ骨組み) を字幕の出力 (fd 3) へ流す。
  * DB は一時ファイルへ (encoder-pump.test.ts と同じ理由で、設定そのものを書き換える)
  */
 const dir = mkdtempSync(join(tmpdir(), "denpa-appcap-"));
@@ -51,6 +61,8 @@ const SERVICE = 990_007;
 const RECORDING = 990_001;
 /** 録っている最中の録画 (書き足しを待ち続けるので、字幕の ffmpeg が終了しない) */
 const RECORDING_NOW = 990_002;
+/** 録っている最中の録画。ffmpeg を起こせないときの後片付けを見る (ほかのテストと別のファイルを読む) */
+const RECORDING_FAILING = 990_003;
 
 const MKV = join(dir, "captions.mkv");
 writeFileSync(
@@ -79,6 +91,7 @@ config.ffmpeg = FAKE;
 
 const { eq } = await import("drizzle-orm");
 const { orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { recordings, services } = await import("./schema");
 const { CAPTION_PER_RECORDING, liveCaptions, liveStream, recordingCaptions } =
   await import("./live");
@@ -86,8 +99,11 @@ const { CAPTION_PER_RECORDING, liveCaptions, liveStream, recordingCaptions } =
 const TS = join(dir, "rec.ts");
 // 188 バイトの塊が 100 個 (中身は見ない)
 writeFileSync(TS, new Uint8Array(188 * 100).fill(0x47));
+const TS_FAILING = join(dir, "rec-failing.ts");
+writeFileSync(TS_FAILING, new Uint8Array(188 * 100).fill(0x47));
 orm().delete(recordings).where(eq(recordings.id, RECORDING)).run();
 orm().delete(recordings).where(eq(recordings.id, RECORDING_NOW)).run();
+orm().delete(recordings).where(eq(recordings.id, RECORDING_FAILING)).run();
 orm().delete(services).where(eq(services.id, SERVICE)).run();
 orm()
   .insert(services)
@@ -97,10 +113,10 @@ orm()
     network_id: 4,
     name: "テスト局",
     type: "GR",
-    channel: "T27",
     updated_at: 0,
   })
   .run();
+placeServices([{ id: SERVICE, channel: "T27" }]);
 const now = Date.now();
 orm()
   .insert(recordings)
@@ -128,6 +144,19 @@ orm()
     created_at: now - 60_000,
     updated_at: now,
     ts_path: TS,
+  })
+  .run();
+orm()
+  .insert(recordings)
+  .values({
+    id: RECORDING_FAILING,
+    service_id: SERVICE,
+    name: "録画中",
+    start_at: now - 60_000,
+    end_at: now + 60_000,
+    created_at: now - 60_000,
+    updated_at: now,
+    ts_path: TS_FAILING,
   })
   .run();
 
@@ -193,7 +222,44 @@ describe("録画の字幕 (recordingCaptions)", () => {
   test("無い録画は null", () => {
     expect(recordingCaptions(RECORDING + 100, 0)).toBeNull();
   });
+
+  /*
+   * ffmpeg を起こせなかったとき、読み始めた録画 (`followFile`) が残っていた。録っている最中の録画は
+   * 書き足しを待ち続けるので、残るとファイルを開いたままずっと読む
+   */
+  test.skipIf(!existsSync("/proc/self/fd"))(
+    "ffmpeg を起こせなければ、読み始めた録画を閉じる",
+    async () => {
+      const path = realpathSync(TS_FAILING);
+      config.ffmpeg = join(dir, "no-such-ffmpeg");
+      let failure = "";
+      try {
+        // 投げたものは、作るところか読むところのどちらかで受け取る
+        await recordingCaptions(RECORDING_FAILING, 0)?.getReader().read();
+      } catch (error) {
+        failure = String(error);
+      } finally {
+        config.ffmpeg = FAKE;
+      }
+      expect(failure).not.toBe("");
+      // 開くのは非同期。閉じていなければ開いたまま残る
+      await Bun.sleep(200);
+      for (let i = 0; i < 50 && opened(path); i++) await Bun.sleep(20);
+      expect(opened(path)).toBe(false);
+    },
+  );
 });
+
+/** このプロセスが `path` を開いているか (Linux の /proc から) */
+function opened(path: string): boolean {
+  return readdirSync("/proc/self/fd").some((fd) => {
+    try {
+      return readlinkSync(`/proc/self/fd/${fd}`) === path;
+    } catch {
+      return false;
+    }
+  });
+}
 
 describe("ライブの字幕 (liveCaptions)", () => {
   // 共有する相手 (放送そのままのセッション) が無ければ自分では起動しない。チューナーを字幕のためだけに使わない
@@ -208,6 +274,8 @@ describe("ライブの字幕 (liveCaptions)", () => {
     const media = liveStream(SERVICE, "raw") as ReadableStream<Uint8Array>;
     const first = liveCaptions(SERVICE);
     expect(first).not.toBeNull();
+    // 放送のままを替えていないセッションには、変換した形式の字幕では繋がない (時刻が違う)
+    expect(liveCaptions(SERVICE, 1, "hevc")).toBeNull();
     await first!.cancel();
     // 映像はまだ流れている (同じセッションをもう一度共有できる)
     const second = liveCaptions(SERVICE);

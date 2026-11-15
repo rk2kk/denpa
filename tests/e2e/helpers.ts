@@ -7,11 +7,11 @@ import type {
   Page,
 } from "@playwright/test";
 
-import { expect, keepH264, test } from "../stack";
+import { expect, liveWithoutMpeg2, test } from "../stack";
 
 // テストは必ずここから test / expect を取る。素の @playwright/test から取ると
 // ワーカーごとのアプリ (tests/stack.ts) が立たず、宛先も決まらない
-export { expect, keepH264, test };
+export { expect, liveWithoutMpeg2, test };
 
 /**
  * ページを開いてハイドレーション完了まで待つ。
@@ -72,10 +72,65 @@ export async function syncEpg(request: APIRequestContext): Promise<void> {
 }
 
 /**
- * 検索の結果の行の、放送の始まり (`10/22(木) 21:30〜22:00` の頭)。年は出ないので、いまに近いほうの年にする
+ * テレビのアプリと同じようにペアリングしてアクセストークンを受け取る (31-device と同じ手順)。
+ * 普段のスタックはローカルを信頼しているので、`/device` はログインなしで済ませられる
+ */
+export async function pairToken(
+  request: APIRequestContext,
+  name: string,
+): Promise<string> {
+  const code = await (
+    await request.post("/api/device/code", { data: { name } })
+  ).json();
+  expect(
+    (await request.post("/device", { form: { code: code.userCode } })).ok(),
+  ).toBe(true);
+  const { token } = await (
+    await request.post("/api/device/token", {
+      data: { deviceCode: code.deviceCode },
+    })
+  ).json();
+  expect(token).toMatch(/^denpa_/);
+  return token;
+}
+
+/**
+ * フォームの action をアクセストークン付きで送り、断られることを確かめる (`tokenRefusal`。403)。
+ * 画面と同じ送り方 (`use:enhance` の `x-sveltekit-action`) で送り、返ってくる JSON の `status` を見る
+ */
+export async function expectTokenRefused(
+  request: APIRequestContext,
+  token: string,
+  origin: string,
+  action: string,
+  form: Record<string, string> = {},
+): Promise<void> {
+  const res = await request.post(`/settings/integrations?/${action}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      origin,
+      accept: "application/json",
+      "x-sveltekit-action": "true",
+    },
+    form,
+  });
+  const body = await res.json();
+  expect(body, action).toMatchObject({ type: "failure", status: 403 });
+  expect(body.data, action).toContain("アクセストークンでは使えません");
+}
+
+/** "HH:MM" の minutes 分あと (ライブの番組の時間帯が延びたのを比べる) */
+export function later(clock: string, minutes: number): string {
+  const [hours, mins] = clock.split(":").map(Number);
+  const total = ((hours ?? 0) * 60 + (mins ?? 0) + minutes) % (24 * 60);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/**
+ * 検索の結果の行の、放送の始まり (`10/22(木) 21:30〜22:00` の先頭)。年は出ないので、いまに近いほうの年にする
  * (画面もテストも TZ=Asia/Tokyo)。
  *
- * **行は放送中のものから並ぶ。** 頭の行を予約するとその場で録り始め、「録る」かどうかも「放送中」に変わる。
+ * **行は放送中のものから並ぶ。** 先頭の行を予約するとその場で録り始め、「録る」かどうかも「放送中」に変わる。
  * BS11 は 5 秒の番組なので、すぐ始まる行も同じ。先の放送を選ぶのに使う
  */
 export function searchRowStart(text: string): number {
@@ -175,7 +230,7 @@ async function turnDay(
   await guideDrawn(page);
 }
 
-/** 番組表に出ているうち、もう終わったもの。放送日の頭(4 時台)では前日に送って探す */
+/** 番組表に出ているうち、もう終わったもの。放送日の先頭(4 時台)では前日に送って探す */
 export async function past(page: Page): Promise<Cell[]> {
   const stale = (cells: Cell[]) =>
     cells.filter((c) => c.startAt < Date.now() - 60 * 60 * 1000);
@@ -240,7 +295,7 @@ export async function shownDay(page: Page): Promise<string> {
 }
 
 /**
- * ブラウザの時計を、今日の番組表の頭 (日本時間の 4:00) から `hours` 時間あとに止める。
+ * ブラウザの時計を、今日の番組表の先頭 (日本時間の 4:00) から `hours` 時間あとに止める。
  *
  * 番組表は開くと「いま」を表の 4 分の 1 あたりへ送るので、表のどこが映るかは時刻で変わる。
  * 夜遅くは表の最後に近く、下へ送れる量が足りない (390×844 では 0:30 から表の最後に着いている)。
@@ -364,7 +419,6 @@ export async function setRecording(
   patch: {
     /** エンコードするコーデック。いくつもエンコードするなら `["av1", "hevc", "h264"]`、エンコードしないなら `[]`。省けば av1 */
     codecs?: string[];
-    cmCut?: string;
     keepOriginal?: boolean;
     /** その場で変換する本数の上限 (空は自動)。省けば前のまま */
     transcodeLimit?: string;
@@ -384,13 +438,7 @@ export async function setRecording(
   if (patch.keepOriginal === true) encoding.append("keepOriginal", "on");
   if (patch.transcodeLimit !== undefined)
     encoding.append("transcodeLimit", patch.transcodeLimit);
-  // 画面では節ごとにフォームが分かれている (エンコード・CM)。同じ 2 つを投げる
   await saveRecordingPart(request, "saveEncoding", encoding);
-  await saveRecordingPart(
-    request,
-    "saveCm",
-    new URLSearchParams({ cmCut: patch.cmCut ?? "chapter" }),
-  );
 }
 
 /** 偽 ffmpeg がエンコードしていた 1 回 (`stack.encodeSpansFile`)。`end` が null なら終わらなかった (止められた) */
@@ -612,7 +660,7 @@ export async function wakeControls(page: Page, stage: string): Promise<void> {
 
 /**
  * GPU で描ける端末として開く。E2E のブラウザは GPU を切っていて `<html data-lite>` が付く (`#lib/lite.ts`) ので、
- * WebGL の描き手の名前を差し替える。時間で動き続けるもの (アンビエントの光など) を回したまま見るテストで使う
+ * WebGL のレンダラの名前を差し替える。時間で動き続けるもの (アンビエントの光など) を回したまま見るテストで使う
  */
 export async function pretendGpu(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -1118,7 +1166,7 @@ export async function captureSockets(page: Page): Promise<void> {
 }
 
 /**
- * **データ放送の通知を流す** (`CHANNEL.data` = 0x30 + 多重化の頭 8 バイト + JSON。時刻は 0)。
+ * **データ放送の通知を流す** (`CHANNEL.data` = 0x30 + 多重化の先頭 8 バイト + JSON。時刻は 0)。
  * `captureSockets` してから開いた画面で、エンジンができてから呼ぶ (`fakeDataBroadcast` など)
  */
 export async function feedData(
@@ -1145,7 +1193,7 @@ export async function feedNotice(
   );
 }
 
-/** 最後に開いた WebSocket に、チャンネル番号 + 多重化の頭 8 バイト (時刻 0) + JSON の通知を流す */
+/** 最後に開いた WebSocket に、チャンネル番号 + 多重化の先頭 8 バイト (時刻 0) + JSON の通知を流す */
 async function feedFrames(
   page: Page,
   frames: (readonly [number, string])[],

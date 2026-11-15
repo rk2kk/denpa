@@ -18,6 +18,7 @@ import { duplicateReason } from "../format";
 import { hasTime, inTime, jstOf } from "../rule-time";
 import { parseSearchFields, type SearchField } from "../search";
 import type { Program, Rule } from "../types";
+import { shareKey } from "./agent-channels";
 import { config } from "./config";
 import { paidAllowed } from "./contracts";
 import { now, orm } from "./db";
@@ -414,7 +415,7 @@ const DECLINE_WINDOW = 10 * 60 * 1000;
 export function canceledBroadcasts(at: number): Declined {
   const rows = orm()
     .select({
-      channel: services.channel,
+      channel: shareKey(),
       name: reservations.name,
       start_at: reservations.start_at,
     })
@@ -655,6 +656,39 @@ function episodeSkips<T extends Candidate>(
 }
 
 /**
+ * **同じ放送は 1 本だけ。** 同じ物理チャンネルの中で、同じ時刻に同じ番組名が
+ * 流れていたら同じ放送とみなし、いちばん小さい局だけを残す (並びはそのまま)。
+ * 予約を立てるとき (`applyRules`) と下見 (`rule-preview.ts`) で同じものを使う。
+ *
+ * 局は分割放送のために枝番を持っていて (TOKYO MX なら 23608 / 23609、
+ * どちらも名前は「TOKYO MX1」)、**分割していない間は同じ番組が両方に載る**。
+ * 素通しにしていた実機では、同じ回が 2 本録れたうえに、2 つのエンコードが
+ * 同じ名前のファイルへ同時に書いて中身が壊れた。
+ *
+ * 中身が違うとき (MX1 と MX2 で別番組) はタイトルが違うので、両方残る。
+ *
+ * **終了時刻はキーに入れない。** 延長は枝番ごとに別々のタイミングで届く
+ * (EIT p/f は局ごと) ので、片方だけ `end_at` が動いた回は「別の放送」に
+ * 見えて両方が立っていた。開始とタイトルが同じなら同じ放送。
+ *
+ * @param channelOf 放送の物理チャンネル
+ */
+export function oneBroadcast<
+  T extends { service_id: number; start_at: number; name: string },
+>(list: readonly T[], channelOf: (item: T) => string): T[] {
+  const kept = new Map<string, T>();
+  for (const item of list) {
+    const key = `${channelOf(item)} ${item.start_at} ${item.name}`;
+    const twin = kept.get(key);
+    // 枝番の小さいほうが本線 (MX1 なら 23608)。並び順に左右されないよう、あとから小さいものが来たら入れ替える
+    if (twin !== undefined && twin.service_id <= item.service_id) continue;
+    kept.set(key, item);
+  }
+  const survivors = new Set(kept.values());
+  return list.filter((item) => survivors.has(item));
+}
+
+/**
  * 下見 (`rule-preview.ts`) の「録らない」({@link episodeSkips})。人が取り消した放送は `applyRules` も
  * 立てないので、「最初の放送」の候補に入れない。両方当たるなら同じ回のほう (`repeat` / `recorded`) を返す
  */
@@ -730,7 +764,7 @@ export function duplicateAtStart(recordingId: number): string | null {
   if (owner === undefined || !owner.dedupe) return null;
 
   const service = orm()
-    .select({ type: services.type })
+    .select({ type: services.type, network_id: services.network_id })
     .from(services)
     .where(eq(services.id, recording.service_id))
     .get();
@@ -781,6 +815,7 @@ export function duplicateAtStart(recordingId: number): string | null {
     end_at: recording.end_at,
     service_id: recording.service_id,
     type: service?.type ?? "",
+    network_id: service?.network_id ?? 0,
   };
   const skip = firstAirings([airing], new Set(), [
     ...takenOf(rows),
@@ -858,12 +893,15 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
   const at = now();
   // 録画のしかたは全体で 1 つ。ルールごとに持たせるとどこで決まったか分からなくなる
   const recording = settings();
-  // 種別 (GR/BS/CS) でも絞り込めるよう、番組に局の種別と物理チャンネルを添えて取る
+  // 種別でも絞り込めるよう、番組に局の種別と物理チャンネルを添えて取る。
+  // 復号できるか (`services.decodable`) も添える。当てないのは下のループで、番組そのものは引く (下の `listed`。
+  // 局が復号できなくなったあとに残った予約を、条件から外れたものとして引っ込める)
   const programs = orm()
     .select({
       ...getTableColumns(programTable),
       service_type: services.type,
-      channel: services.channel,
+      channel: shareKey(),
+      decodable: services.decodable,
     })
     .from(programTable)
     .innerJoin(services, eq(services.id, programTable.service_id))
@@ -891,27 +929,22 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
       matched: Rule[];
     }
   >();
-  /**
-   * **同じ放送は 1 本だけ。** 同じ物理チャンネルの中で、同じ時刻に同じ番組名が
-   * 流れていたら同じ放送とみなし、いちばん小さい局だけを残す。
-   *
-   * 局は分割放送のために枝番を持っていて (TOKYO MX なら 23608 / 23609、
-   * どちらも名前は「TOKYO MX1」)、**分割していない間は同じ番組が両方に載る**。
-   * 素通しにしていた実機では、同じ回が 2 本録れたうえに、2 つのエンコードが
-   * 同じ名前のファイルへ同時に書いて中身が壊れた。
-   *
-   * 中身が違うとき (MX1 と MX2 で別番組) はタイトルが違うので、両方残る。
-   *
-   * **終了時刻はキーに入れない。** 延長は枝番ごとに別々のタイミングで届く
-   * (EIT p/f は局ごと) ので、片方だけ `end_at` が動いた回は「別の放送」に
-   * 見えて両方が立っていた。開始とタイトルが同じなら同じ放送。
-   */
-  const simulcast = new Map<string, { serviceId: number; programId: number }>();
+  /** 当たった放送。この中から同じ放送を 1 本にまとめる (`oneBroadcast`) */
+  const hits: {
+    owner: Rule;
+    program: (typeof programs)[number];
+    matched: Rule[];
+  }[] = [];
   // 有料放送は契約中と確かめた局だけ当てる (`contracts.paidAllowed`)。当てはめ 1 回につき 1 回読む
   const paidOk = paidAllowed();
   for (const program of programs) {
+    /*
+     * **復号できない局の番組は当てない** (`services.decodable`)。番組表を読めて番組表に出ている局でも、
+     * 録ってもスクランブルのままで観られない
+     */
+    if (!program.decodable) continue;
     const textOf = textCache(program);
-    // 先勝ちの持ち主のほかに、当たったルールを全部見る (下の dedupe / skip_earlier の受け手)
+    // 先勝ちの持ち主のほかに、当たったルールを全部見る (下の dedupe / skip_earlier の対象)
     const matched = searching
       .filter((candidate) =>
         matchesCompiled(
@@ -931,20 +964,13 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
      * 枝番違いや event_id の変更ですり抜ける (上の `canceledBroadcasts`)
      */
     if (declined.has(program)) continue;
-    const key = `${program.channel} ${program.start_at} ${program.name}`;
-    const twin = simulcast.get(key);
-    if (twin !== undefined) {
-      // 枝番の小さいほうが本線 (MX1 なら 23608)。並び順に左右されないよう、
-      // あとから小さいものが来たら入れ替える
-      if (twin.serviceId <= program.service_id) continue;
-      wanted.delete(twin.programId);
-    }
-    simulcast.set(key, {
-      serviceId: program.service_id,
-      programId: program.id,
-    });
-    wanted.set(program.id, { rule: owner, program, matched });
+    hits.push({ owner, program, matched });
   }
+  const hitPrograms = hits.map((hit) => hit.program);
+  const kept = new Set(oneBroadcast(hitPrograms, (p) => p.channel));
+  for (const { owner, program, matched } of hits)
+    if (kept.has(program))
+      wanted.set(program.id, { rule: owner, program, matched });
 
   /*
    * **同じ回は最初の放送だけ** (ルールの `dedupe`) と **前の回は録らない** (`skip_earlier`)。

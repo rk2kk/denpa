@@ -9,7 +9,7 @@ import { packetize, sdtSection } from "@danything/arib/synth";
 import type { AgentChannel } from "./tuner";
 
 /**
- * 地上波は付いていかず、知らせるだけ。合成の SDT と受信の記録で、お知らせの 1 行が出ることを見る
+ * 地上波は付いていかず、知らせるだけ。合成の SDT と受信の記録で、お知らせが出ることを見る
  */
 const { config } = await import("./config");
 config.dbPath = join(mkdtempSync(join(tmpdir(), "denpa-ground-")), "denpa.db");
@@ -85,24 +85,24 @@ describe("地上波のお知らせ", () => {
   });
 
   test("続けて選局できないチャンネルを知らせる (外さない)", () => {
-    recordReceived("GR", "T16", T0);
-    recordFailed("GR", "T27", T0 + HOUR);
-    recordReceived("GR", "T16", T0 + 2 * HOUR);
-    recordFailed("GR", "T27", T0 + 3 * HOUR);
+    recordReceived(1, "GR", "T16", T0);
+    recordFailed(1, "GR", "T27", T0 + HOUR);
+    recordReceived(1, "GR", "T16", T0 + 2 * HOUR);
+    recordFailed(1, "GR", "T27", T0 + 3 * HOUR);
     expect(groundNotice()).toBe(
       "T27 を続けて選局できません。周波数が変わった場合は、地上波をスキャンし直すと選局できます",
     );
     // 受信できたら消える
-    recordReceived("GR", "T27", T0 + 4 * HOUR);
+    recordReceived(1, "GR", "T27", T0 + 4 * HOUR);
     expect(groundNotice()).toBeNull();
   });
 
   test("地上波がどれも選局できなくなったら知らせない (アンテナの問題)", () => {
-    recordReceived("GR", "T16", T0);
-    recordFailed("GR", "T27", T0 + HOUR);
-    recordFailed("GR", "T16", T0 + HOUR + 1);
-    recordFailed("GR", "T27", T0 + 3 * HOUR);
-    recordFailed("GR", "T16", T0 + 3 * HOUR + 1);
+    recordReceived(1, "GR", "T16", T0);
+    recordFailed(1, "GR", "T27", T0 + HOUR);
+    recordFailed(1, "GR", "T16", T0 + HOUR + 1);
+    recordFailed(1, "GR", "T27", T0 + 3 * HOUR);
+    recordFailed(1, "GR", "T16", T0 + 3 * HOUR + 1);
     expect(groundNotice()).toBeNull();
   });
 });

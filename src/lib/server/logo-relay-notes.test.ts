@@ -13,13 +13,14 @@ import {
   stream,
 } from "@danything/arib/synth";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * **当たりの中継を「外れ」と控えてしまっても、「ロゴをいますぐ集める」で当たり直せる** (`logo.sweepNow`)。
  *
  * Linux DVB の dvr には前の選局の残りが溜まったままで (エージェントは直した。`DvbTuner.Tune`)、
- * 当たりの中継 (BS15_0) の頭で前の中継の PAT を読み、1 週間「外れ」と控えることがあった。どの中継も
+ * 当たりの中継 (BS15_0) の先頭で前の中継の PAT を読み、1 週間「外れ」と控えることがあった。どの中継も
  * 外れと控えられていると、定期の取得は何も開かず、押しても「ロゴはすべて取得済みです」と言われるだけだった
  */
 const ESS = 929;
@@ -99,7 +100,6 @@ const agent = Bun.serve({
         rank: index,
         device: null,
         lnb: null,
-        pid: null,
         error: null,
         channel: null,
         users: [],
@@ -116,20 +116,26 @@ config.dataDir = root;
 config.agentUrl = fakeAgentUrl(agent.port!);
 trustFakeAgent();
 
-// 前の選局の PAT を見て、当たりの中継まで外れと控えてしまった後
+const { orm } = await import("./db");
+const { placeServices, tsOf } = await import("./fake-channels");
+
+// 前の選局の PAT を見て、当たりの中継まで外れと控えてしまった後 (控えのキーは TS)
 mkdirSync(join(root, "logos"), { recursive: true });
 const now = Date.now();
 writeFileSync(
   join(root, "logos", "satellite-relays.json"),
   JSON.stringify({
-    noCarousel: { BS01_0: now, BS15_0: now, CS02: now },
+    noCarousel: {
+      [`4:${tsOf("BS", "BS01_0")}`]: now,
+      [`4:${tsOf("BS", "BS15_0")}`]: now,
+      [`7:${tsOf("CS", "CS02")}`]: now,
+    },
     carriers: {},
     absent: {},
     gaveUp: {},
   }),
 );
 
-const { orm } = await import("./db");
 const { services } = await import("./schema");
 const { serviceKey } = await import("./tuner");
 const { readLogo, stats, sweep, sweepNow, sweepState } = await import("./logo");
@@ -143,16 +149,21 @@ orm()
   .insert(services)
   .values(
     STATIONS.map((s) => ({
-      id: serviceKey(s.network, s.sid),
+      id: serviceKey(s.network, s.sid, s.type),
       service_id: s.sid,
       network_id: s.network,
       name: `局${s.sid}`,
       type: s.type,
-      channel: s.channel,
       updated_at: 1,
     })),
   )
   .run();
+placeServices(
+  STATIONS.map((s) => ({
+    id: serviceKey(s.network, s.sid, s.type),
+    channel: s.channel,
+  })),
+);
 
 describe("外れの控えが間違っていても当たり直せる", () => {
   test("どの中継も外れと控えられていると、定期の取得は何も開かない", async () => {
@@ -167,7 +178,7 @@ describe("外れの控えが間違っていても当たり直せる", () => {
     for (let i = 0; i < 100 && sweepState().running; i++) await Bun.sleep(20);
     expect(sweepState().running).toBe(false);
     expect(opened).toContain("BS15_0");
-    expect(readLogo(serviceKey(4, 211))).not.toBeNull();
-    expect(readLogo(serviceKey(7, 330))).not.toBeNull();
+    expect(readLogo(serviceKey(4, 211, "BS"))).not.toBeNull();
+    expect(readLogo(serviceKey(7, 330, "CS"))).not.toBeNull();
   });
 });

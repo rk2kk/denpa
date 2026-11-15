@@ -2,9 +2,27 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { NativeAudio } from "./native-audio";
 import type { AudioInput, AudioOutput } from "./native-audio-protocol";
+import { audioContext } from "./seam";
 
+class Param {
+  value = 1;
+  /** 予約した変化 (`[種類, 値, 時刻]`)。取り消しは `cancel` */
+  events: [string, number, number][] = [];
+  setValueAtTime(value: number, at: number) {
+    this.events.push(["set", value, at]);
+  }
+  linearRampToValueAtTime(value: number, at: number) {
+    this.events.push(["ramp", value, at]);
+  }
+  cancelScheduledValues(at: number) {
+    this.events.push(["cancel", 0, at]);
+  }
+}
 class Node {
-  gain = { value: 1 };
+  gain = new Param();
+  stopAt: number | undefined;
+  /** つないだ先 */
+  outputs: Node[] = [];
   threshold = { value: 0 };
   knee = { value: 0 };
   ratio = { value: 0 };
@@ -15,10 +33,13 @@ class Node {
   stopped = false;
   starts: number[][] = [];
   onended: (() => void) | null = null;
-  connect() {}
+  connect(to: Node) {
+    this.outputs.push(to);
+  }
   disconnect() {}
-  stop() {
+  stop(at?: number) {
     this.stopped = true;
+    this.stopAt = at;
   }
   start(...args: number[]) {
     this.starts.push(args);
@@ -27,6 +48,8 @@ class Node {
 class Context {
   static all: Context[] = [];
   static failGraph = false;
+  /** サンプルレートを指定できないブラウザ */
+  static rejectRate = false;
   state = "running";
   currentTime = 50;
   baseLatency = 0;
@@ -34,7 +57,11 @@ class Context {
   destination = new Node();
   sources: Node[] = [];
   onstatechange: (() => void) | null = null;
-  constructor() {
+  sampleRate: number;
+  constructor(options: { sampleRate?: number } = {}) {
+    if (Context.rejectRate && options.sampleRate !== undefined)
+      throw new Error("sampleRate unsupported");
+    this.sampleRate = options.sampleRate ?? 44_100;
     Context.all.push(this);
   }
   createGain() {
@@ -112,6 +139,7 @@ function set(name: string, value: unknown) {
 beforeEach(() => {
   Context.all = [];
   Context.failGraph = false;
+  Context.rejectRate = false;
   TestWorker.all = [];
   audio = null;
   set("AudioContext", Context);
@@ -135,6 +163,7 @@ function setup(decoder = "/api/live/mpeg2") {
     video as unknown as HTMLVideoElement,
     (reason) => errors.push(reason),
     decoder,
+    audioContext("interactive"),
   );
   const worker = TestWorker.all[0]!,
     context = Context.all[0]!;
@@ -177,7 +206,7 @@ test("デコード待ちが上限を超えたら打ち切って片付ける", ()
   audio.feed(new Uint8Array(8 * 1024 * 1024), false);
   expect(errors).toHaveLength(1);
   expect(worker.terminated).toBe(true);
-  expect(context.state).toBe("closed");
+  expect(context.sources.every((node) => node.stopped)).toBe(true);
 });
 test("畳んだあとに来たコマは鳴らさない", () => {
   const { worker, context, audio } = setup();
@@ -248,19 +277,158 @@ test("自動再生を断られたら、ふだんの「音を出す」に渡す",
   expect(audio.blocked).toBe(false);
 });
 
-test("音の経路を組めなかったら、作りかけの AudioContext を閉じる", () => {
+test("音の経路を組めなかったら、worker を作らずに例外を投げ、渡した AudioContext は閉じない", () => {
   Context.failGraph = true;
+  const context = new Context();
   let threw = false;
   try {
     new NativeAudio(
       new Video() as unknown as HTMLVideoElement,
       () => {},
       "/api/live/mpeg2",
+      context as unknown as AudioContext,
     );
   } catch {
     threw = true;
   }
   expect(threw).toBe(true);
-  expect(Context.all[0]!.state).toBe("closed");
+  expect(context.state).toBe("running");
   expect(TestWorker.all).toHaveLength(0);
+});
+
+// #2728。iOS の Safari は、押したとき以外に作った AudioContext を止めたまま始める。画質を切り替えて作り直しても、動いている AudioContext を使い続ける
+test("渡した AudioContext は畳んでも閉じず、作り直した次の音でもそのまま使う", () => {
+  const shared = new Context();
+  const make = () =>
+    new NativeAudio(
+      new Video() as unknown as HTMLVideoElement,
+      () => {},
+      "/api/live/mpeg2",
+      shared as unknown as AudioContext,
+    );
+  const first = make();
+  first.destroy();
+  expect(shared.state).toBe("running");
+  audio = make();
+  expect(audio.blocked).toBe(false);
+  // 新しい AudioContext は作らない
+  expect(Context.all).toHaveLength(1);
+});
+
+// #2474。波形が途中で 0 に飛ぶ・0 から飛ぶと「プツッ」と聞こえる
+test("映像が止まったら、鳴っている音を絞りきってから止める", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.0);
+  const node = context.sources[0]!;
+  const fade = node.outputs[0]!;
+  context.currentTime = 50.01;
+  video.dispatchEvent(new Event("waiting"));
+  expect(node.stopAt).toBeCloseTo(50.018, 8);
+  expect(fade.gain.events.at(-1)).toEqual(["ramp", 0, node.stopAt!]);
+});
+test("止めたあとに鳴らす音は、絞っている音量とは別に、音量を上げながら鳴らす", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.0);
+  const before = context.sources[0]!.outputs[0]!;
+  context.currentTime = 50.01;
+  video.dispatchEvent(new Event("waiting"));
+  video.dispatchEvent(new Event("playing"));
+  worker.pcm(1, 10.1);
+  const after = context.sources.at(-1)!;
+  expect(after.outputs[0]).not.toBe(before);
+  const when = after.starts[0]![0]!;
+  expect(after.outputs[0]!.gain.events.slice(-2)).toEqual([
+    ["set", 0, when],
+    ["ramp", 1, when + 0.008],
+  ]);
+});
+test("続いているコマの間では音量を動かさない", () => {
+  const { worker, context } = setup();
+  for (let i = 0; i < 5; i++) worker.pcm(1, 10.1 + (i * 1024) / 48000);
+  const fade = context.sources[0]!.outputs[0]!;
+  // 1 つ目のコマで上げるだけ
+  expect(fade.gain.events.filter(([kind]) => kind === "ramp")).toHaveLength(1);
+});
+test("コマを捨てて間が空いたら、そこからまた音量を上げながら鳴らす", () => {
+  const { worker, context } = setup();
+  worker.pcm(1, 10.1);
+  worker.pcm(1, 10.1 + (2 * 1024) / 48000); // 1 コマ抜けた
+  const fade = context.sources[0]!.outputs[0]!;
+  const second = context.sources[1]!.starts[0]![0]!;
+  expect(fade.gain.events.at(-1)).toEqual(["ramp", 1, second + 0.008]);
+});
+
+// WebKit は、バッファが空になって映像が止まっても waiting を出さないことがある
+test("映像の時刻が止まったまま音だけ進んだら、映像が動き出すまで音を予約しない", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.1);
+  context.currentTime = 50.1; // 映像は 10 秒のまま
+  for (let i = 1; i < 10; i++) worker.pcm(1, 10.1 + (i * 1024) / 48000);
+  const count = context.sources.length;
+  context.currentTime = 50.3;
+  worker.pcm(1, 10.3);
+  expect(context.sources).toHaveLength(count);
+  // 動き出したら、その位置から鳴らす
+  video.currentTime = 10.25;
+  worker.pcm(1, 10.31);
+  expect(context.sources.length).toBeGreaterThan(count);
+});
+test("しばらく再生したあとで映像の時刻が止まったときも、組み直したあとに音を予約しない", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.1);
+  // 2 秒は映像と音がそろって進んだ
+  context.currentTime = 52;
+  video.currentTime = 12;
+  worker.pcm(1, 12.05);
+  const count = context.sources.length;
+  // そこで映像だけ止まった
+  context.currentTime = 52.1;
+  worker.pcm(1, 12.1);
+  expect(context.sources).toHaveLength(count);
+  expect(context.sources.at(-1)!.stopped).toBe(true);
+  // 動き出したら、その位置から鳴らす
+  context.currentTime = 52.5;
+  video.currentTime = 12.02;
+  worker.pcm(1, 12.15);
+  expect(context.sources.length).toBeGreaterThan(count);
+});
+test("数秒待たされてから再生に戻ったら、最初の組み直しで止まったとみずに音を予約する", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.1);
+  // WebKit は waiting を出さずに readyState だけ落とすことがある。その間の刻み
+  video.readyState = 2;
+  for (let i = 1; i <= 5; i++) {
+    context.currentTime = 50 + i;
+    worker.pcm(1, 10.1 + (i * 1024) / 48000);
+  }
+  const count = context.sources.length;
+  // 再生に戻った。時計は 5 秒進んだので組み直すが、映像はこれから動く
+  video.readyState = 4;
+  context.currentTime = 55.02;
+  worker.pcm(1, 10.2);
+  expect(context.sources.length).toBeGreaterThan(count);
+});
+test("映像が進んでいて時計だけずれたときは、組み直してすぐ鳴らす", () => {
+  const { video, worker, context } = setup();
+  worker.pcm(1, 10.1);
+  const count = context.sources.length;
+  context.currentTime = 50.1;
+  video.currentTime = 10.2; // 映像が 100 ms 先へ飛んだ
+  worker.pcm(1, 10.3);
+  expect(context.sources.length).toBeGreaterThan(count);
+});
+test("AudioContext を 48kHz で作り、続いたコマは前のコマの終わりのサンプルにつなぐ", () => {
+  const { worker, context, audio } = setup();
+  expect(context.sampleRate).toBe(48_000);
+  audio.setMuted(false);
+  // 2 コマ目の PTS が 1 tick (1/90000 秒) ずれていても、1 コマ目の終わりにつなぐ
+  worker.pcm(1, 10.1);
+  worker.pcm(1, 10.1 + 1024 / 48_000 + 1 / 90_000);
+  const [first, second] = context.sources.map((node) => node.starts[0]![0]!);
+  expect((second! - first!) * 48_000).toBeCloseTo(1024, 6);
+});
+test("サンプルレートを指定できないブラウザは、端末のサンプルレートのまま作る", () => {
+  Context.rejectRate = true;
+  const { context } = setup();
+  expect(context.sampleRate).toBe(44_100);
 });

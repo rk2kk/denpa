@@ -8,7 +8,7 @@ import { expect, reserveSoon, syncEpg, test } from "./helpers";
  * 再エンコード (`h264`) は画面の追っかけと同じ fMP4 を HTTP で流す
  */
 test.describe("追っかけ再生の API", () => {
-  test("録画中の録画が一覧に出て、元のTSを追い読みで流し続ける", async ({
+  test("録画中の録画が一覧に出て、元の TS を追い読みで流し続ける", async ({
     page,
     request,
     baseURL,
@@ -45,7 +45,7 @@ test.describe("追っかけ再生の API", () => {
     };
     if (state.state === "recording") expect(state.durationMs).toBeNull();
 
-    // 元の TS: 頭は同期バイト 0x47。録っている間は伸びたぶんも届き続ける。
+    // 元の TS: 先頭は同期バイト 0x47。録っている間は伸びたぶんも届き続ける。
     // **一覧に出るのは録り始めた時点で、ファイルにはまだ何も書かれていないことがある** —
     // そのあいだ chase は 404 (docs/api.md「録画が無い・まだ何も録れていなければ 404」)。アプリと同じく、
     // 届きはじめるまでリクエストし直す

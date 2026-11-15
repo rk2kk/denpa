@@ -11,10 +11,12 @@
  * どうかをテストで確かめられない。
  */
 
+import { concatBytes } from "@danything/arib/bytes";
 import { CLOCK } from "@danything/arib/pes";
 import {
   aitSection,
   aitSignallingDescriptor,
+  cableDeliveryDescriptor,
   captionDescriptors,
   copyControlDescriptor,
   ddbSection,
@@ -39,6 +41,20 @@ import {
   pes,
   silentAac,
 } from "@danything/arib/synth-av";
+import {
+  compressedIp,
+  m2SectionMessage,
+  mhEitSection,
+  mhSdtSection,
+  mptTable,
+  paMessage,
+  pltTable,
+  signalingPackets,
+  type SynthMhEvent,
+  tlvNitSection,
+  tlvSi,
+} from "@danything/arib/synth-mmt";
+import { MPU_MS, SynthMmtAv } from "@danything/arib/synth-mmt-av";
 
 import { docsColor, docsLogo, docsProgram } from "./docs";
 import { type FakeService, SERVICES } from "./services";
@@ -95,6 +111,11 @@ const TITLES = [
 export interface Knobs {
   /** カードが読めていない状態。掛かったままの TS を流す */
   scrambled: boolean;
+  /**
+   * **カードは読めているが、局の契約が無い状態** (未契約)。本物のエージェントはカードが鍵を返さなかった ES を
+   * スクランブルされたまま流すので、掛かったままの TS を流す。`scrambled` と違ってカードの状態は読めているまま
+   */
+  unentitled: boolean;
   /** 放送の延長。EIT[p/f] の尺にこれを足す */
   extendedMs: number;
   /** EIT[p/f] を流さない。延長に追従できない局の見え方を確かめる */
@@ -127,6 +148,7 @@ export interface Knobs {
 
 export const DEFAULT_KNOBS: Knobs = {
   scrambled: false,
+  unentitled: false,
   extendedMs: 0,
   noPresentFollowing: false,
   eitCopyNever: [],
@@ -171,7 +193,7 @@ function programsFor(service: FakeService): SynthEvent[] {
   const span = Math.min(DAY, count * slotMs);
   /*
    * 少し過去から始める。全部を過去にすると予約できる番組が 1 つも無くなる。
-   * スクリーンショットを撮るときは前後 30 時間ずつ。いつ撮っても、その日の番組表 (4 時〜翌 4 時) が頭から埋まる
+   * スクリーンショットを撮るときは前後 30 時間ずつ。いつ撮っても、その日の番組表 (4 時〜翌 4 時) が先頭から埋まる
    */
   const base =
     Math.floor((Date.now() - (DOCS ? DAY : span / 3)) / slotMs) * slotMs;
@@ -242,13 +264,34 @@ export function on(type: string, channel: string): FakeService[] {
 }
 
 /**
- * TS の TSID。衛星は名前に入っている (`BS11:18000`)。地上波はネットワーク ID と同じ値
+ * ケーブルの搬送波に TSMF で束ねてある TS の数 (本物のエージェントの `X-Denpa-Tsmf-Streams`。docs/agent.md)。
+ * 偽の放送では、2 つ目からの TS の局を `QC30:1` のように番号を付けたチャンネルに置く。TSMF でない搬送波とほかの種別は null
+ */
+export function tsmfStreams(type: string, channel: string): number | null {
+  if (type !== "CATV" || channel.includes(":")) return null;
+  const extra = new Set(
+    SERVICES.filter(
+      (s) => s.type === type && s.channel.startsWith(`${channel}:`),
+    ).map((s) => s.channel),
+  );
+  return extra.size === 0 ? null : extra.size + 1;
+}
+
+/**
+ * TS の TSID。決めてある局 (ケーブル) はその値。衛星は名前に入っている (`BS11:18000`)。地上波はネットワーク ID と同じ値
  * (ARIB TR-B14: 地上波の transport_stream_id は network_id と同じ)
  */
-export function tsidOf(service: FakeService): number {
+function tsidOf(service: FakeService): number {
+  if (service.tsid !== undefined) return service.tsid;
   const at = service.channel.indexOf(":");
   return at < 0 ? service.networkId : Number(service.channel.slice(at + 1));
 }
+
+/**
+ * 衛星 (BS・CS) か。衛星は同じネットワークの全部の TS を NIT に載せる。
+ * スカパー！プレミアム (SKY) は地上波と同じく、自分の TS だけを載せる (実機の TS がまだ無いので、地上波に合わせた作り物)
+ */
+const isSatellite = (type: string) => type === "BS" || type === "CS";
 
 /** 衛星の中継器の周波数 (kHz)。BS は奇数で 38.36 MHz、CS は偶数で 40 MHz 刻み */
 function frequencyOf(type: string, channel: string): number {
@@ -256,6 +299,19 @@ function frequencyOf(type: string, channel: string): number {
   return type === "BS"
     ? 11_727_480 + 19_180 * (transponder - 1)
     : 12_291_000 + 20_000 * (transponder - 2);
+}
+
+/**
+ * ケーブルの自主放送のネットワークか (作り物の 0xFF00 から)。**自主放送の TS には、ケーブル局の搬送波の一覧の NIT を流す。**
+ * 本物と同じく、TS ごとにケーブルの分配の記述子 (0x44) で周波数を載せる。再送信の TS (BS・地上波) は元のネットワークの NIT のまま
+ */
+const cableOwn = (service: FakeService) =>
+  service.type === "CATV" && service.networkId >= 0xff00;
+
+/** ケーブルのチャンネル (`QC30`・`QC30:1`) の中心周波数 (Hz)。エージェントの選局表の QC23〜QC63 と同じ */
+function cableFrequencyOf(channel: string): number {
+  const number = Number(/^QC(\d+)/.exec(channel)?.[1] ?? 23);
+  return (225 + 6 * (number - 23)) * 1_000_000;
 }
 
 /** その種別・ネットワークの TS ごとの局 (NIT に並べる順。TSID の順) */
@@ -283,10 +339,15 @@ const channelOf = (service: FakeService) => ({
   services: [serviceOf(service)],
 });
 
-/** 物理チャンネルの一覧。本物はスキャンの結果 (channels.json) */
+/**
+ * 物理チャンネルの一覧。本物はスキャンの結果 (channels.json)。
+ * **CATV (ケーブル) と SKY (スカパー！プレミアム) は入れない。** 受けられる機材は既定に無く、スキャンしたときだけ入る
+ * (`64-sky.spec.ts`・`65-catv.spec.ts`)。放送には流れている (`on`) ので、スキャンすれば見つかる
+ */
 export function channels() {
   const map = new Map<string, ReturnType<typeof channelOf>>();
   for (const service of SERVICES) {
+    if (service.type === "SKY" || service.type === "CATV") continue;
     const key = `${service.type}:${service.channel}`;
     const found = map.get(key);
     if (found === undefined) map.set(key, channelOf(service));
@@ -513,6 +574,40 @@ function logoPackets(service: FakeService): Uint8Array {
  * スキャンの結果を作り物で返していたので要らなかったが、本物のエージェントに
  * 渡すならこれが無いとどのチャンネルも見つからない。
  */
+/**
+ * SKY の局の CA_system_id (0x000B)。**値は作り物。** スカパー！プレミアムの CA_system_id は
+ * 実機の報告で分かるまで不明なので、B-CAS (0x0005) 以外の値を置いて、スキャンで分かったことが受信の設定に出るかを確かめる (`64-sky.spec.ts`)
+ */
+const SKY_CA_SYSTEM_ID = 0x000b;
+
+/**
+ * 局の PMT に置く CA 記述子 (ECM の PID 0x0901)。SKY の局と、CA_system_id を決めてある局 (`caSystemId`。ケーブル) だけに置く
+ */
+function caDescriptor(service: FakeService): number[] {
+  const id = caSystemIdOf(service);
+  return id === undefined ? [] : [0x09, 0x04, id >> 8, id & 0xff, 0xe9, 0x01];
+}
+
+/** 局の CA_system_id。SKY の局は作り物の値、ほかは決めてある局 (`caSystemId`) だけ */
+const caSystemIdOf = (service: FakeService): number | undefined =>
+  service.caSystemId ?? (service.type === "SKY" ? SKY_CA_SYSTEM_ID : undefined);
+
+/**
+ * 番組表 (EIT) もスクランブルして流す局か。**B-CAS 以外の方式でスクランブルした局** (SKY の局も)。
+ * denpa はスキャンで EIT がスクランブルされていると数え、番組表を読めない局にする (`ca-observe.ts`)
+ */
+const eitScrambled = (service: FakeService): boolean => {
+  const id = caSystemIdOf(service);
+  return id !== undefined && id !== 0x0005;
+};
+
+/** TS パケットの並びに、スクランブルの印 (transport_scrambling_control) を付ける。中身は暗号にしない */
+function scrambled(packets: Uint8Array): Uint8Array {
+  for (let at = 0; at + 188 <= packets.length; at += 188)
+    packets[at + 3] = (packets[at + 3]! & 0x3f) | 0x80;
+  return packets;
+}
+
 function tables(services: FakeService[], knobs: Knobs): Uint8Array {
   /*
    * ロゴを積んでいる中継にはエンジニアリングサービス (929) がある。
@@ -557,7 +652,10 @@ function tables(services: FakeService[], knobs: Knobs): Uint8Array {
           ][])),
     ];
     // コピー禁止は番組ぜんたいの記述子に載せる (本物もここ)
-    const programInfo = knobs.pmtCopyNever ? copyControlDescriptor(0b11) : [];
+    const programInfo = [
+      ...(knobs.pmtCopyNever ? copyControlDescriptor(0b11) : []),
+      ...caDescriptor(service),
+    ];
     const pmt = programMap(
       service.serviceId,
       pids.video,
@@ -600,10 +698,10 @@ function tables(services: FakeService[], knobs: Knobs): Uint8Array {
    * 本物の BS と同じ。denpa は中継器を 1 つ開いて、これで一覧を作る (`satellite.ts`)
    */
   const network =
-    first.type === "GR"
-      ? [services]
-      : transportsOf(first.type, first.networkId);
-  if (first.type !== "GR") {
+    isSatellite(first.type) || cableOwn(first)
+      ? transportsOf(first.type, first.networkId)
+      : [services];
+  if (isSatellite(first.type)) {
     let counter = 1;
     for (const members of network) {
       if (members[0]!.channel === first.channel) continue;
@@ -620,11 +718,17 @@ function tables(services: FakeService[], knobs: Knobs): Uint8Array {
           tsidOf(members[0]!),
           members[0]!.networkId,
           members.map((s) => [s.serviceId, s.serviceType]),
-          members[0]!.type === "GR"
-            ? []
-            : satelliteDeliveryDescriptor(
+          isSatellite(members[0]!.type)
+            ? satelliteDeliveryDescriptor(
                 frequencyOf(members[0]!.type, members[0]!.channel),
-              ),
+              )
+            : cableOwn(members[0]!)
+              ? cableDeliveryDescriptor(
+                  cableFrequencyOf(members[0]!.channel),
+                  // TSMF で束ねた搬送波 (`QC30:1`) は多重フレーム型式 0x1
+                  members[0]!.channel.includes(":") ? { frameType: 0x1 } : {},
+                )
+              : [],
         ]),
       ),
     ),
@@ -644,11 +748,12 @@ function schedule(services: FakeService[], knobs: Knobs): Uint8Array {
   const push = (service: FakeService, tableId: number) => {
     const events = programsWith(service, knobs);
     for (const section of scheduleSections(service, events, tableId)) {
-      parts.push(...packetize(0x0012, section));
+      const packets = packetize(0x0012, section);
+      parts.push(...(eitScrambled(service) ? scrambled(packets) : packets));
     }
   };
   for (const service of services) push(service, 0x50);
-  const here = services.filter((s) => s.type !== "GR");
+  const here = services.filter((s) => isSatellite(s.type));
   for (const service of SERVICES) {
     const sameNetwork = here.some(
       (s) => s.type === service.type && s.networkId === service.networkId,
@@ -672,8 +777,8 @@ function nowOnAir(services: FakeService[], knobs: Knobs): Uint8Array {
     const events = programsWith(service, knobs);
     const current = present(events);
     if (current === undefined) continue;
-    const section = (sectionNumber: number, event: SynthEvent) =>
-      packetize(
+    const section = (sectionNumber: number, event: SynthEvent) => {
+      const packets = packetize(
         0x0012,
         eitSection({
           tableId: 0x4e,
@@ -685,6 +790,8 @@ function nowOnAir(services: FakeService[], knobs: Knobs): Uint8Array {
           events: [event],
         }),
       );
+      return eitScrambled(service) ? scrambled(packets) : packets;
+    };
     const extended = {
       ...current,
       duration: current.duration + knobs.extendedMs,
@@ -847,7 +954,7 @@ export function broadcast(
      */
     for (let index = 0; index < services.length; index++) {
       send(
-        now.scrambled
+        now.scrambled || now.unentitled
           ? payload(pidsOf(index).video, 10, true)
           : avPackets(index, av[index]!),
       );
@@ -856,3 +963,241 @@ export function broadcast(
 
   return () => clearInterval(timer);
 }
+
+/** 偽の 4K の放送の信号の packet_id。PLT は 0x0000、MPT は局ごと、M2 セクション (MH-SDT・MH-EIT) は 0x8000 */
+const TLV_PLT = 0x0000;
+const TLV_MPT = 0x9000;
+const TLV_M2 = 0x8000;
+
+/** ヘッダー圧縮した IP (ヘッダー無しの 0x61) に MMTP のパケットを載せる */
+const overIp = (packets: Uint8Array[]): Uint8Array[] =>
+  packets.map((packet) => compressedIp(1, packet));
+
+/** M2 セクションを 1 つずつ MMTP のパケットにする (分割しない) */
+const m2Packets = (sections: Uint8Array[]): Uint8Array[] =>
+  overIp(
+    signalingPackets(
+      TLV_M2,
+      sections.map((section) => m2SectionMessage(section)),
+    ),
+  );
+
+/** TS の番組 (`programsFor`) を MH-EIT の番組にする。映像は 2160p */
+const mhEvent = (event: SynthEvent): SynthMhEvent => ({
+  eventId: event.eventId,
+  startAt: event.startAt,
+  duration: event.duration,
+  name: event.name,
+  ...(event.description === undefined
+    ? {}
+    : { description: event.description }),
+  ...(event.extended === undefined
+    ? {}
+    : { extended: Object.entries(event.extended) }),
+  ...(event.genres === undefined ? {} : { genres: event.genres }),
+  resolution: 6,
+});
+
+/**
+ * 映像と音声を流す 4K の局か。**スクランブルしていない局だけ** (`caSystemId` が無い)。偽の放送は ACAS の暗号を作らないので、
+ * スクランブルした局 (実機と同じ `0x0005`) は表と番組表だけを流す。流す局の MPT は映像と一緒に流す (`SynthMmtAv`)
+ */
+const tlvMedia = (service: FakeService): boolean =>
+  caSystemIdOf(service) === undefined;
+
+/**
+ * TLV の表。TLV-NIT・PLT・局ごとの MPT (アクセス制御記述子に `caSystemId`)・MH-SDT[actual]。
+ * 値の並びは実機のケーブルの BS4K (QC26) に合わせてある (docs/data.md)。映像を流す局の MPT は載せない
+ * (映像と一緒に、時刻を並べた MPT を流す。`broadcastTlv`)
+ */
+function tlvTables(services: FakeService[]): Uint8Array {
+  const first = services[0]!;
+  const stream = tsidOf(first);
+  return concatBytes([
+    tlvSi(
+      tlvNitSection(first.networkId, "高度ＢＳデジタル放送", [
+        [
+          stream,
+          first.networkId,
+          services.map((s) => [s.serviceId, s.serviceType]),
+        ],
+      ]),
+    ),
+    ...overIp(
+      signalingPackets(TLV_PLT, [
+        paMessage(pltTable(services.map((s, i) => [s.serviceId, TLV_MPT + i]))),
+      ]),
+    ),
+    ...services.flatMap((service, i) => {
+      if (tlvMedia(service)) return [];
+      const id = caSystemIdOf(service);
+      return overIp(
+        signalingPackets(TLV_MPT + i, [
+          paMessage(
+            mptTable({
+              packageId: service.serviceId,
+              ...(id === undefined
+                ? {}
+                : { access: { caSystemId: id, ecmPacketId: 0xfff1 } }),
+              assets: [{ type: "hev1", packetId: 0xf100 + i * 0x10 }],
+            }),
+          ),
+        ]),
+      );
+    }),
+    ...m2Packets([
+      mhSdtSection(
+        stream,
+        first.networkId,
+        services.map((s) => ({
+          serviceId: s.serviceId,
+          serviceType: s.serviceType,
+          name: s.name,
+        })),
+      ),
+    ]),
+  ]);
+}
+
+/**
+ * MH-EIT の予定 (基本 0x8C)。**スクランブルしない** (実機の BS4K も、カード無しで読めた)。
+ * 予定はセクションに 10 番組ずつ。segment_last_section_number は last_section_number と同じ値になる (`synth-mmt.mhEitSection`) が、
+ * 全部のセクションを流すので揃う
+ */
+function tlvEpg(services: FakeService[], knobs: Knobs): Uint8Array {
+  const sections: Uint8Array[] = [];
+  for (const service of services) {
+    const events = programsWith(service, knobs).map(mhEvent);
+    const base = {
+      serviceId: service.serviceId,
+      tlvStreamId: tsidOf(service),
+      originalNetworkId: service.networkId,
+    };
+    const groups: SynthMhEvent[][] = [];
+    for (let at = 0; at < events.length; at += 10)
+      groups.push(events.slice(at, at + 10));
+    if (groups.length === 0) groups.push([]);
+    for (const [index, chunk] of groups.entries())
+      sections.push(
+        mhEitSection({
+          ...base,
+          tableId: 0x8c,
+          sectionNumber: index,
+          lastSectionNumber: groups.length - 1,
+          events: chunk,
+        }),
+      );
+  }
+  return concatBytes(m2Packets(sections));
+}
+
+/**
+ * MH-EIT[p/f] (0x8B)。いま流れている番組 (section 0) と次の番組 (section 1)。延長の決め方は TS の `nowOnAir` と同じで、
+ * 延びたら次の番組をそのぶん繰り下げて短くする
+ */
+function tlvOnAir(services: FakeService[], knobs: Knobs): Uint8Array {
+  if (knobs.noPresentFollowing) return new Uint8Array(0);
+  const sections: Uint8Array[] = [];
+  for (const service of services) {
+    const events = programsWith(service, knobs);
+    const current = present(events);
+    if (current === undefined) continue;
+    const section = (
+      sectionNumber: number,
+      event: SynthEvent,
+      status: number,
+    ) =>
+      mhEitSection({
+        serviceId: service.serviceId,
+        tlvStreamId: tsidOf(service),
+        originalNetworkId: service.networkId,
+        tableId: 0x8b,
+        sectionNumber,
+        lastSectionNumber: 1,
+        runningStatus: status,
+        events: [mhEvent(event)],
+      });
+    sections.push(
+      section(
+        0,
+        { ...current, duration: current.duration + knobs.extendedMs },
+        4,
+      ),
+    );
+    const next = events[events.indexOf(current) + 1];
+    if (next !== undefined && next.duration > knobs.extendedMs)
+      sections.push(
+        section(
+          1,
+          {
+            ...next,
+            startAt: next.startAt + knobs.extendedMs,
+            duration: next.duration - knobs.extendedMs,
+          },
+          1,
+        ),
+      );
+  }
+  return concatBytes(m2Packets(sections));
+}
+
+/**
+ * **偽の 4K の放送** (ケーブルの分割 TLV を組み立てた TLV のバイト列。`FakeService.transport` が `tlv` の局)。
+ * 本物のエージェントが `application/x-arib-tlv` で流すものと同じ並び。表と番組表を流し、スクランブルしていない局 (`tlvMedia`) は
+ * 本物の HEVC と AAC と字幕を実時間で流す (`@danything/arib/synth-mmt-av`。映像の 1 MPU ごと。時刻はいまの時刻から)。
+ * スクランブルした局は映像も音声も流さない (denpa は復号できない局として選局しない)
+ */
+export function broadcastTlv(
+  services: FakeService[],
+  knobs: () => Knobs,
+  send: (data: Uint8Array) => void,
+): () => void {
+  send(tlvTables(services));
+  send(tlvEpg(services, knobs()));
+  send(tlvOnAir(services, knobs()));
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks++;
+    /*
+     * 表は繰り返し流れてくる。番組表は数秒おきに流し直す (途中から読んでも揃うように)。
+     * p/f は 1 秒ごと (本物も 2 秒に 1 回以上来る。`pf-event.PF_WAIT`)
+     */
+    send(tlvTables(services));
+    send(tlvOnAir(services, knobs()));
+    if (ticks % 30 === 0) send(tlvEpg(services, knobs()));
+  }, TICK * 10);
+  const startMs = Date.now();
+  const media = services.flatMap((service, i) =>
+    tlvMedia(service)
+      ? [
+          new SynthMmtAv({
+            serviceId: service.serviceId,
+            mptPacketId: TLV_MPT + i,
+            videoPacketId: 0xf100 + i * 0x10,
+            audioPacketId: 0xf110 + i * 0x10,
+            captionPacketId: 0xf130 + i * 0x10,
+            startMs,
+            caption: TLV_CAPTION,
+          }),
+        ]
+      : [],
+  );
+  /*
+   * 実時間で流す。遅れたぶんは次の刻みでまとめて流す (setInterval は間隔を守らない)。MPU は 1 つ約 0.13 秒
+   */
+  let sent = 0;
+  const pace =
+    media.length === 0
+      ? null
+      : setInterval(() => {
+          const due = Math.floor((Date.now() - startMs) / MPU_MS) + 1;
+          for (; sent < due; sent++) for (const av of media) send(av.next());
+        }, MPU_MS);
+  return () => {
+    clearInterval(timer);
+    if (pace !== null) clearInterval(pace);
+  };
+}
+
+/** 偽の 4K の局の字幕 (`broadcastTlv`)。ライブで字幕が出るかを見る */
+export const TLV_CAPTION = "４Ｋの字幕";

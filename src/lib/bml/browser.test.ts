@@ -122,6 +122,7 @@ function setup(
     screen: () => {},
     lock: () => 1,
     unlock: () => true,
+    unlockAll: () => {},
     locked: () => [],
     detect: () => 1,
     loadDrcs: () => 1,
@@ -201,6 +202,7 @@ describe("browser.*", () => {
       "Ctrl.startExtraBrowser",
       "AITControlledApp.Start",
       "EPG.Basic2",
+      "Ctrl.NPT",
     ];
     const result = await s.run(`
             var groups = ${JSON.stringify(groups).replace(/"/g, "'")};
@@ -210,8 +212,8 @@ describe("browser.*", () => {
             out[groups.length + 1] = browser.getResidentAppVersion("x");
             var result = out;
         `);
-    // Ctrl.Media は isSupportedMedia が答えるのと揃える。PPP・常駐アプリ・外のブラウザ・AIT は無い
-    expect(items(result)).toEqual([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, null]);
+    // Ctrl.Media は isSupportedMedia が答えるのと揃える。PPP・常駐アプリ・外のブラウザ・AIT・NPT は無い
+    expect(items(result)).toEqual([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, null]);
   });
 
   test("Hybridcast を開けるときだけ AIT の問い合わせに 1 と答え、開くのは画面に任せる", async () => {
@@ -380,7 +382,7 @@ describe("browser.*", () => {
     expect(s.vm.realm.global.get("a")).toBe(1);
   });
 
-  test("transmitTextDataOverIP は待って [結果, 状態, 返り] を返す (Denbun= に EUC-JP の %XX)", async () => {
+  test("transmitTextDataOverIP は待って [結果, 状態, レスポンス] を返す (Denbun= に EUC-JP の %XX)", async () => {
     const s = setup();
     const result = await s.run(
       'var r = browser.transmitTextDataOverIP("http://x/", "あa", "EUC-JP"); var result = r[2];',

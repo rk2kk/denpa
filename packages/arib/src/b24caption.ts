@@ -205,7 +205,7 @@ interface Drcs {
   pixels: Uint8Array;
   /** 置き換えられた字。無ければ画像のまま */
   replaced: number | null;
-  /** 元の画像の MD5。置き換え表を引く鍵で、送る画像を覚えておく鍵でもある */
+  /** 元の画像の MD5。置き換え表を引くキーで、送る画像を覚えておくキーでもある */
   md5: string;
 }
 
@@ -217,7 +217,7 @@ const smoothed = new Map<string, CaptionDrcs>();
 const SMOOTHED_MAX = 256;
 
 function sendable(drcs: Drcs): CaptionDrcs {
-  // MD5 は画素だけから取っているので、大きさも鍵に入れる
+  // MD5 は画素だけから取っているので、大きさもキーに入れる
   const key = `${drcs.md5}:${drcs.width}x${drcs.height}:${drcs.depth}`;
   let sent = smoothed.get(key);
   if (sent === undefined) {
@@ -413,11 +413,13 @@ export class B24CaptionDecoder {
     if (languages === 0 || languages > 8) return;
     const found: CaptionLanguage[] = [];
     for (let i = 0; i < languages; i++) {
-      if (at + 6 > data.length) return;
+      if (at + 5 > data.length) return;
       const tag = data[at]! >> 5;
       const dmf = data[at]! & 0x0f;
       at += 1;
+      // DC (表示モード) が 1 バイト挟まる
       if (dmf === 0b1100 || dmf === 0b1101 || dmf === 0b1110) at += 1;
+      if (at + 4 > data.length) return;
       const code = ascii(data, at, 3);
       at += 3; // ISO 639
       const format = data[at]! >> 4;
@@ -979,7 +981,7 @@ export class B24CaptionDecoder {
 /**
  * デコードした 1 枚を、送る形式にする。**同じ見た目で続いている字を 1 つの並びに束ねる。**
  *
- * libaribcaption の描き手 (region_renderer) が字ごとに計算している置き場所を、ここで
+ * libaribcaption の描画側 (region_renderer) が字ごとに計算している置き場所を、ここで
  * 面の単位のまま済ませておく。区画は `floor((字の幅 + 字間) × 倍率)`、字の枠は区画の中で
  * 字間の半分だけ右下へずらしたところ。
  *
@@ -1057,7 +1059,7 @@ function toPage(caption: Caption, plane: [number, number]): CaptionPage | null {
 }
 
 /**
- * 字幕の PES の中身で、データグループの頭の位置。データ識別 (0x80 = 字幕) と私的ストリーム識別 (0xFF) が
+ * 字幕の PES の中身で、データグループの先頭の位置。データ識別 (0x80 = 字幕) と私的ストリーム識別 (0xFF) が
  * 合わなければ -1
  */
 function groupAt(data: Uint8Array): number {

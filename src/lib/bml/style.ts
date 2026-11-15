@@ -1,7 +1,7 @@
 /**
  * 要素の見た目を決める (重ね合わせ)。**決めた値は確かめた数と列挙だけ。**
  *
- * 重ねる順 (後が勝つ):
+ * 次の順に重ね、後のものが勝つ。
  *
  * 1. 既定のスタイル (STD-B24 付属 2 の既定のスタイルシートのうち、放送が頼るもの)
  * 2. 文書の style 要素・link の規則 (詳細度 → 順番。`!important` は別に重ねて上に)。フォーカス中は
@@ -15,7 +15,7 @@
 
 import type { Declaration } from "./css";
 
-/** 特性の生の値 (`normalStyle.left` が返すもの)。名前は CSS の書き方 */
+/** 宣言した値 (style 属性や、スクリプトが `normalStyle.left` に書いたもの)。名前は CSS のプロパティ名 */
 export type Declarations = Map<string, string>;
 
 export type State = "normal" | "focus" | "active";
@@ -62,7 +62,7 @@ export interface Computed {
   displayAspectRatio: string | null;
 }
 
-/** 継ぐ特性 */
+/** 継ぐプロパティ */
 const INHERITED = new Set([
   "color-index",
   "color",
@@ -78,7 +78,9 @@ const INHERITED = new Set([
 
 /**
  * 既定のスタイル (web-bml の default_css.ts に合わせ、放送が頼るものだけ)。
- * 文字の色は規格では受信機しだい。テレビの画面に合わせて白 (7) にする
+ * 文字の色は規格では受信機しだい。web-bml (TVTest のデータ放送のプラグインが使う) と同じく黒 (0) にする。
+ * NHK の文書は白にしたい所だけ `color-index: 7` を書き、指定の無い所 (地震お知らせ表示設定の「利用する」など) は TVTest で黒になる。
+ * 白にしていた頃は地の薄い灰色に紛れて読めなかった
  */
 const DEFAULTS: Record<string, [string, string][]> = {
   "*": [["used-key-list", "basic data-button"]],
@@ -86,7 +88,7 @@ const DEFAULTS: Record<string, [string, string][]> = {
     ["background-color-index", "0"],
     ["resolution", "960x540"],
     ["visibility", "visible"],
-    ["color-index", "7"],
+    ["color-index", "0"],
     ["font-family", "丸ゴシック"],
     ["font-size", "24px"],
     ["line-height", "normal"],
@@ -152,7 +154,7 @@ export interface Cascade {
 }
 
 /**
- * 生の値を重ねる。返すのは「この要素で効いている値」(継ぐものは親から引いてくる前)。
+ * 宣言した値を重ねる。返すのは「この要素で効いている値」(継ぐものは親から引いてくる前)。
  * `state` を渡すと、その状態のときの値 (`focusStyle` の読み出し)
  */
 function declared(node: Cascade, state: State = node.state): Declarations {
@@ -176,7 +178,7 @@ function declared(node: Cascade, state: State = node.state): Declarations {
   return out;
 }
 
-/** 生の値を決めた値に (継ぐものは親から。`node.parent` をたどって引く) */
+/** 宣言した値を決めた値に (継ぐものは親から。`node.parent` をたどって引く) */
 function resolved(node: Cascade, property: string): string | null {
   const value = declared(node).get(property);
   if (value !== undefined && value.toLowerCase() !== "inherit")
@@ -246,7 +248,7 @@ export function compute(
   state: State = node.state,
 ): Computed {
   const own = declared(node, state);
-  // 継がない特性の inherit は、親の効いている値をそのまま使う
+  // 継がないプロパティの inherit は、親の効いている値をそのまま使う
   for (const [property, value] of own) {
     if (value.trim().toLowerCase() !== "inherit" || INHERITED.has(property))
       continue;
@@ -277,7 +279,7 @@ export function compute(
     return parts.length === 2 &&
       parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)
       ? [parts[0]!, parts[1]!]
-      : [30, 15];
+      : (parent?.grayscale ?? [30, 15]);
   };
   const align = (get("text-align") ?? "").toLowerCase();
   const weight = (get("font-weight") ?? "").toLowerCase();
@@ -291,20 +293,17 @@ export function compute(
     visible: inherits("visibility")
       ? parent!.visible
       : (get("visibility") ?? "visible").toLowerCase() !== "hidden",
-    colorIndex: inherits("color-index")
-      ? parent!.colorIndex
-      : parseIndex(get("color-index"), 7),
+    // 継ぐプロパティは、値が無い・inherit・読めないときに親の値を使う (読めない宣言は無かったことにする)
+    colorIndex: parseIndex(get("color-index"), parent?.colorIndex ?? 0),
     backgroundColorIndex: parseIndex(get("background-color-index"), 8),
-    grayscale: inherits("grayscale-color-index")
-      ? parent!.grayscale
-      : grayscale(),
+    grayscale: grayscale(),
     borderWidth: px("border-width", 0),
     borderStyle: borderStyle(get("border-style")),
     borderColorIndex: SIDES.map((side) =>
       parseIndex(get(`border-${side}-color-index`), 0),
     ) as Sides,
     padding: SIDES.map((side) => px(`padding-${side}`, 0)) as Sides,
-    fontSize: inherits("font-size") ? parent!.fontSize : px("font-size", 24),
+    fontSize: px("font-size", parent?.fontSize ?? 24),
     fontFamily: inherits("font-family")
       ? parent!.fontFamily
       : unquote(get("font-family") ?? "丸ゴシック"),
@@ -321,9 +320,7 @@ export function compute(
       : align === "center" || align === "right" || align === "justify"
         ? align
         : "left",
-    letterSpacing: inherits("letter-spacing")
-      ? parent!.letterSpacing
-      : px("letter-spacing", 0),
+    letterSpacing: px("letter-spacing", parent?.letterSpacing ?? 0),
     backgroundImage:
       background === null || background.toLowerCase() === "none"
         ? null

@@ -103,12 +103,12 @@ public class Zd1jTests
     }
 
     [Test]
-    public async Task 知らない中身の処理なら開かない()
+    public async Task 想定外の中身の処理なら開かない()
     {
         var usb = new FakeBridgeUsb();
         usb.Memory[0xE9AC0] = 0x12345678;
         var error = Assert.Throws<IOException>(() => Started(usb));
-        await Assert.That(error.Message).Contains("知らない中身");
+        await Assert.That(error.Message).Contains("想定外の中身");
     }
 
     [Test]
@@ -134,7 +134,7 @@ public class Zd1jTests
     {
         var usb = new FakeBridgeUsb();
         var bridge = Started(usb);
-        // コア 1 を置いて走らせ、生きている印を 2 回読んだ。bulk の経路は空の塊で確かめた
+        // コア 1 を置いて走らせ、生存カウンタを 2 回読んだ。bulk の経路は空の塊で確かめた
         await Assert.That(usb.Log).Contains("W 01700000=FFFCFFFF");
         await Assert.That(usb.Log.Count(line => line == "R 017A3C7C")).IsEqualTo(2);
         await Assert.That(usb.Log).Contains($"W 017A3C78={Mb86h47Programs.BulkEnable:X8}");
@@ -144,7 +144,7 @@ public class Zd1jTests
         bridge.Write(Dib8096.DemodAddress, [0x05, 0x07, 0x00, 0x03]);
         bridge.Write(Dib8096.TunerAddress, [0x24, 0x00, 0x22]);
         bridge.Modify16(Dib8096.DemodAddress, 285, 0xFF9F, 0x0060);
-        // 答えを待たずに溜める (まだ送らない)
+        // 応答を待たずに溜める (まだ送らない)
         await Assert.That(usb.Packets.Count).IsEqualTo(1);
         bridge.Flush();
         await Assert.That(usb.Packets.Count).IsEqualTo(2);
@@ -163,14 +163,14 @@ public class Zd1jTests
         await Assert.That(usb.Dib.Tuner[0x24]).IsEqualTo((ushort)0x22);
         await Assert.That(usb.Dib.Demod[285]).IsEqualTo((ushort)0x0061);
 
-        // 読みは塊をすぐ送り、答えに載った値を返す
+        // 読み出しは塊をすぐ送り、応答に載った値を返す
         Span<byte> value = stackalloc byte[2];
         bridge.WriteRead(Dib8096.DemodAddress, [0x03, 0x80], value);
         await Assert.That(BinaryPrimitives.ReadUInt16BigEndian(value)).IsEqualTo((ushort)0x01B3);
     }
 
     [Test]
-    public async Task ACK_が無ければ投げる()
+    public async Task ACK_が無ければ_IOException_になる()
     {
         var usb = new FakeBridgeUsb();
         var bridge = Started(usb);
@@ -186,18 +186,18 @@ public class Zd1jTests
         var bridge = Started(usb);
         usb.Log.Clear();
         Span<byte> value = stackalloc byte[2];
-        // 確かめの塊が 1 個目なので、あと 15 個で 16 個
+        // 確認の塊が 1 個目なので、あと 15 個で 16 個
         for (var i = 0; i < 15; i++) bridge.WriteRead(Dib8096.DemodAddress, [0x03, 0x80], value);
         await Assert.That(usb.Log).Contains("W 00FD8508=82100000");
         await Assert.That(usb.Log.IndexOf("W 00FD8504=00000001")).IsGreaterThan(usb.Log.IndexOf("W 00FD8508=82100000"));
     }
 
     [Test]
-    public async Task コア_1_が_bulk_の塊に答えなければ開かない()
+    public async Task コア_1_が_bulk_の塊に応答しなければ開かない()
     {
         var usb = new FakeBridgeUsb { Core1Bulk = false };
         var error = Assert.Throws<IOException>(() => Started(usb));
-        await Assert.That(error.Message).Contains("bulk の塊に答えません");
+        await Assert.That(error.Message).Contains("bulk の塊に応答しません");
     }
 
     [Test]
@@ -234,25 +234,25 @@ public class Zd1jTests
     public async Task B_CAS_の速さは_19200()
     {
         var atr = Atr.Parse(Convert.FromHexString("3BF01200FF9181B17C451F0399"));
-        var (baud, control, cwt, bwt, rate) = Zd1jCard.Speed(atr);
+        var (baud, control, cwt, bwt, rate) = CardUart.Speed(atr);
         await Assert.That(baud).IsEqualTo(0x5D5Du);
         await Assert.That(control).IsEqualTo(0x00010000u);
         await Assert.That(cwt).IsEqualTo(107u);
         await Assert.That(bwt).IsEqualTo(36559u);
         await Assert.That(rate).IsEqualTo(19200);
-        await Assert.That(Zd1jCard.AtrLength([.. Convert.FromHexString("3BF01200FF9181B17C451F0399")])).IsEqualTo(13);
-        await Assert.That(Zd1jCard.AtrLength([0x3B, 0xF0, 0x12])).IsNull();
+        await Assert.That(CardUart.AtrLength([.. Convert.FromHexString("3BF01200FF9181B17C451F0399")])).IsEqualTo(13);
+        await Assert.That(CardUart.AtrLength([0x3B, 0xF0, 0x12])).IsNull();
     }
 
     [Test]
-    public async Task 単位から取り出すときは_0x47_を2つ見て揃える()
+    public async Task 単位から取り出すときは_0x47_を_2_つ確かめて揃える()
     {
         static byte[] Unit(byte marker)
         {
             var unit = new byte[192];
             unit[4] = 0x47;
             unit[5] = marker;
-            // 中身にも 0x47 を混ぜる (1 つだけでは単位の頭と信じない)
+            // 中身にも 0x47 を混ぜる (1 つだけでは単位の先頭とみなさない)
             if (marker == 0) unit[100] = 0x47;
             if (marker == 2) unit[150] = 0x47;
             return unit;
@@ -303,7 +303,7 @@ public class Zd1jTests
             Device("1-3", "0511", "0045");
             Device("1-4", "054c", "04b2");
             Directory.CreateDirectory(Path.Combine(sysfs, "1-4:1.0", "driver"));
-            await Assert.That(string.Join(",", Zd1j.Ports(sysfs))).IsEqualTo("1-2");
+            await Assert.That(string.Join(",", Zd1j.Ports(new SysfsUsbHost(sysfs)))).IsEqualTo("1-2");
         }
         finally
         {
@@ -319,12 +319,12 @@ public class Zd1jTests
         {
             var usb = new FakeBridgeUsb();
             var tuner = new Zd1jTuner("test", () => Zd1jBoard.Acquire(port, () => usb), () => Zd1jBoard.CloseIfIdle(port));
-            tuner.Tune(ChannelTable.Parse("T27")!, ChannelTable.NoStreamId);
+            tuner.Tune(ChannelTable.Parse("T27")!);
             await Assert.That(tuner.Tuned).IsTrue();
             // 流している間は赤 (GPIO 1 = 出力・High)
             await Assert.That(usb.Dib.Demod[1029] & 2).IsEqualTo(0);
             await Assert.That(usb.Dib.Demod[1030] & 2).IsEqualTo(2);
-            // 流し始めのあとに読みを出す
+            // 流し始めのあとに転送要求を出す
             await Assert.That(usb.Log.IndexOf("S 81 64512x16")).IsGreaterThan(usb.Log.IndexOf("W 00D02010=02000000"));
 
             var units = new byte[192 * 10];
@@ -344,14 +344,14 @@ public class Zd1jTests
             await Assert.That(tuner.Timings.FirstTsMs).IsGreaterThanOrEqualTo(0);
 
             tuner.Dispose();
-            // 流し終わり (仕様書 9.5): コア 0 を止め、受信側と書き手を止め、出力をハイインピーダンスに
+            // 流し終わり (仕様書 9.5): コア 0 を止め、受信側と書き込み側を止め、出力をハイインピーダンスに
             await Assert.That(usb.Log).Contains("S stop");
             await Assert.That(usb.Log).Contains("W 00D02010=04000000");
             await Assert.That(usb.Dib.Demod[1286]).IsEqualTo((ushort)0);
             await Assert.That(usb.Dib.Demod[1029] & 2).IsEqualTo(2);
             // チューナーが捨てられたので、誰も使っていないボードは閉じる
             await Assert.That(usb.Disposed).IsTrue();
-            // 閉じる前に眠らせた (DiB0090 のスリープ = GPIO 0 を High)
+            // 閉じる前にスリープさせた (DiB0090 のスリープ = GPIO 0 を High)
             await Assert.That(usb.Dib.Demod[1030] & 1).IsEqualTo(1);
         }
         finally
@@ -369,7 +369,7 @@ public class Zd1jTests
             var usb = new FakeBridgeUsb();
             var board = Zd1jBoard.Acquire(port, () => usb);
             board.Release();
-            // PT3 などのデバイスを TunerPool が開きっぱなしにするのと同じ扱い。次に使う人は同じボード (起動し直さない)
+            // PT3 などのデバイスを TunerPool が開きっぱなしにするのと同じ扱い。次に使う側も同じボード (起動し直さない)
             await Assert.That(usb.Disposed).IsFalse();
             var again = Zd1jBoard.Acquire(port, () => throw new InvalidOperationException());
             again.Release();
@@ -383,27 +383,27 @@ public class Zd1jTests
     }
 
     [Test]
-    public async Task ロックしなければ同期しなかったと言ってボードを返す()
+    public async Task ロックしなければ同期失敗の例外を送出してボードを返す()
     {
         var usb = new FakeBridgeUsb();
         usb.Dib.Signal = false;
         var board = new Zd1jBoard("1-2", usb);
         board.Bridge.Start();
         var tuner = new Zd1jTuner("test", () => board);
-        var error = Assert.Throws<IOException>(() => tuner.Tune(ChannelTable.Parse("T27")!, ChannelTable.NoStreamId));
+        var error = Assert.Throws<IOException>(() => tuner.Tune(ChannelTable.Parse("T27")!));
         await Assert.That(error.Message).IsEqualTo(ITuneDevice.SyncFailed);
         await Assert.That(tuner.Tuned).IsFalse();
         await Assert.That(tuner.Board).IsNull();
     }
 
     [Test]
-    public async Task 一台だけなら挿し替えたポートに付いていく()
+    public async Task 一台だけなら挿し替えたポートに追従する()
     {
         // 設定のポートにあればそのまま
         await Assert.That(Zd1j.Follow("2-1", ["2-1"])).IsEqualTo("2-1");
         // 抜いてほかのポートに挿した。1 台だけなのでそちらを使う
         await Assert.That(Zd1j.Follow("2-1", ["2-2"])).IsEqualTo("2-2");
-        // 1 台も無ければ設定のまま (開くときに「見当たりません」と言う)
+        // 1 台も無ければ設定のまま (開くときに「見当たりません」の例外になる)
         await Assert.That(Zd1j.Follow("2-1", [])).IsEqualTo("2-1");
         // 2 台以上はポートでしか見分けられないので、設定のまま
         await Assert.That(Zd1j.Follow("2-1", ["2-2", "2-3"])).IsEqualTo("2-1");
@@ -413,10 +413,10 @@ public class Zd1jTests
     private static int Logged(string line) => Log.Recent.Snapshot().Count(entry => entry.Text == line);
 
     [Test]
-    public async Task 開けなければ_どこで止まったかを1行記録する()
+    public async Task 開けなければ_どこで止まったかを_1_行記録する()
     {
         // ポートはテストごとに変える (記録はプロセスで 1 つ。テストは並んで走る)
-        var usbError = new IOException("usb 9-11 を開けません (見当たらないか、IOKit が開かせません)");
+        var usbError = new IOException("usb 9-11 を開けません (見当たらないか、IOKit でプラグインを作れません)");
         Assert.Throws<IOException>(() => Zd1jBoard.Acquire("9-11", () => throw usbError));
         await Assert.That(Logged($"[Sony CECH-ZD1 J 9-11] 開けません (USB を開くところで): {usbError.Message}")).IsEqualTo(1);
 
@@ -440,7 +440,7 @@ public class Zd1jTests
     }
 
     [Test]
-    public async Task card_は_CECH_ZD1_J_が無くても1行出し_どんな失敗も行にする()
+    public async Task card_は_CECH_ZD1_J_が無くても_1_行出し_どんな失敗も行にする()
     {
         var none = new StringWriter();
         Zd1j.DescribeCards([], none);

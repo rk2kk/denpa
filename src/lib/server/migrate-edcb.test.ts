@@ -15,7 +15,8 @@ config.dbPath = join(root, "denpa.db");
 
 const { now, orm } = await import("./db");
 const { programs, recordedHistory, rules, services } = await import("./schema");
-const { start, status, track } = await import("./migrate");
+const { serviceOf, start, status, track } = await import("./migrate");
+const { programKey, serviceKey } = await import("./tuner");
 const {
   convertRule,
   edcbTarget,
@@ -145,7 +146,6 @@ beforeEach(() => {
         network_id: GR.networkId,
         name: "でんぱ総合",
         type: "GR",
-        channel: "T27",
         updated_at: now(),
       },
       {
@@ -154,7 +154,6 @@ beforeEach(() => {
         network_id: BS.networkId,
         name: "BSでんぱ",
         type: "BS",
-        channel: "BS01_0",
         updated_at: now(),
       },
     ])
@@ -338,6 +337,17 @@ describe("ルールに写す", () => {
     });
   });
 
+  test("無料放送だけの条件は外して入れ、記す", () => {
+    expect(
+      convertRule(rule({ andKey: "テスト", freeCA: 1 }), known),
+    ).toMatchObject({
+      values: { keyword: "テスト", enabled: true },
+      notes: [
+        "無料放送だけの条件は外して取り込みました (有料放送にも当たります)",
+      ],
+    });
+  });
+
   test("写せないものは飛ばす", () => {
     const skip = (over: Partial<EdcbRule>) =>
       (
@@ -420,7 +430,7 @@ describe("取り込み", () => {
       .values([
         {
           id: eventOf(10),
-          service_id: GR.serviceId,
+          service_id: GR.id,
           network_id: GR.networkId,
           event_id: 10,
           start_at: soon,
@@ -430,7 +440,7 @@ describe("取り込み", () => {
         },
         {
           id: eventOf(11),
-          service_id: GR.serviceId,
+          service_id: GR.id,
           network_id: GR.networkId,
           event_id: 11,
           start_at: soon,
@@ -488,6 +498,61 @@ describe("取り込み", () => {
     expect(applied.log.join("\n")).toContain(
       "予約できません: コピー禁止の番組",
     );
+  });
+
+  test("ケーブルでだけ受けている局は、ケーブルの局と番組に当てる。アンテナでも受けていればアンテナの局", async () => {
+    // BSでんぱはアンテナとケーブルの両方、BSでんぱ2 はケーブルだけ。ケーブルの局の内部 ID はずらしてある (`tuner.serviceKey`)
+    const BS2 = 102;
+    const cableId = (serviceId: number) =>
+      serviceKey(BS.networkId, serviceId, "CATV");
+    orm()
+      .insert(services)
+      .values(
+        [
+          [BS.serviceId, "BSでんぱ"],
+          [BS2, "BSでんぱ2"],
+        ].map(([serviceId, name]) => ({
+          id: cableId(Number(serviceId)),
+          service_id: Number(serviceId),
+          network_id: BS.networkId,
+          name: String(name),
+          type: "CATV" as const,
+          channel: "QC30",
+          updated_at: now(),
+        })),
+      )
+      .run();
+    expect(serviceOf(BS.networkId, BS.serviceId)?.id).toBe(BS.id);
+    expect(serviceOf(BS.networkId, BS2)?.id).toBe(cableId(BS2));
+
+    const soon = now() + 3600_000;
+    orm()
+      .insert(programs)
+      .values({
+        id: programKey(BS.networkId, BS2, 20, "CATV"),
+        service_id: cableId(BS2),
+        network_id: BS.networkId,
+        event_id: 20,
+        start_at: soon,
+        end_at: soon + 1800_000,
+        name: "ケーブルの番組",
+        updated_at: now(),
+      })
+      .run();
+    const result = await within(() =>
+      importEdcbReservations(
+        [
+          reserveRow({
+            title: "ケーブルの番組",
+            networkId: BS.networkId,
+            serviceId: BS2,
+            eventId: 20,
+          }),
+        ],
+        preview,
+      ),
+    );
+    expect(result.reservations).toEqual({ imported: 1, skipped: 0 });
   });
 
   test("録画の履歴は正しく録れたものだけ。キーは局と EPG の開始で、もう一度回しても重ならない", async () => {
@@ -583,7 +648,6 @@ describe("EpgTimerSrv から通しで", () => {
         network_id: MX.networkId,
         name: "ＴＯＫＹＯ　ＭＸ１",
         type: "GR",
-        channel: "16",
         updated_at: now(),
       })
       .run();

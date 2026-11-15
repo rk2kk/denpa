@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { afterNavigate, goto } from "$app/navigation";
+  import { afterNavigate, beforeNavigate, goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { untrack } from "svelte";
@@ -18,7 +18,7 @@
    * 同じものを置く (`+layout.svelte`)。`/` と Ctrl/⌘+K で入る (`data-search-field`。見えている欄を
    * `+layout.svelte` が探す)。
    *
-   * **打つそばから応える。** 結果の画面の外 (`live` でない) では、少し待ってから `/api/search` に聞き、
+   * **打つそばから候補か結果を出す。** 結果の画面の外 (`live` でない) では、少し待ってから `/api/search` に問い合わせ、
    * 欄の下に節ごとの候補を出す (combobox と listbox の形。↑/↓ で選び、Enter で開く。何も選んでいなければ
    * Enter で結果の画面。Esc で閉じる)。結果の画面 (`live`) では候補を出さず、打つそばから結果の画面そのものを
    * 出し直す (履歴は積まずに置き換える)。どちらも、言葉が変わったら送りかけの問い合わせを止める
@@ -35,7 +35,7 @@
     live?: boolean;
   } = $props();
 
-  /** 打ってから聞くまでの間。打つ手を止めるたびに聞くと、1 字ごとにサーバに聞くことになる */
+  /** 打ってから問い合わせるまでの間。待たずに問い合わせると、1 字ごとにサーバへ問い合わせることになる */
   const DELAY = 180;
 
   let typed = $state(untrack(() => value));
@@ -51,7 +51,7 @@
 
   const listId = $derived(`${testid}-list`);
   let groups = $state<SuggestGroup[]>([]);
-  /** 候補を出しているときの言葉。結果の画面へのリンクと「見つかりません」に使う */
+  /** 候補を出しているときの言葉。結果の画面へのリンクと「一致するものはありません」に使う */
   let answered = $state("");
   let open = $state(false);
   let active = $state(-1);
@@ -78,7 +78,7 @@
     active = -1;
   }
 
-  /** 候補を聞く。言葉が変わったら前の問い合わせは止める */
+  /** 候補を問い合わせる。言葉が変わったら前の問い合わせは止める */
   async function suggest(q: string): Promise<void> {
     controller?.abort();
     const mine = new AbortController();
@@ -126,6 +126,7 @@
     }
     if (q === "") {
       groups = [];
+      answered = "";
       close();
       return;
     }
@@ -186,6 +187,12 @@
     if (live) sent = typed.trim();
   }
 
+  /*
+   * 画面を移り始めたら、待っている問い合わせと結果の出し直しを止める (打ってすぐほかの画面へ移ると、遅れて検索の画面へ戻していた)。
+   * 結果の画面でこの欄が自分で出し直す `goto` でも呼ばれるが、そのときはもうタイマーが鳴り終えていて、
+   * 結果の画面では候補を問い合わせない (`controller` が無い) ので、止めるものが無い。移る途中で打ち直した分は、そのあと新しく待つ
+   */
+  beforeNavigate(cancel);
   // 画面を移ったら閉じる (候補から選んだあと・ブラウザの戻る)
   afterNavigate(() => close());
 </script>
@@ -364,11 +371,12 @@
       font-size: var(--dp-text-base);
     }
   }
+  /* 押すキーの印。線は付けず、淡い面だけ (docs/design.md の「入力欄」と同じ) */
   .key {
     padding: 0 0.375rem;
-    border: 1px solid var(--dp-line);
+    border: 0;
     border-radius: var(--dp-radius-sm);
-    background: transparent;
+    background: var(--dp-subtle);
     color: var(--dp-muted);
     font-size: var(--dp-text-xs);
     line-height: 1.4;
@@ -402,9 +410,31 @@
     background: var(--dp-pop);
     box-shadow: var(--dp-shadow-pop);
     transform: translateX(-50%);
+    transform-origin: top center;
+    transition:
+      opacity var(--dp-duration-enter) var(--dp-ease),
+      transform var(--dp-duration-enter) var(--dp-ease-spring);
+  }
+  /*
+     * **開き方と閉じ方はメニューと同じ** (`app.css` の `.menu`)。少し縮んで少し上にずれた透明な姿からばねで出て、
+     * 閉じるときは短く引っ込む。閉じる間も描いておくため、`display` も一緒に移す (`allow-discrete`。対応していないブラウザはすぐ消える)。
+     * 引っ込む間は押させない (下の行を押した手を取らない)
+     */
+  @starting-style {
+    .suggest:not([hidden]) {
+      opacity: 0;
+      transform: translateX(-50%) translateY(-0.375rem) scale(0.94);
+    }
   }
   .suggest[hidden] {
     display: none;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%) translateY(-0.375rem) scale(0.94);
+    transition:
+      opacity var(--dp-duration-exit) var(--dp-ease-exit),
+      transform var(--dp-duration-exit) var(--dp-ease-exit),
+      display var(--dp-duration-exit) allow-discrete;
   }
   /*
      * **節は縦に積む。** Pico は `role="group"` を横並びの組 (inline-flex。角を落とし、間に線) にするので、

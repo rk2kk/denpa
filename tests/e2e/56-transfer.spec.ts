@@ -9,10 +9,15 @@ import {
   expect,
   goto,
   makeRule,
+  pairToken,
   recordOne,
   setRecording,
   test,
 } from "./helpers";
+
+/** 録画とエンコードが動いている行の状態 (`format.ts` の `encodeLabel`、録画中) */
+const BUSY =
+  /^(録画中|エンコード待ち|エンコード中|スクランブル復号中|CM 検出中)/;
 
 /**
  * **denpa を別の機械へ移す** (設定の「連携」。docs/migrate.md「別の機械へ移す」、transfer.ts)。
@@ -23,6 +28,11 @@ import {
  * アクセストークンで断られることも見る。tar の読み方や入れ替えの細かいところは単体テスト (`transfer.test.ts`・`tar.test.ts`)
  */
 test.describe("denpa を別の機械へ移す", () => {
+  /*
+   * **続きものなので、まとめて流す。** 書き出したファイル (`archive`) を後のテストが使う。1 つだけやり直すと
+   * `archive` が空のまま始まり、ファイルを選ぶところで `stat ''` に落ちていた
+   */
+  test.describe.configure({ mode: "serial" });
   let spare: Spare;
   /** 古い機械で書き出したファイル */
   let archive = "";
@@ -35,6 +45,21 @@ test.describe("denpa を別の機械へ移す", () => {
   test.afterAll(async () => {
     await spare?.shutdown();
   });
+
+  /**
+   * **書き出す前に、録画とエンコードが落ち着くのを待つ。** 同じワーカーの前のファイルが残した録画のエンコードが
+   * 書き出したあとに動くと、書き出した DB が指すファイルを消して作り直すことがある (エンコードの前に古いファイルを消す。
+   * `encoder.ts` の `stalePaths`)。そうなると録画のフォルダを写したあとも 1 件「置き場に無い録画」が残り、
+   * 確かめ直しても止まったままだった
+   */
+  async function settle(page: Page) {
+    await expect(async () => {
+      await goto(page, "/");
+      await expect(
+        page.getByTestId("recording-state").filter({ hasText: BUSY }),
+      ).toHaveCount(0, { timeout: 1_000 });
+    }).toPass({ timeout: 120_000, intervals: [1_000] });
+  }
 
   /** 新しい機械の画面で、ファイルを選んで送る */
   async function send(
@@ -53,19 +78,7 @@ test.describe("denpa を別の機械へ移す", () => {
   }
 
   test("アクセストークンでは断られる", async ({ request, stack }) => {
-    // テレビのアプリと同じようにペアリングしてアクセストークンを貰う (31-device と同じ手順)
-    const code = await (
-      await request.post("/api/device/code", { data: { name: "E2E の移す" } })
-    ).json();
-    expect(
-      (await request.post("/device", { form: { code: code.userCode } })).ok(),
-    ).toBe(true);
-    const { token } = await (
-      await request.post("/api/device/token", {
-        data: { deviceCode: code.deviceCode },
-      })
-    ).json();
-    expect(token).toMatch(/^denpa_/);
+    const token = await pairToken(request, "E2E の移す");
 
     const headers = {
       authorization: `Bearer ${token}`,
@@ -107,9 +120,12 @@ test.describe("denpa を別の機械へ移す", () => {
   });
 
   test("書き出せる", async ({ page, request, stack }) => {
+    // 録って視聴可能になるまでと、落ち着くのを待つ (`settle`) ぶん
+    test.slow();
     ({ id: recordingId } = await recordOne(page, request));
     await makeRule(page, "移すルール");
-    await setRecording(request, { cmCut: "cut" });
+    await setRecording(request, { keepOriginal: true });
+    await settle(page);
 
     await goto(page, "/settings/integrations#transfer");
     const downloading = page.waitForEvent("download");
@@ -173,6 +189,13 @@ test.describe("denpa を別の機械へ移す", () => {
     await expect(page.getByTestId("transfer-missing")).toBeVisible();
     await expect(page.getByTestId("transfer-apply")).toHaveCount(0);
 
+    // 「このまま取り込む」は 2 回押し。ほかの所を押すと 1 回目に戻る (削除と同じ `arming`)
+    await page.getByTestId("transfer-force").click();
+    await expect(page.getByTestId("transfer-force-confirm")).toBeVisible();
+    await page.getByTestId("transfer-counts").click();
+    await expect(page.getByTestId("transfer-force-confirm")).toHaveCount(0);
+    await expect(page.getByTestId("transfer-force")).toBeVisible();
+
     // 写して確かめ直す (送り直さない)
     cpSync(stack.encodedDir, spare.encodedDir, { recursive: true });
     cpSync(stack.rawDir, spare.rawDir, { recursive: true });
@@ -201,7 +224,7 @@ test.describe("denpa を別の機械へ移す", () => {
     await goto(page, `${spare.appUrl}/rules`);
     await expect(page.getByTestId("rule-row")).toContainText(["移すルール"]);
     await goto(page, `${spare.appUrl}/settings/recording`);
-    await expect(page.getByTestId("global-cmcut")).toHaveValue("cut");
+    await expect(page.locator('input[name="keepOriginal"]')).toBeChecked();
 
     // 古い機械を後のファイルのために戻す
     await setRecording(request);

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import {
   captionDescriptors,
@@ -20,7 +20,6 @@ import {
   appFrame,
   CAPTION_FEED_BACKLOG,
   CAPTION_FEED_HOLD,
-  CaptionCount,
   captionFeed,
   type CaptionOut,
   captionOutput,
@@ -28,7 +27,9 @@ import {
   CaptionText,
   NO_SUBTITLE,
   pagesFromMkv,
-  peekCaptions,
+  peekPmt,
+  PmtPeek,
+  pmtVideo,
   rawCaptionArgs,
   textFrame,
   TrackList,
@@ -53,8 +54,8 @@ describe("字幕の取り出し方", () => {
     expect(args).not.toContain("showinfo");
   });
 
-  /** **映像とは別の出口へ出す。** 同じ ffmpeg なので、出口を分けるしかない */
-  test("映像とは別の出口へ出す", () => {
+  /** **映像とは別の出力へ出す。** 同じ ffmpeg なので、出力を分けるしかない */
+  test("映像とは別の出力へ出す", () => {
     expect(captionOutput("0:p:1024", 0)).toContain("pipe:3");
   });
 
@@ -85,15 +86,15 @@ describe("放送そのままの経路の字幕", () => {
     expect(args.indexOf("-copyts")).toBeLessThan(args.indexOf("-i"));
     expect(args).not.toContain("libx264");
     expect(args).not.toContain("-vf");
-    // 出口はエンコードの経路と同じ (Matroska を 3 番目の出口へ)
+    // 出力はエンコードの経路と同じ (Matroska を 3 番目の出力へ)
     expect(args.slice(-2)).toEqual(["matroska", "pipe:3"]);
     // 字幕はデコードせずに写す (デコードするのは denpa)。字幕を描く指定は要らない
     expect(args.join(" ")).toContain("-map 0:p:1024:s:0? -c:s copy");
     expect(args).not.toContain("-sub_type");
   });
 
-  // 出口が名前付きパイプ (Windows) のとき、あるかを確かめるだけでパイプの 1 本を使ってしまう (`stream.sideOutput`)
-  test("出口があるかを確かめさせない (-y)", () => {
+  // 出力が名前付きパイプ (Windows) のとき、あるかを確かめるだけでパイプの 1 本を使ってしまう (`stream.sideOutput`)
+  test("出力があるかを確かめさせない (-y)", () => {
     expect(rawCaptionArgs(1024, 0, String.raw`\.pipedenpa-1-1`)).toContain(
       "-y",
     );
@@ -193,8 +194,8 @@ async function readAll(
 }
 
 /**
- * **字幕があるかは ffmpeg を起動する前に PMT で分かる** (`peekCaptions`)。無い放送に字幕の出口を要求すると
- * ffmpeg は入口を探り終えてから終了し、起動し直すぶん映像が遅れる
+ * **字幕があるかは ffmpeg を起動する前に PMT で分かる** (`peekPmt`)。無い放送に字幕の出力を要求すると
+ * ffmpeg は入力を探り終えてから終了し、起動し直すぶん映像が遅れる
  */
 describe("PMT で字幕の本数を見る", () => {
   test("字幕の部品タグを持つ ES を数える", () => {
@@ -230,7 +231,7 @@ describe("PMT で字幕の本数を見る", () => {
 
   test("TS を少しずつ渡して、その局の PMT を読めたら本数を返す", () => {
     const ts = head([[0x06, 0x130, captionDescriptors()]]);
-    const counter = new CaptionCount(SERVICE);
+    const counter = new PmtPeek(SERVICE);
     // パケットの切れ目と関係なく割って届く
     expect(counter.feed(ts.subarray(0, 100))).toBeNull();
     expect(counter.feed(ts.subarray(100, 300))).toBeNull();
@@ -238,21 +239,21 @@ describe("PMT で字幕の本数を見る", () => {
   });
 
   test("ほかの局の PMT では決めない", () => {
-    expect(new CaptionCount(SERVICE + 1).feed(head([]))).toBeNull();
+    expect(new PmtPeek(SERVICE + 1).feed(head([]))).toBeNull();
   });
 
   test("字幕が無い PMT なら 0、読んだ塊はそのまま出てくる", async () => {
     const video = packetize(VIDEO_PID, new Uint8Array(10));
     const ts = head([]);
     const parts = [video, ts.subarray(0, 200), ts.subarray(200), video];
-    const peeked = await peekCaptions(chunksOf(parts), SERVICE, 1_000);
+    const peeked = await peekPmt(chunksOf(parts), SERVICE, 1_000);
     expect(peeked.count).toBe(0);
     expect(await readAll(peeked.stream)).toEqual(parts);
   });
 
   test("字幕があれば本数", async () => {
     const parts = [head([[0x06, 0x130, captionDescriptors()]])];
-    const peeked = await peekCaptions(chunksOf(parts), SERVICE, 1_000);
+    const peeked = await peekPmt(chunksOf(parts), SERVICE, 1_000);
     expect(peeked.count).toBe(1);
     expect(await readAll(peeked.stream)).toEqual(parts);
   });
@@ -267,7 +268,7 @@ describe("PMT で字幕の本数を見る", () => {
       // 待ちきったあとに届く 1 つ目。返すストリームから出てこないといけない
       yield video;
     })();
-    const peeked = await peekCaptions(source, SERVICE, 50);
+    const peeked = await peekPmt(source, SERVICE, 50);
     expect(peeked.count).toBeNull();
     late();
     expect(await readAll(peeked.stream)).toEqual([video, video]);
@@ -275,7 +276,7 @@ describe("PMT で字幕の本数を見る", () => {
 
   test("先に尽きたら null", async () => {
     const parts = [packetize(VIDEO_PID, new Uint8Array(10))];
-    const peeked = await peekCaptions(chunksOf(parts), SERVICE, 1_000);
+    const peeked = await peekPmt(chunksOf(parts), SERVICE, 1_000);
     expect(peeked.count).toBeNull();
     expect(await readAll(peeked.stream)).toEqual(parts);
   });
@@ -285,15 +286,36 @@ describe("PMT で字幕の本数を見る", () => {
       yield packetize(VIDEO_PID, new Uint8Array(10));
       throw new Error("切れた");
     })();
-    const peeked = await peekCaptions(source, SERVICE, 1_000);
+    const peeked = await peekPmt(source, SERVICE, 1_000);
     expect(peeked.count).toBeNull();
     await expect(readAll(peeked.stream)).rejects.toThrow("切れた");
+  });
+
+  test("PMT の最初の映像から局の映像のコーデックを読む (TS で送る 4K の局は HEVC)", () => {
+    const pmt = (type: number) =>
+      programMap(SERVICE, VIDEO_PID, [
+        [0x0f, 0x112],
+        [type, VIDEO_PID],
+      ]);
+    expect(pmtVideo(pmt(0x02))).toBe("mpeg2");
+    expect(pmtVideo(pmt(0x1b))).toBe("h264");
+    expect(pmtVideo(pmt(0x24))).toBe("hevc");
+    // 映像の無い局 (音声だけ)
+    const audioOnly = programMap(SERVICE, VIDEO_PID, [[0x11, 0x112]]);
+    expect(pmtVideo(audioOnly)).toBeNull();
+  });
+
+  test("先に読むときに映像のコーデックも返す。PMT を読めなければ null", async () => {
+    const peeked = await peekPmt(chunksOf([head([])]), SERVICE, 1_000);
+    expect(peeked.video).toBe("mpeg2");
+    const none = [packetize(VIDEO_PID, new Uint8Array(10))];
+    expect((await peekPmt(chunksOf(none), SERVICE, 1_000)).video).toBeNull();
   });
 
   test("塊が届くたびに知らせる", async () => {
     let seen = 0;
     const parts = [packetize(VIDEO_PID, new Uint8Array(10)), head([])];
-    await peekCaptions(chunksOf(parts), SERVICE, 1_000, () => seen++);
+    await peekPmt(chunksOf(parts), SERVICE, 1_000, () => seen++);
     expect(seen).toBe(2);
   });
 });
@@ -301,7 +323,7 @@ describe("PMT で字幕の本数を見る", () => {
 /**
  * **放送が字幕を持っているかは、1 枚も来ていなくても分かる。**
  *
- * ffmpeg が入口で読んだストリーム一覧に出ている。届いてから画面に切り替えを
+ * ffmpeg が入力で読んだストリーム一覧に出ている。届いてから画面に切り替えを
  * 出していた頃は、間隔の空く番組を開くとボタンが出なかった (実機の
  * 「みんなの手話」。番組表には [字] と出ているのに)。
  */
@@ -372,7 +394,7 @@ describe("TrackList", () => {
 /**
  * **放送の欠けにいちいち言われるぶんは残さない。**
  *
- * 選べる字幕を入口の見出しから読み取るために `-loglevel` を info まで開けたので、
+ * 選べる字幕を入力の見出しから読み取るために `-loglevel` を info まで開けたので、
  * デコーダの「直した」「捨てた」がそのまま流れてくるようになった。実機の弱い局
  * では毎秒何行も出て、**本当の失敗がその中に埋もれる**。
  */
@@ -401,8 +423,8 @@ describe("worthLogging", () => {
     }
   });
 
-  /** 入口の見出しはただの説明。全部残すと選局のたびに数十行積まれる */
-  test("入口の説明は残さない", () => {
+  /** 入力の見出しはただの説明。全部残すと選局のたびに数十行積まれる */
+  test("入力の説明は残さない", () => {
     expect(worthLogging("  Stream #0:2[0x130]: Subtitle: arib_caption")).toBe(
       false,
     );
@@ -502,6 +524,33 @@ describe("アプリ向けの字幕 API", () => {
       return () => left++;
     });
     expect(left).toBe(1);
+  });
+
+  /*
+   * 中身を作る側が投げた (ffmpeg を起こせない) とき、間を埋める送信 (`CAPTION_PING_MS` ごと) のタイマーが
+   * 残っていた。止めてから伝える
+   */
+  test("中身を作れなかったら、間を埋める送信を止めてから伝える", async () => {
+    // 呼び出しを覚えるだけで、本物のタイマーを動かす
+    const started = spyOn(globalThis, "setInterval");
+    const cleared = spyOn(globalThis, "clearInterval");
+    let failure = "";
+    try {
+      // 投げたものは、作るところ (start) か読むところのどちらかで受け取る
+      const stream = captionFeed(() => {
+        throw new Error("ffmpeg を起こせません");
+      });
+      await stream.getReader().read();
+    } catch (error) {
+      failure = String(error);
+    }
+    const timers = started.mock.results.map((result) => result.value);
+    const stopped: unknown[] = cleared.mock.calls.map(([timer]) => timer);
+    started.mockRestore();
+    cleared.mockRestore();
+    expect(failure).toContain("ffmpeg を起こせません");
+    expect(timers).toHaveLength(1);
+    expect(stopped).toContain(timers[0]);
   });
 
   test("待ってもらう量は閉じる量より小さい", () => {

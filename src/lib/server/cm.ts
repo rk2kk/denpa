@@ -1,11 +1,18 @@
-import { LOGO_OK, LOGO_UNUSABLE } from "../format";
-import { decideCm, type Range } from "../ts/cm-decide";
-import type { CmMode } from "../types";
+import { clock, LOGO_OK, LOGO_UNUSABLE } from "../format";
+import {
+  decideCm,
+  intersect,
+  missingVideo,
+  type Range,
+  totalLength,
+} from "../ts/cm-decide";
+import { OFF, ON } from "../ts/logo-detect";
 import type { CmMaterial } from "./cm-material";
 import { type Scan, scan, type ScanWant } from "./cm-scan";
 import { config } from "./config";
 import { logoRepo, share } from "./logo-data";
 import { openLogo } from "./logo-own";
+import { recordingInput, recordingProbeInput } from "./recording-io";
 import { run } from "./stream";
 import { tsProbe } from "./ts-probe";
 
@@ -19,8 +26,7 @@ import { tsProbe } from "./ts-probe";
  * - ロゴが使えない (覚えられない・当たらない・結果がおかしい) ときは、同じ材料から
  *   **CM の尺 (15 秒の倍数) だけで**決め直す。もう一度デコードはしない
  *
- * 誤検出したときの被害が大きい (本編が消える) ので、既定は実カットではなく
- * チャプター付与にしてある (`config.cmCutDefault`)。設定の CM の扱いを `cut` にしたときだけ実際に切る。
+ * 見つけた CM はチャプターにするだけで、エンコードしたものは切らない (誤検出しても本編が消えない)。
  */
 
 export type { Range };
@@ -33,20 +39,23 @@ export type { Range };
  */
 const MAX_CM_RATIO = 0.5;
 
-export function isCmMode(value: unknown): value is CmMode {
-  return value === "off" || value === "chapter" || value === "cut";
-}
-
-/** CM 判定が占める割合 (0〜1) */
-function cmShare(cm: Range[], duration: number): number {
-  if (!Number.isFinite(duration) || duration <= 0) return 0;
-  const total = cm.reduce((sum, range) => sum + (range.end - range.start), 0);
-  return total / duration;
+/**
+ * CM 判定が占める割合 (0〜1)。**映像の欠けた所 (`missing`) は分母にも分子にも入れない。** 欠けた所は CM か番組か決められない。
+ * 尺で割っていた頃は、途中から最後まで映像が欠けた録画で、欠けた所のぶん割合が上がっていた (`ts/cm-decide.missingVideo`)
+ */
+function cmShare(cm: Range[], duration: number, missing: Range[]): number {
+  const known = duration - totalLength(missing);
+  if (!Number.isFinite(known) || known <= 0) return 0;
+  return (totalLength(cm) - totalLength(intersect(cm, missing))) / known;
 }
 
 /** CM 判定が占める割合 (%。整数に丸める) */
-export function cmRatio(cm: Range[], duration: number): number {
-  return Math.round(cmShare(cm, duration) * 100);
+export function cmRatio(
+  cm: Range[],
+  duration: number,
+  missing: Range[] = [],
+): number {
+  return Math.round(cmShare(cm, duration, missing) * 100);
 }
 
 /**
@@ -54,15 +63,19 @@ export function cmRatio(cm: Range[], duration: number): number {
  *
  * ロゴを覚えたてのときなど、「先頭の 2 秒だけ本編」のような結果になることがある。
  */
-export function tooMuchCm(cm: Range[], duration: number): boolean {
-  return cmShare(cm, duration) >= MAX_CM_RATIO;
+export function tooMuchCm(
+  cm: Range[],
+  duration: number,
+  missing: Range[] = [],
+): boolean {
+  return cmShare(cm, duration, missing) >= MAX_CM_RATIO;
 }
 
-/** これより短い区間は作らない (切っても意味が無く、チャプターだけが増える) */
+/** これより短い区間は作らない (チャプターが増えるだけで飛ばす役に立たない) */
 const MIN_RANGE = 0.5;
 
 /**
- * 区間の裏返し。CM を渡して残す区間をもらう (チャプター・実カット)。
+ * 区間の裏返し。CM を渡して本編の区間をもらう (チャプター)。
  *
  * 渡された区間は並べ替えてから使う。
  *
@@ -132,6 +145,29 @@ export function chapterMetadata(cm: Range[], duration: number): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** チャプターを差し替えて書き直す。再エンコードしない。`chapters` が null ならチャプターを外す */
+export function chapterArgs(
+  input: string,
+  chapters: string | null,
+  output: string,
+): string[] {
+  return [
+    config.ffmpeg,
+    "-y",
+    "-v",
+    "error",
+    ...recordingInput(input),
+    ...(chapters === null
+      ? ["-map", "0", "-map_chapters", "-1"]
+      : ["-i", chapters, "-map", "0", "-map_chapters", "1"]),
+    "-c",
+    "copy",
+    "-f",
+    "matroska",
+    output,
+  ];
+}
+
 /**
  * ffprobe の `key=value` 出力を読む。**位置では読まない。**
  *
@@ -161,9 +197,12 @@ export function parseFrameRate(value: string | undefined): number {
 
 /** ffprobe を 1 回動かして、標準出力を返す */
 async function probe(input: string, args: string[]): Promise<string> {
-  const result = await run([config.ffprobe, "-v", "error", ...args, input], {
-    stdout: true,
-  });
+  const result = await run(
+    [config.ffprobe, "-v", "error", ...args, ...recordingProbeInput(input)],
+    {
+      stdout: true,
+    },
+  );
   return new TextDecoder().decode(result.stdout).trim();
 }
 
@@ -412,7 +451,7 @@ export function shiftDetection(
 /** 読み方 (`openCm`) と、読んだ材料からの決め方 */
 export interface CmReading {
   /**
-   * 1 回のデコードで何を読むか。エンコードの ffmpeg に `cm-scan.scanReader` の出口を足す。
+   * 1 回のデコードで何を読むか。エンコードの ffmpeg に `cm-scan.scanReader` の出力を足す。
    * **デコードするたびに呼ぶ。** ロゴの点は読むたびに一から数える (再エンコードで途中までを持ち越さない)
    */
   want(): ScanWant;
@@ -445,7 +484,7 @@ export async function openCm(
   const { duration: measured } = probed;
   // フレームレートはロゴの区間をならす窓の幅に使う
   const fps = Number.isFinite(probed.fps) ? probed.fps : config.cmFallbackFps;
-  // 映像の無い録画 (ラジオ。尺は測れて大きさが無い) は音だけ読む。映像の出口を足すと ffmpeg ごと落ちる
+  // 映像の無い録画 (ラジオ。尺は測れて大きさが無い) は音だけ読む。映像の出力を足すと ffmpeg ごと落ちる
   const video = !(Number.isNaN(probed.width) && Number.isFinite(measured));
   /** 支度で分かった、ロゴが使えない理由 (`decide` が尺だけで決めたときの覚え書きに足す) */
   let opening = video ? "" : "映像がありません";
@@ -500,6 +539,7 @@ export async function openCm(
 
       // ロゴの区間を出す (覚えていたものが当たらなければ、覚え直して枠だけ読み直す)
       let lit: CmMaterial["logo"] = null;
+      let logoModel: string | undefined;
       if (current) {
         step("本編と CM に分けています");
         const result = await current.finish(
@@ -525,6 +565,7 @@ export async function openCm(
           if (result.learned !== null)
             share(serviceId, result.learned.file, result.learned.again);
           lit = { spans: result.spans, scores: result.scores };
+          logoModel = result.model;
         } else {
           why = `ロゴ判定に失敗: ${result.note}`;
         }
@@ -543,6 +584,7 @@ export async function openCm(
         times: Float64Array.from(found.times),
         cuts: Float32Array.from(found.cuts),
         logo: lit,
+        logoModel,
         why,
       };
       /*
@@ -554,6 +596,62 @@ export async function openCm(
       return { ...decideFromMaterial(material), ...(keep ? { material } : {}) };
     },
   };
+}
+
+/** 並びの中央値。空なら NaN */
+function median(values: number[]): number {
+  if (values.length === 0) return Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[sorted.length >> 1]!;
+}
+
+/**
+ * **ロゴで決めた結果を捨てたときに、ロゴがどう判定されていたかを覚え書きの後ろに足す。**
+ * サーバのログは pod を入れ替えると消え、元の TS も残らないことがあるので、ロゴを見落としたのか
+ * (本編なのに点が低い)、決め方がずれたのかを、覚え書きと録画の映像を突き合わせて分けられるようにする。
+ *
+ * - 当てた型の在り処と大きさ、ロゴが写っていたと判定したコマの割合
+ * - 点の分布 (出たとみなす `ON` 以上、消えたとみなす `OFF` 未満、その間)
+ * - ロゴで CM とした区間と、区間の中の点の中央値。本編なのに CM とした区間で点が `OFF` の近くまであれば、
+ *   ロゴは写っていたが届かなかった。0 近くなら、型がその番組のロゴと合っていない
+ *
+ * 時刻は材料の物差し (エンコードした動画の時刻との差は 1 秒未満)
+ */
+export function logoDetail(material: CmMaterial, cm: Range[]): string {
+  const { logo, times } = material;
+  if (logo === null) return "";
+  const { scores, spans } = logo;
+  const frames = scores.length;
+  const percent = (count: number) =>
+    `${Math.round((count / Math.max(1, frames)) * 100)}%`;
+  const lit = spans.reduce((sum, span) => sum + span.end - span.start + 1, 0);
+  let high = 0;
+  let low = 0;
+  for (const value of scores) {
+    if (value >= ON) high++;
+    else if (value < OFF) low++;
+  }
+  const model =
+    material.logoModel !== undefined && material.logoModel !== ""
+      ? `${material.logoModel}、`
+      : "";
+  const ranges = cm.map((range) => {
+    const inside: number[] = [];
+    for (let i = 0; i < Math.min(frames, times.length); i++)
+      if (times[i]! >= range.start && times[i]! < range.end)
+        inside.push(scores[i]!);
+    const middle = median(inside);
+    const point = Number.isNaN(middle) ? "" : ` (点 ${middle.toFixed(2)})`;
+    return `${clock(range.start)}〜${clock(range.end)}${point}`;
+  });
+  const between = frames - high - low;
+  const parts = [
+    `ロゴ: ${model}写っていたコマ ${percent(lit)}`,
+    `ロゴの点: ${ON} 以上 ${percent(high)}、${OFF}〜${ON} ${percent(between)}、${OFF} 未満 ${percent(low)}`,
+  ];
+  if (ranges.length > 0)
+    parts.push(`ロゴで CM とした区間: ${ranges.join("、")}`);
+  return `。${parts.join("。")}`;
 }
 
 /**
@@ -577,6 +675,10 @@ export function decideFromMaterial(material: CmMaterial): CmDetection {
       : {}),
   };
   let why = material.why;
+  /** 映像の欠けた所。CM の割合に入れない (`cmShare`) */
+  const missing = missingVideo(times, duration);
+  /** ロゴで決めた結果を捨てたときに、覚え書きの後ろへ足すもの (`logoDetail`) */
+  let detail = "";
   if (material.logo !== null) {
     const cm = decideCm({
       ...input,
@@ -588,17 +690,18 @@ export function decideFromMaterial(material: CmMaterial): CmDetection {
     });
     if (cm.length === 0) why = "ロゴの消えている所がありませんでした";
     // 番組の半分以上が CM になったら、その結果は捨てて尺だけで決め直す (tooMuchCm)
-    else if (tooMuchCm(cm, duration))
-      why = `番組の ${cmRatio(cm, duration)}% が CM と判定されたため、この結果は使いません`;
+    else if (tooMuchCm(cm, duration, missing))
+      why = `番組の ${cmRatio(cm, duration, missing)}% が CM と判定されたため、この結果は使いません`;
     else return { cm, duration, note: LOGO_OK };
+    detail = logoDetail(material, cm);
   }
 
   // ロゴを使わずに、CM の尺 (15 秒の倍数) だけで決める
   const cm = decideCm(input);
   // 落ちた理由まで書く。**この文言から「ロゴで判定できなかった」と画面に出すかを決める** (format.logoUnusable)
   return {
-    cm: tooMuchCm(cm, duration) ? [] : cm,
+    cm: tooMuchCm(cm, duration, missing) ? [] : cm,
     duration,
-    note: `無音 ${material.silences.length} 箇所 (${LOGO_UNUSABLE}: ${why})`,
+    note: `無音 ${material.silences.length} 箇所 (${LOGO_UNUSABLE}: ${why})${detail}`,
   };
 }

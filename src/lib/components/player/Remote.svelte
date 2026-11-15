@@ -21,7 +21,7 @@
 
   /*
    * `AribKeyCode` (`src/lib/bml/engine.ts` の `KEY`) と同じ値。番号で書くのは、値として import すると
-   * データ放送を出す前からエンジン全体が落ちてくるため
+   * データ放送を出す前からエンジン全体を読み込むため
    */
   /** d (DataButton)。`DataBroadcast` の DATA_BUTTON と同じ */
   const DATA = 20;
@@ -139,32 +139,37 @@
   .remote {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: var(--dp-space-3);
     flex-shrink: 0;
     /* カードにしない。ほかのサイドバーと同じく地も枠も影も付けず、局の一覧とは余白で分ける (`app.css` の `.side-panel`) */
     margin-bottom: var(--dp-space-4);
   }
   .colors {
     display: flex;
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
   }
   .color {
     --pico-background-color: var(--paint);
     --pico-border-color: var(--paint);
     --pico-color: var(--ink);
     flex: 1;
-    height: 2rem;
+    /* 下の十字のキーと同じ高さ (車の中のタブレットでも指で押せる) */
+    height: 3rem;
     padding: 0;
     font-size: var(--dp-text-sm);
   }
-  /* 押したときの色は Pico (層の中) に勝つ上の変数のまま。明るさだけ上げる */
-  .color:is(:hover, :focus, :active) {
-    filter: brightness(1.1);
+  /*
+   * 指を乗せたら面を一段変える (ほかのボタンの「ごく薄い地」と同じ役目。色のキーは色そのものが意味なので、字の色を少し混ぜるだけ)。
+   * `filter` は乗せるたびにボタンを描き直すので使わない
+   */
+  .color:is(:hover, :active) {
+    --pico-background-color: color-mix(in srgb, var(--paint) 88%, var(--ink));
+    --pico-border-color: color-mix(in srgb, var(--paint) 88%, var(--ink));
   }
   .pad {
     display: grid;
     grid-template-columns: repeat(3, 3rem);
-    gap: 0.25rem;
+    gap: var(--dp-space-1);
     margin: 0 auto;
   }
   .key {
@@ -178,7 +183,7 @@
   }
   .row {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
   }
   .digits summary {
     cursor: pointer;
@@ -187,7 +192,7 @@
   .digit-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 0.25rem;
-    margin-top: 0.5rem;
+    gap: var(--dp-space-1);
+    margin-top: var(--dp-space-2);
   }
 </style>

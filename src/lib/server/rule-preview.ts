@@ -11,6 +11,7 @@ import {
 } from "drizzle-orm";
 
 import type { Program, Rule } from "../types";
+import { shareKey } from "./agent-channels";
 import { config } from "./config";
 import { contentions, type Occupant, settled } from "./conflict";
 import { paidAllowed } from "./contracts";
@@ -23,6 +24,7 @@ import {
   keepsReservation,
   type Miss,
   missOf,
+  oneBroadcast,
   previewSkips,
 } from "./rules";
 import { tunerState } from "./scheduler";
@@ -58,12 +60,14 @@ const stillHeld = () =>
  * `repeat` は同じ回を別の放送で録る (その放送の局と時刻)、`recorded` はもう録ってある。
  * `earlier` は前の回 (先の回 `number` 話を録った・予約した。`episode.earlierAirings`)。
  * `copy-never` はコピー禁止の番組 (`format.COPY_NEVER_REASON`)。`declined` は人が取り消した放送
- * (ルールは立て直さない。`rules.canceledBroadcasts`)
+ * (ルールは立て直さない。`rules.canceledBroadcasts`)。`simulcast` は本チャンネルと同じ番組を流している
+ * 枝番の局 (本チャンネルのほうを録る。`rules.oneBroadcast`)。`undecodable` は番組表に出ているが復号できない局
+ * (`services.decodable`。予約を立てるときも当てない。`rules.applyRules`)
  */
 type Skip =
   | { kind: "repeat" | "recorded"; service_name: string; start_at: number }
   | { kind: "earlier"; number: number }
-  | { kind: "copy-never" | "declined" }
+  | { kind: "copy-never" | "declined" | "simulcast" | "undecodable" }
   | null;
 
 /**
@@ -79,6 +83,8 @@ export interface PreviewRow {
   /** 詳細から「視聴」でライブへ飛ぶときの局。番組表の詳細と同じ */
   service_id: number;
   service_name: string;
+  /** 局ロゴがあるか (検索のほかの行と同じく、局名の前にロゴを出す) */
+  has_logo: boolean;
   start_at: number;
   end_at: number;
   /** 立っている予約。取り消せるように id も持つ */
@@ -105,17 +111,7 @@ export interface PreviewRow {
 export type Verdict =
   | { kind: "record" }
   | { kind: "reserved"; state: string }
-  | {
-      kind: "skip";
-      reason:
-        | "repeat"
-        | "recorded"
-        | "earlier"
-        | "copy-never"
-        | "declined"
-        | "airing"
-        | Miss;
-    };
+  | { kind: "skip"; reason: NonNullable<Skip>["kind"] | "airing" | Miss };
 
 /**
  * 条件の下見ひとまとめ (`previewFor`)。
@@ -127,7 +123,6 @@ export interface Preview {
   /** 同じ回の 2 回目以降などで、録らないもの (`PreviewRow.skip`) */
   skipped: number;
   programs: PreviewRow[];
-  conflicts: number;
   /** 指定した番組 (`options.ids`) の「録るか」。番組 ID → 結果 */
   verdicts: Record<number, Verdict>;
   failed: string | null;
@@ -148,7 +143,8 @@ interface Pending {
   name: string;
   service_id: number;
   service_name: string;
-  /** 局の種別 (GR/BS/CS)。受けられるかはチューナーごとに決まる (`conflict.Capacity`) */
+  has_logo: boolean;
+  /** 局の種別 (`ChannelType`)。受けられるかはチューナーごとに決まる (`conflict.Capacity`) */
   type: string;
   /** 物理チャンネル。同じチャンネルなら 1 台のチューナーで足りる */
   channel: string;
@@ -186,7 +182,6 @@ export async function previewFor(
       total: 0,
       skipped: 0,
       programs: [],
-      conflicts: 0,
       verdicts: {},
       failed: String(error),
     };
@@ -206,7 +201,8 @@ async function countPreview(
    * 取れなければ空 (= 何も競合として出さない)。エージェントが止まっているときに
    * 予約表を赤くしても直しようが無いので、スケジューラもそう振る舞う
    */
-  const { capacity, busy } = await tunerState();
+  // 受けられる所はカードの契約で絞る (予約の割り振りと同じ。`agent-cards.cardNarrower`)
+  const { capacity, busy, narrow } = await tunerState();
   // 使う区間は前後マージンぶん延びる。スケジューラと同じ物差しで数える
   const margins = { start: config.startMargin, end: config.endMargin };
   /** まだ録っていない予約。重なりの判定と、条件から外れた予約を出すのに使う */
@@ -223,8 +219,9 @@ async function countPreview(
       state: reservations.state,
       conflict_reason: reservations.conflict_reason,
       service_name: serviceTable.name,
+      has_logo: serviceTable.has_logo,
       type: serviceTable.type,
-      channel: serviceTable.channel,
+      channel: shareKey(),
     })
     .from(reservations)
     .innerJoin(serviceTable, eq(serviceTable.id, reservations.service_id))
@@ -272,7 +269,9 @@ async function countPreview(
         : sql<Program["extended"]>`NULL`,
     service_type: serviceTable.type,
     service_name: serviceTable.name,
-    service_channel: serviceTable.channel,
+    service_has_logo: serviceTable.has_logo,
+    service_channel: shareKey(),
+    service_decodable: serviceTable.decodable,
   };
   const all = orm()
     .select(select)
@@ -287,23 +286,34 @@ async function countPreview(
       haystack(program, fields),
     );
   const hits = all.filter((program) => missFor(program) === null);
+  /**
+   * **人が取り消した放送は録らない** (`applyRules` も立て直さない)。下見で「録る」と出して、
+   * 保存しても予約が立たない、ということが無いように
+   */
+  const declined = canceledBroadcasts(at);
+  const isDeclined = (p: (typeof hits)[number]) =>
+    declined.has({ ...p, channel: p.service_channel });
+  /*
+   * **同じ放送が枝番の局 (MX1 の 23608 / 23609) に載っていたら、小さいほうだけ録る** (`rules.oneBroadcast`。
+   * 予約を立てるときと同じく、取り消した放送と復号できない局の番組を除いてから)。もう片方は「録らない」の行に出し、同じ回をまとめる相手にもしない
+   */
+  const open = hits.filter((p) => p.service_decodable && !isDeclined(p));
+  const kept = new Set(oneBroadcast(open, (p) => p.service_channel));
 
   /*
    * **同じ回は最初の放送だけ・前の回は録らない。** 録らないものも行には出す (黙って消すと、
    * 条件が当たっていないのか、当たったうえで外したのか読めない)。
    * 選び方は予約を立てるときと同じもの (`rules.previewSkips`)
    */
-  const skips = previewSkips(hits, at, conditions);
-  /**
-   * **人が取り消した放送は録らない** (`applyRules` も立て直さない)。下見で「録る」と出して、
-   * 保存しても予約が立たない、ということが無いように
-   */
-  const declined = canceledBroadcasts(at);
+  const once = hits.filter((p) => kept.has(p));
+  const skips = previewSkips(once, at, conditions);
   const skipOf = (p: (typeof hits)[number]): Skip => {
+    // 復号できない局は録らない。同じ回をまとめる相手にもしない (上の `open`)
+    if (!p.service_decodable) return { kind: "undecodable" };
     // コピー禁止の番組は録らない (`format.COPY_NEVER_REASON`)。手動でも同じ
     if (p.copy_never) return { kind: "copy-never" };
-    if (declined.has({ ...p, channel: p.service_channel }))
-      return { kind: "declined" };
+    if (isDeclined(p)) return { kind: "declined" };
+    if (!kept.has(p)) return { kind: "simulcast" };
     const skip = skips.get(p.id);
     if (skip === undefined) return null;
     switch (skip.kind) {
@@ -340,7 +350,7 @@ async function countPreview(
       name: p.name,
       serviceName: p.service_name,
       type: p.service_type,
-      channel: p.service_channel,
+      channel: narrow(p.service_id, p.service_channel),
       start_at: p.start_at,
       end_at: p.end_at,
     });
@@ -352,7 +362,7 @@ async function countPreview(
       name: row.name,
       serviceName: row.service_name,
       type: row.type,
-      channel: row.channel,
+      channel: narrow(row.service_id, row.channel),
       start_at: row.start_at,
       end_at: row.end_at,
     });
@@ -364,6 +374,7 @@ async function countPreview(
       name: p.name,
       service_id: p.service_id,
       service_name: p.service_name,
+      has_logo: p.service_has_logo,
       start_at: p.start_at,
       end_at: p.end_at,
       reservation_id: held?.id ?? null,
@@ -394,6 +405,7 @@ async function countPreview(
         name: held.name,
         service_id: held.service_id,
         service_name: held.service_name,
+        has_logo: held.has_logo,
         start_at: held.start_at,
         end_at: held.end_at,
         reservation_id: held.id,
@@ -419,8 +431,6 @@ async function countPreview(
    * さかのぼったぶん** (`settled`)。出さない番組とも取り合うので相手は減らせない。どのチューナーに
    * 入るかはその前に誰がどのチューナーに入ったかで変わる (#668) ので、時間帯の先頭からなぞると答えが
    * 変わる。誰も使っていない瞬間を挟めば振り出しに戻るので、そこより前と、時間帯より後は渡さない。
-   *
-   * 「競合 N 件」もその 100 件の中の数になる。画面ではそう書く
    */
   const shown = rows.slice(0, 100);
   const mine = shown.flatMap((row) =>
@@ -447,10 +457,6 @@ async function countPreview(
   return {
     total: rows.length,
     skipped: rows.filter((row) => row.skip !== null).length,
-    // 数えるのは**行の数**。1 行に 3 本重なっていても、困っている番組は 1 つ
-    conflicts: shown.filter(
-      (row) => row.conflicts.length > 0 || row.conflict_reason !== null,
-    ).length,
     programs: shown,
     verdicts: verdictsOf(ids),
   };

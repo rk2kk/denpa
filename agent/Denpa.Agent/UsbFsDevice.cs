@@ -1,16 +1,14 @@
-using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace Denpa.Agent;
 
 /// <summary>
-/// Linux の usbfs (<c>/dev/bus/usb/BBB/DDD</c>) を ioctl で直に扱う <see cref="IUsbDevice"/>。**libusb を使わない。**
+/// Linux の usbfs (<c>/dev/bus/usb/BBB/DDD</c>) を ioctl で直に扱う <see cref="IUsbDevice"/>。
 ///
 /// <para>
-/// ioctl の番号と構造体の形はカーネルの uapi (<c>linux/usbdevice_fs.h</c>) のもの。x64 と arm64 で同じ (どちらも LP64 で
-/// asm-generic の <c>_IOC</c> の並び)。構造体の大きさは番号に埋まるので <c>sizeof</c> から組み立てる (<see cref="UsbFsPipe"/> と同じ)。
+/// ioctl の番号の組み立て方、errno、開くときの文言は <see cref="UsbFs"/> と共通にしている。
 /// interrupt の IN も <c>USBDEVFS_BULK</c> で読む (カーネルの <c>usb_bulk_msg</c> は interrupt の端点なら interrupt の URB にする)。
-/// 出しっぱなしの読みは <c>USBDEVFS_SUBMITURB</c> で URB を出し、<c>poll</c> で待って <c>USBDEVFS_REAPURBNDELAY</c> で回収する。
+/// 出しっぱなしの転送要求は <c>USBDEVFS_SUBMITURB</c> で URB を出し、<c>poll</c> で待って <c>USBDEVFS_REAPURBNDELAY</c> で回収する。
 /// </para>
 /// </summary>
 public sealed unsafe class UsbFsDevice : IUsbDevice
@@ -62,34 +60,18 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
         public short Revents;
     }
 
-    private static uint Ioc(uint direction, uint number, int size) =>
-        (direction << 30) | ((uint)size << 16) | ('U' << 8) | number;
-
-    // _IOC_WRITE = 1、_IOC_READ = 2
-    internal static readonly uint Control = Ioc(3, 0, sizeof(ControlTransfer));
-    internal static readonly uint SetInterface = Ioc(2, 4, sizeof(SetInterfaceRequest));
-    internal static readonly uint SubmitUrb = Ioc(2, 10, sizeof(Urb));
-    internal static readonly uint DiscardUrb = Ioc(0, 11, 0);
-    internal static readonly uint ReapUrbNoDelay = Ioc(1, 13, sizeof(void*));
-    internal static readonly uint ClearHalt = Ioc(2, 21, sizeof(uint));
+    internal static readonly uint Control = UsbFs.Ioc(3, 0, sizeof(ControlTransfer));
+    internal static readonly uint SetInterface = UsbFs.Ioc(2, 4, sizeof(SetInterfaceRequest));
+    internal static readonly uint SubmitUrb = UsbFs.Ioc(2, 10, sizeof(Urb));
+    internal static readonly uint DiscardUrb = UsbFs.Ioc(0, 11, 0);
+    internal static readonly uint ReapUrbNoDelay = UsbFs.Ioc(1, 13, sizeof(void*));
+    internal static readonly uint ClearHalt = UsbFs.Ioc(2, 21, sizeof(uint));
 
     private const byte UrbTypeBulk = 3;
     private const short PollOut = 0x004;
 
-    /// <summary>EP の止まりや化けで続けて捨ててよい読みの数。超えたら読みを失敗で終える</summary>
+    /// <summary>端点のストール (EPIPE) やプロトコルエラー (EPROTO) で続けて捨ててよい転送要求の数。超えたら読み出しを失敗で終える</summary>
     private const int MaxStalls = 8;
-
-    private const int Eperm = 1;
-    private const int Enoent = 2;
-    private const int Eintr = 4;
-    private const int Eagain = 11;
-    private const int Eacces = 13;
-    private const int Ebusy = 16;
-    private const int Enodev = 19;
-    private const int Epipe = 32;
-    private const int Etimedout = 110;
-    private const int Eshutdown = 108;
-    private const int Eproto = 71;
 
     private readonly Lock _gate = new();
     private int _fd;
@@ -106,44 +88,45 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
     /// sysfs のポート (<c>4-12.1</c>) の機材を開き、USB の ID を突き合わせ、インターフェース 0 を確保して代替設定 0 を選ぶ。
     /// 番号 (<c>DDD</c>) は挿し直すたびに振り直されるので、見つけてから開くまでに挿し替わっていないかを ID で確かめる
     /// </summary>
-    public static UsbFsDevice Open(string sysfs, string devUsb, string port, int vendor, int product)
+    /// <param name="selectAlternate">
+    /// 代替設定 0 を選ぶ (SET_INTERFACE)。IT930x は、ファームウェアが動いているときに選び直すと最初のコマンドに応答しなくなる
+    /// (PX-MLT5PE の実機で確かめた) ので選ばない
+    /// </param>
+    public static UsbFsDevice Open(string sysfs, string devUsb, string port, int vendor, int product, bool selectAlternate = true)
     {
-        var dir = Path.Combine(sysfs, port);
-        if (!int.TryParse(UsbSysfs.Read(dir, "busnum"), NumberStyles.None, CultureInfo.InvariantCulture, out var bus)
-            || !int.TryParse(UsbSysfs.Read(dir, "devnum"), NumberStyles.None, CultureInfo.InvariantCulture, out var device))
-        {
-            throw new IOException($"USB のポート {port} に機材がありません (抜かれたか、コンテナに /sys が見えていません)");
-        }
-        var path = Path.Combine(devUsb, bus.ToString("D3", CultureInfo.InvariantCulture), device.ToString("D3", CultureInfo.InvariantCulture));
-        var fd = Sys.Open(path, Sys.ReadWrite | Sys.CloseOnExec);
-        if (fd < 0)
-        {
-            var errno = Marshal.GetLastPInvokeError();
-            throw new IOException(errno switch
-            {
-                Enoent or Enodev => $"{path} がありません (抜かれたか、コンテナに /dev/bus/usb が見えていません)",
-                Eacces or Eperm => $"{path} を開く権限がありません (コンテナに USB 機材の読み書きを許してください)",
-                _ => $"{path} を開けません ({Marshal.GetPInvokeErrorMessage(errno)})",
-            });
-        }
+        var path = UsbSysfs.Node(sysfs, devUsb, port) ?? throw new IOException(UsbSysfs.NoDevice(port));
+        return OpenFd(UsbFs.Open(path), path, port, vendor, product, selectAlternate);
+    }
+
+    /// <summary>
+    /// アプリから受け取った usbfs の fd (<see cref="BrokerUsbHost"/>) で開く。受け取った fd は <c>dup</c> し、閉じるのは複製のほう
+    /// (受け取った fd は、抜かれるまで <see cref="BrokerUsbHost"/> が持ち続ける)。確かめることはパスから開くときと同じ
+    /// </summary>
+    public static UsbFsDevice Open(int received, string port, int vendor, int product, bool selectAlternate = true) =>
+        OpenFd(UsbFs.Dup(received, port), $"USB のポート {port}", port, vendor, product, selectAlternate);
+
+    /// <summary>開いた fd で ID を確かめ、インターフェース 0 を確保する。失敗したら fd を閉じて例外を送出する</summary>
+    /// <param name="where">ID が違うときの文言に出す、開いたもの (パスかポート)</param>
+    private static UsbFsDevice OpenFd(int fd, string where, string port, int vendor, int product, bool selectAlternate)
+    {
         try
         {
-            // usbfs の fd を読むと、先頭にデバイスディスクリプタが返る
+            // usbfs の fd を読むと、先頭にデバイスディスクリプタが返る。dup した fd は位置を共有するので、位置を使わない pread で 0 から読む
             var head = stackalloc byte[18];
-            var got = Sys.ReadFd(fd, head, 18);
+            var got = Sys.PRead(fd, head, 18, 0);
             var (v, p) = UsbDescriptors.Ids(new ReadOnlySpan<byte>(head, (int)Math.Max(got, 0)));
-            if (v != vendor || p != product) throw new IOException($"{path} は別の機材になっています ({v:x4}:{p:x4})。挿し直されました");
+            if (v != vendor || p != product) throw new IOException($"{where} は別の機材になっています ({v:x4}:{p:x4})。挿し直されました");
 
             var number = 0u;
-            if (Sys.Ioctl(fd, UsbFsPipe.ClaimInterface, (nint)(&number)) < 0)
+            if (Sys.Ioctl(fd, UsbFs.ClaimInterface, (nint)(&number)) < 0)
             {
                 var errno = Marshal.GetLastPInvokeError();
-                throw new IOException(errno == Ebusy
+                throw new IOException(errno == UsbFs.Ebusy
                     ? $"USB のポート {port} の機材はほかのソフトが使っています (動いているエージェント自身か、カーネルのドライバ)"
                     : $"USB のポート {port} のインターフェースを確保できません ({Marshal.GetPInvokeErrorMessage(errno)})");
             }
             var request = new SetInterfaceRequest { Interface = 0, AltSetting = 0 };
-            if (Sys.Ioctl(fd, SetInterface, (nint)(&request)) < 0)
+            if (selectAlternate && Sys.Ioctl(fd, SetInterface, (nint)(&request)) < 0)
             {
                 throw new IOException($"USB のポート {port} の代替設定を選べません ({Marshal.GetPInvokeErrorMessage(Marshal.GetLastPInvokeError())})");
             }
@@ -157,6 +140,33 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
     }
 
     private int Fd => _fd >= 0 ? _fd : throw new ObjectDisposedException(Name);
+
+    /// <summary>構成ディスクリプタを読む上限</summary>
+    private const int ConfigDescriptorsSize = 1024;
+
+    private IReadOnlyList<UsbPipe>? _pipes;
+
+    /// <summary>
+    /// usbfs の fd の、デバイスディスクリプタ (18 バイト) の続きを読む。続きは構成ディスクリプタ。
+    /// 初めて呼ばれたときに 1 回だけ読む (ほかの機材の開き方は変えない)。dup した fd は位置を共有するので、位置を使わない pread で読む
+    /// </summary>
+    public IReadOnlyList<UsbPipe> Pipes()
+    {
+        lock (_gate)
+        {
+            if (_pipes is not null) return _pipes;
+            var blob = stackalloc byte[ConfigDescriptorsSize];
+            var got = Sys.PRead(Fd, blob, ConfigDescriptorsSize, 18);
+            if (got < 0) throw Failure("構成ディスクリプタを読めません");
+            return _pipes = UsbDescriptors.Pipes(new ReadOnlySpan<byte>(blob, (int)got), 0);
+        }
+    }
+
+    void IUsbDevice.ClearHalt(byte endpoint)
+    {
+        var number = (uint)endpoint;
+        if (Sys.Ioctl(Fd, ClearHalt, (nint)(&number)) < 0) throw Failure($"EP 0x{endpoint:X2} のストールをクリアできません");
+    }
 
     public int ControlIn(byte requestType, byte request, ushort value, ushort index, Span<byte> data, int timeoutMs)
     {
@@ -190,14 +200,14 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
     }
 
     /// <summary>IN を 1 回。時間切れは 0</summary>
-    public int InterruptRead(byte endpoint, Span<byte> buffer, int timeoutMs)
+    public int Read(byte endpoint, Span<byte> buffer, int timeoutMs)
     {
         fixed (byte* start = buffer)
         {
-            var transfer = new UsbFsPipe.BulkTransfer { Endpoint = endpoint, Length = (uint)buffer.Length, TimeoutMs = (uint)timeoutMs, Data = start };
-            var got = Sys.Ioctl(Fd, UsbFsPipe.Bulk, (nint)(&transfer));
+            var transfer = new UsbFs.BulkTransfer { Endpoint = endpoint, Length = (uint)buffer.Length, TimeoutMs = (uint)timeoutMs, Data = start };
+            var got = Sys.Ioctl(Fd, UsbFs.Bulk, (nint)(&transfer));
             if (got >= 0) return got;
-            if (Marshal.GetLastPInvokeError() == Etimedout) return 0;
+            if (Marshal.GetLastPInvokeError() == UsbFs.Etimedout) return 0;
             throw Failure($"EP 0x{endpoint:X2} から読めません");
         }
     }
@@ -206,8 +216,8 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
     {
         fixed (byte* start = data)
         {
-            var transfer = new UsbFsPipe.BulkTransfer { Endpoint = endpoint, Length = (uint)data.Length, TimeoutMs = (uint)timeoutMs, Data = start };
-            var sent = Sys.Ioctl(Fd, UsbFsPipe.Bulk, (nint)(&transfer));
+            var transfer = new UsbFs.BulkTransfer { Endpoint = endpoint, Length = (uint)data.Length, TimeoutMs = (uint)timeoutMs, Data = start };
+            var sent = Sys.Ioctl(Fd, UsbFs.Bulk, (nint)(&transfer));
             if (sent < 0) throw Failure($"EP 0x{endpoint:X2} に送れません");
             if (sent != data.Length) throw new IOException($"{Name}: EP 0x{endpoint:X2} に送りきれません ({sent}/{data.Length} バイト)");
         }
@@ -215,10 +225,10 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
 
     private IOException Failure(string what) => Failure(Name, what, Marshal.GetLastPInvokeError());
 
-    internal static IOException Failure(string name, string what, int errno) => errno switch
+    private static IOException Failure(string name, string what, int errno) => errno switch
     {
-        Enodev or Eshutdown => new UsbGoneException($"{name} が抜かれました"),
-        Etimedout => new IOException($"{name}: {what} (時間切れ)"),
+        UsbFs.Enodev or UsbFs.Eshutdown => new UsbGoneException($"{name} が抜かれました"),
+        UsbFs.Etimedout => new IOException($"{name}: {what} (時間切れ)"),
         _ => new IOException($"{name}: {what} ({Marshal.GetPInvokeErrorMessage(errno)})"),
     };
 
@@ -230,7 +240,7 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
         {
             if (_fd < 0) return;
             var number = 0u;
-            Sys.Ioctl(_fd, UsbFsPipe.ReleaseInterface, (nint)(&number));
+            Sys.Ioctl(_fd, UsbFs.ReleaseInterface, (nint)(&number));
             Sys.Close(_fd);
             _fd = -1;
         }
@@ -283,7 +293,7 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
             var urb = _urbs[i];
             urb->Status = 0;
             urb->ActualLength = 0;
-            if (Sys.Ioctl(_owner.Fd, SubmitUrb, (nint)urb) < 0) throw _owner.Failure("TS の読みを出せません");
+            if (Sys.Ioctl(_owner.Fd, SubmitUrb, (nint)urb) < 0) throw _owner.Failure("TS の転送要求を出せません");
             _pending[i] = true;
             _done[i] = false;
         }
@@ -298,8 +308,8 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
                 if (Sys.Ioctl(_owner.Fd, ReapUrbNoDelay, (nint)(&urb)) < 0)
                 {
                     var errno = Marshal.GetLastPInvokeError();
-                    if (errno is Eagain or Eintr) return any;
-                    throw Failure(_owner.Name, "TS の読みを回収できません", errno);
+                    if (errno is UsbFs.Eagain or UsbFs.Eintr) return any;
+                    throw Failure(_owner.Name, "TS の転送要求を回収できません", errno);
                 }
                 var i = (int)(nint)urb->UserContext;
                 _pending[i] = false;
@@ -332,26 +342,56 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
                     _head = (_head + 1) % _urbs.Length;
                 }
                 if (copied > 0) return copied;
-                var wait = deadline - Environment.TickCount64;
-                if (wait <= 0) return 0;
-                var poll = new PollFd { Fd = _owner.Fd, Events = PollOut };
-                if (Sys.Poll((byte*)&poll, 1, (int)Math.Min(wait, int.MaxValue)) < 0 && Marshal.GetLastPInvokeError() != Eintr)
-                {
-                    throw _owner.Failure("TS の読みを待てません");
-                }
+                if (!Wait(deadline)) return 0;
             }
         }
 
+        public int ReadTransfer(Span<byte> buffer, int timeoutMs)
+        {
+            ObjectDisposedException.ThrowIf(_closed, this);
+            var deadline = Environment.TickCount64 + timeoutMs;
+            for (; ; )
+            {
+                Reap();
+                while (_done[_head])
+                {
+                    var urb = _urbs[_head];
+                    if (urb->Status != 0) Fail(urb);
+                    else _stalls = 0;
+                    var take = Math.Min(urb->ActualLength - _offset, buffer.Length);
+                    new ReadOnlySpan<byte>((byte*)urb->Buffer + _offset, take).CopyTo(buffer);
+                    _offset = 0;
+                    Submit(_head);
+                    _head = (_head + 1) % _urbs.Length;
+                    if (take > 0) return take;
+                }
+                if (!Wait(deadline)) return 0;
+            }
+        }
+
+        /// <summary>URB が済むのを <paramref name="deadline"/> (Environment.TickCount64) まで待つ。もう過ぎていれば false</summary>
+        private bool Wait(long deadline)
+        {
+            var wait = deadline - Environment.TickCount64;
+            if (wait <= 0) return false;
+            var poll = new PollFd { Fd = _owner.Fd, Events = PollOut };
+            if (Sys.Poll((byte*)&poll, 1, (int)Math.Min(wait, int.MaxValue)) < 0 && Marshal.GetLastPInvokeError() != UsbFs.Eintr)
+            {
+                throw _owner.Failure("TS の読み出しを待てません");
+            }
+            return true;
+        }
+
         /// <summary>
-        /// 済んだ URB の失敗。端点の止まり (EPIPE) はストールをクリアして (USBDEVFS_CLEAR_HALT)、化け (EPROTO) はそのまま、その URB の中身だけ捨てて
-        /// 出し直す。続けて <see cref="MaxStalls"/> 回を超えたら読みを失敗で終える
+        /// 済んだ URB の失敗。端点のストール (EPIPE) はストールをクリアして (USBDEVFS_CLEAR_HALT)、プロトコルエラー (EPROTO) はそのまま、その URB の中身だけ捨てて
+        /// 出し直す。続けて <see cref="MaxStalls"/> 回を超えたら読み出しを失敗で終える
         /// </summary>
         private void Fail(Urb* urb)
         {
             var errno = -urb->Status;
-            if (errno is not (Epipe or Eproto)) throw Failure(_owner.Name, "TS の読みが失敗しました", errno);
-            if (++_stalls > MaxStalls) throw Failure(_owner.Name, $"TS の読みが続けて {_stalls} 回失敗しました", errno);
-            if (errno == Epipe)
+            if (errno is not (UsbFs.Epipe or UsbFs.Eproto)) throw Failure(_owner.Name, "TS の読み出しが失敗しました", errno);
+            if (++_stalls > MaxStalls) throw Failure(_owner.Name, $"TS の読み出しが続けて {_stalls} 回失敗しました", errno);
+            if (errno == UsbFs.Epipe)
             {
                 var endpoint = (uint)urb->Endpoint;
                 if (Sys.Ioctl(_owner.Fd, ClearHalt, (nint)(&endpoint)) < 0) throw _owner.Failure($"EP 0x{endpoint:X2} のストールをクリアできません");
@@ -386,7 +426,7 @@ public sealed unsafe class UsbFsDevice : IUsbDevice
                 // 回収できなかった URB のバッファは、カーネルがまだ持っているかもしれないので返さない
                 if (_pending.Count(pending => pending) is var left and > 0)
                 {
-                    Log.Write($"[{_owner.Name}] TS の読みを {left} 本回収できなかったので、バッファを返さずに残します");
+                    Log.Write($"[{_owner.Name}] TS の転送要求を {left} 本回収できなかったので、バッファを返さずに残します");
                     return;
                 }
             }

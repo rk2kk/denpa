@@ -20,7 +20,7 @@
   flex-shrink: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--dp-space-1);
 }
 .board .row-name {
   font-weight: var(--dp-weight);
@@ -68,12 +68,12 @@
  * ロゴを文の中の 1 文字として流せば、折り返すのは文の途中になる
  */
 .board .row-meta {
-  margin-top: 0.25rem;
+  margin-top: var(--dp-space-1);
   font-size: var(--dp-text-sm);
   color: var(--dp-muted);
   overflow-wrap: anywhere;
 }
-/* ルール名のリンクは淡い地向けの主の色。Pico の主の色のままでは、指を乗せた件の面の上で 4.5:1 に届かないことがある */
+/* ルール名のリンクは淡い地向けの主の色。Pico の主の色のままでは、指を乗せた件の面で 4.5:1 に届かないことがある */
 .board .row-meta a {
   color: var(--dp-primary-text);
 }
@@ -87,7 +87,7 @@
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
   min-width: 0;
 }
 .board .title-line .row-name,
@@ -99,11 +99,11 @@
   text-overflow: ellipsis;
 }
 .board .row-empty {
-  padding: 0.75rem;
+  padding: var(--dp-space-3);
 }
 /* まだ観ていない録画の点 (`unwatched`。形は `app.css` の `.fresh-dot`)。名前の前に置く */
 .board .fresh-dot {
-  margin-right: 0.3rem;
+  margin-right: var(--dp-space-1);
   vertical-align: 0.1em;
 }
 .board .group-unwatched {
@@ -144,7 +144,7 @@
 }
 /* 開いた番組の先頭の押すもの。中身の行と同じだけ下げる */
 .board .t-block > .group-tools {
-  padding: 0 0.5rem 0.5rem 2.25rem;
+  padding: 0 var(--dp-space-2) var(--dp-space-2) var(--nest-indent);
 }
 .board .poster-img {
   height: 100%;
@@ -299,6 +299,8 @@
  * 768px からは左右と下を main の余白の外まで広げる。右のサイドバーは広い形 (`html:not([data-phone])`) だけで、窓の右端と下端に付ける
  */
 .board {
+  /* 番組の中の行と、開いた番組の先頭の押すもの (`.group-tools`) を下げる深さ */
+  --nest-indent: calc(var(--dp-space-3) + var(--dp-space-5));
   display: flex;
   flex-direction: column;
 }
@@ -324,18 +326,18 @@
  */
 .board .t-toolbar {
   position: sticky;
-  z-index: var(--dp-z-pagebar);
+  z-index: var(--dp-z-dock);
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--dp-space-1);
   height: 2.75rem;
 }
 @media (min-width: 768px) {
   .board .t-list {
-    padding: 0 calc(var(--dp-gutter) - 0.5rem) 1rem;
+    padding: 0 calc(var(--dp-gutter) - var(--dp-space-2)) var(--dp-space-4);
   }
   .board .t-toolbar {
-    gap: 0.75rem;
+    gap: var(--dp-space-3);
   }
 }
 /* 日付の見出しは `app.css` の `.day-head`。いちばん上の見出しは一覧の先頭に付ける */
@@ -351,7 +353,7 @@
 :where(html[data-phone]) .board .t-toolbar {
   order: 2;
   margin-inline: calc(var(--dp-dock-inset) - var(--dp-gutter, 1rem));
-  padding-inline: 0.5rem;
+  padding-inline: var(--dp-space-2);
 }
 /* 768px からは一覧が main の余白の外まで広がっているので、窓の端から下のタブと同じだけ離す */
 @media (min-width: 768px) {
@@ -372,7 +374,7 @@
 }
 
 /*
- * 「いま」の線 (`NowLine`。線は引かず、赤い点と時刻と一言)。上の見出しや行との間は詰める。時刻の字は日付のカプセルの字と同じく一覧の左端から
+ * 「いま」の行 (`NowMark`。線は引かず、赤い点と時刻と一言)。上の見出しや行との間は詰める。時刻の字は日付のカプセルの字と同じく一覧の左端から
  * (狭い画面は下の 768px 未満で字を詰める)。`.t-rows` まで書くのは、部品の `margin: 0` より強くするため
  */
 .board .t-rows .t-now {
@@ -399,10 +401,10 @@
 .board .group-head {
   display: flex;
   align-items: center;
-  gap: 0.25rem 0.875rem;
+  gap: var(--dp-space-1) var(--dp-space-3);
   min-height: var(--dp-item-h);
   margin: 0;
-  padding: 0.5rem 0.75rem;
+  padding: var(--dp-space-2) var(--dp-space-3);
 }
 .board .t-row .row-body {
   display: flex;
@@ -444,7 +446,7 @@
   justify-content: center;
   color: var(--dp-on-video);
   opacity: 0;
-  background: rgb(0 0 0 / 0.45);
+  background: var(--dp-video-veil);
   transition: opacity var(--dp-duration) var(--dp-ease);
 }
 .board .t-play .poster-icon {
@@ -456,7 +458,7 @@
 }
 /*
  * **途中まで観たもの。** ポスターの下端に重ねる 4px のバー (YouTube と同じ置き方)。地は暗く透かし、観たぶんを主の色で。
- * ポスターの無い録画は枠の下端に同じものが出る。エンコードの進みは行の下端いっぱい (`.row-bar`) なので重ならない
+ * ポスターの無い録画は枠の下端に同じものが出る。エンコードの進み具合は行の下端いっぱい (`.row-bar`) なので重ならない
  */
 .board .t-resume {
   display: block;
@@ -465,7 +467,7 @@
   bottom: 0;
   z-index: 1;
   height: 0.25rem;
-  background: rgb(0 0 0 / 0.55);
+  background: var(--dp-video-veil);
 }
 /* 中身の無い `<span>` なので、ブロックにしないと幅も高さも付かない */
 .board .t-resume .resume-fill {
@@ -485,8 +487,8 @@
 @media (max-width: 767.98px) {
   .board .t-row,
   .board .group-head {
-    gap: 0.25rem 0.625rem;
-    padding: 0.5rem;
+    gap: var(--dp-space-1) var(--dp-space-2);
+    padding: var(--dp-space-2);
   }
   .board .t-thumb {
     width: 5rem;
@@ -504,7 +506,7 @@
   }
   /*
      * 状態の段は 2 行まで折り返す。押すものに幅を取られて、1 行で切ると「エンコー…」のように
-     * 状態そのものまで欠けていた (進みとあと何分かは消える)
+     * 状態そのものまで欠けていた (進み具合とあと何分かは消える)
      */
   .board .row-activity {
     align-items: flex-start;
@@ -538,7 +540,7 @@
     white-space: nowrap;
   }
   .board .t-row .row-actions :is(button, a.button) {
-    padding-inline: 0.5rem;
+    padding-inline: var(--dp-space-2);
   }
 }
 /*
@@ -546,7 +548,7 @@
  * 開いた番組の先頭の押すもの (`.group-tools`) と同じ深さ
  */
 .board .row.nested {
-  padding-left: 2.25rem;
+  padding-left: var(--nest-indent);
 }
 
 /* **狭い画面では行の操作を「⋯」1 つに** (`TimelineRow`。番組名に幅を回す)。広い画面は並べ、「⋯」は出さない */
@@ -567,13 +569,10 @@
 /* 「⋯」の中の項目。行の操作のボタンの決まり (`app.css` の `.row-actions`) を、メニューの項目の形に戻す */
 .board .t-row .row-actions .row-menu .menu-item {
   justify-content: flex-start;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
   min-height: 2.75rem;
-  padding: 0.5rem 0.75rem;
+  padding: var(--dp-space-2) var(--dp-space-3);
   font-size: var(--dp-text-base);
-}
-.board .t-row .row-actions .row-menu .menu-danger {
-  color: var(--dp-rec-text);
 }
 
 .board .t-more {
@@ -581,23 +580,14 @@
   flex-shrink: 0;
   margin: 0;
 }
-/*
- * 表示の切り替えが既定から変わっているときは「⋯」にオンの短い下線 (`app.css` の `aria-pressed` と同じ印)。
- * 主の色の点は「まだ見ていないもの」の印なので使わない (1 つの見た目に 1 つの意味)
- */
-.board .t-more[data-on] {
-  background-image: linear-gradient(var(--pico-primary), var(--pico-primary));
-  background-repeat: no-repeat;
-  background-position: center bottom 0.2rem;
-  background-size: 1rem var(--dp-mark);
-}
+/* 表示の切り替えが既定から変わっているときの「⋯」の短い下線は `app.css` の `button[data-on]` */
 /* 「⋯」の中。切り替えは右にスイッチ、空きは押せない 1 行 */
 .board .view-menu {
   min-width: 15rem;
 }
 .board .menu-item.view-item {
   justify-content: space-between;
-  gap: 1rem;
+  gap: var(--dp-space-4);
   min-height: 2.5rem;
 }
 
@@ -610,7 +600,7 @@
   .board .t-row .row-actions {
     --dp-btn-h: 2.75rem;
     --dp-btn-h-sm: 2.75rem;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
   }
   .board .t-row .row-actions :is(button, a.button) {
     min-width: 2.75rem;
@@ -638,8 +628,11 @@
 .board .a-state dt {
   min-width: 0;
 }
-/* 絞り込みのうち手を止めてほしいもの (競合・失敗など)。注意の色の字とアイコン。選んでいるときもほかの行と同じく線と太字で、塗らない */
-.board .a-warn {
+/*
+ * 絞り込みのうち手を止めてほしいもの (競合・失敗など)。注意の色の字とアイコン。選んでいるときもほかの行と同じく線と太字で、塗らない。
+ * 字は選んでいても注意の色のまま (下のチップと同じ)。`app.css` の選んでいる行の字の色 (`.side-item:is([aria-pressed="true"])`) と同じ詳細度にして、後に読むこちらを勝たせる
+ */
+.board .side-item.a-warn {
   color: var(--dp-warn-text);
 }
 .board .a-warn .side-sub {
@@ -649,7 +642,7 @@
 .board .a-warn-label {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--dp-space-2);
 }
 /* スマホの形の、手を止めてほしいもののチップ。注意の色の字 (塗らない。選んでいても注意の色のまま) */
 .board .chip.warn {
@@ -661,13 +654,13 @@
 }
 /* 「⋯」の先頭の状態。押せない (余白で切り替えと分ける) */
 .board .view-menu .menu-head {
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--dp-space-2);
 }
 .board .view-menu .menu-head .side-list {
   padding: 0;
 }
 .board .view-menu .menu-head .side-item {
   min-height: 2rem;
-  padding: 0 0.75rem;
+  padding: 0 var(--dp-space-3);
   font-size: var(--dp-text-sm);
 }

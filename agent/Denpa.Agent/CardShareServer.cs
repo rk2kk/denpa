@@ -15,9 +15,9 @@ namespace Denpa.Agent;
 /// <para>
 /// **普通の API (<c>AGENT_PORT</c>) とは別のポートで受ける** (<see cref="CardLanPolicy.Port"/>)。
 /// 鍵を配るために普通の API まで開かずに済むように (普通の API も /denpa/stream が復号済みの TS を返すので、
-/// 組んだ denpa しか通さない。docs/agent.md「denpa とは TLS で組む」)。**このポートは平文の HTTP のまま**で、答えるのは
-/// <c>/denpa/card/init</c>・<c>/denpa/card/ecm</c>・<c>/denpa/card/confirm</c> だけ。どれも相手のアドレスと
-/// (決めてあれば) 往復時間を確かめてから答える。接続には TTL を付ける (<see cref="CardLan"/>)。
+/// 組んだ denpa しか通さない。docs/agent.md「denpa とは TLS で組む」)。**このポートは平文の HTTP のまま**で、応答するのは
+/// <c>/denpa/card/init</c>・<c>/denpa/card/ecm</c>・<c>/denpa/card/confirm</c>・<c>/denpa/card/emm</c> だけ。どれも相手のアドレスと
+/// (決めてあれば) 往復時間を確かめてから応答する。接続には TTL を付ける (<see cref="CardLan"/>)。
 /// </para>
 ///
 /// <para>
@@ -48,7 +48,7 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
         if (IPv6()) options.Listen(IPAddress.IPv6Any, port, listen => listen.Use(Accepted));
     }
 
-    /// <summary>IPv6 で待ち受けられるか。切ってあるホスト・コンテナでは IPv4 だけにする (起動ごと転ばない)</summary>
+    /// <summary>IPv6 で待ち受けられるか。切ってあるホスト・コンテナでは IPv4 だけにする (起動ごと失敗しないように)</summary>
     private static bool IPv6()
     {
         if (!Socket.OSSupportsIPv6) return false;
@@ -66,14 +66,14 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
 
     /// <summary>
     /// 受けた接続にも TTL を付け直して確かめる。**待ち受けから引き継ぐかは OS 任せにしない。**
-    /// 付けられなければ、何も答えずに切る
+    /// 付けられなければ、何も応答せずに切る
     /// </summary>
     private ConnectionDelegate Accepted(ConnectionDelegate next) => async connection =>
     {
         var socket = connection.Features.Get<IConnectionSocketFeature>()?.Socket;
         try
         {
-            if (socket is null) throw new IOException("ソケットが見えません");
+            if (socket is null) throw new IOException("ソケットを取得できません");
             CardLan.LimitHops(socket, policy.Hops);
         }
         catch (Exception error) when (error is IOException or SocketException)
@@ -91,7 +91,7 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
 
     private async Task Answer(HttpContext http)
     {
-        // 受けたソケットは接続の機能として HTTP からも見える (Kestrel のソケットの transport)
+        // 受けたソケットは接続の機能として HTTP からも取得できる (Kestrel のソケットの transport)
         var socket = http.Features.Get<IConnectionSocketFeature>()?.Socket;
         var roundTrip = policy.MaxRoundTrip is not null && socket is not null ? CardLan.RoundTrip(socket) : null;
         if (policy.Refuse(http.Connection.RemoteIpAddress, roundTrip) is { } refusal)
@@ -107,6 +107,7 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
             "/denpa/card/init" when HttpMethods.IsGet(method) => Init(http),
             "/denpa/card/ecm" when HttpMethods.IsPost(method) => Ecm(http),
             "/denpa/card/confirm" when HttpMethods.IsPost(method) => Confirm(http),
+            "/denpa/card/emm" when HttpMethods.IsPost(method) => Emm(http),
             _ => Respond.Error(http, "not found", 404),
         });
     }
@@ -143,11 +144,11 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
 
     private static async Task Confirm(HttpContext http)
     {
-        // MJD 2B + verification 最大 253B = 最大 255B
-        var body = await CardWire.ReadUpTo(http.Request.Body, 255);
+        // MJD の 2 バイトと契約確認データ
+        var body = await CardWire.ReadUpTo(http.Request.Body, 2 + CardWire.MaxVerification);
         if (body is null)
         {
-            await Respond.Error(http, "契約確認のデータが長すぎます (255 バイトまで)", 400);
+            await Respond.Error(http, $"契約確認のデータが長すぎます ({2 + CardWire.MaxVerification} バイトまで)", 400);
             return;
         }
         if (body.Length < 3)
@@ -160,7 +161,22 @@ internal sealed class CardShareServer(CardLanPolicy policy, int port)
         await Reply(http, () => CardWire.Pack(Keys.Local.Confirm(verification, dateMjd)));
     }
 
-    /// <summary>カードに聞いて (別のスレッドで) バイト列で返す。カードが駄目なら 503</summary>
+    /// <summary>
+    /// 契約の更新 (EMM) を手元のカードに渡す。本文はペイロード 1 つで、返すのはカードの返り値 (BE16) だけ。
+    /// 受け入れたら自分の denpa にも知らせる (<see cref="Denpa.Agent.Emm.Forwarded"/>)
+    /// </summary>
+    private static async Task Emm(HttpContext http)
+    {
+        var payload = await CardWire.ReadUpTo(http.Request.Body, Denpa.Agent.Emm.MaxPayload);
+        if (Denpa.Agent.Emm.Problem(payload) is { } problem)
+        {
+            await Respond.Error(http, problem, 400);
+            return;
+        }
+        await Reply(http, () => CardWire.Pack(Denpa.Agent.Emm.Forwarded(Keys.Local, payload!, () => CardNotice.Shared?.Accepted())));
+    }
+
+    /// <summary>カードに問い合わせて (別のスレッドで) バイト列で返す。カードが駄目なら 503</summary>
     private static async Task Reply(HttpContext http, Func<byte[]> ask)
     {
         try

@@ -3,10 +3,10 @@ using System.Diagnostics;
 namespace Denpa.Agent;
 
 /// <summary>
-/// 自前方式 (dt295:) の基板の設定: チップのクロック・端子、USB の端点、TS の取り込みブロック。節の番号は仕様書 (dt295-resident/spec.md) のもの。
-/// 仕様書では常駐イメージと補助 CPU がやる設定を、ホストが 0xBC のメモリ要求 (<see cref="Dt295NativeLink"/>) で順に書く。
+/// PIX-DT295 (dt295:) の基板の設定: チップのクロック・端子、USB の端点、TS の取り込みブロック。節の番号は仕様書 (dt295-resident/spec.md) のもの。
+/// 仕様書では常駐イメージと補助 CPU が書く設定を、ホストが 0xBC のメモリ要求 (<see cref="Dt295NativeLink"/>) で順に書く。
 ///
-/// 補助 CPU の起動 (仕様書 6 章の「補助 CPU の起動」) は再現しない。補助 CPU がやる仕事のうち、USB のレジスタの設定 (仕様書 8.4) と
+/// 補助 CPU の起動 (仕様書 6 章の「補助 CPU の起動」) は再現しない。補助 CPU の処理のうち、USB のレジスタの設定 (仕様書 8.4) と
 /// I2C の準備 (仕様書 6.4) はホストが書く。補助 CPU の RAM と 0x1700000 のブロックには触らない。
 /// 16 ビットのレジスタ (仕様書が「16 ビット」と書いたもの) の読み書きは <see cref="Dt295NativeLink.Read16"/> と <see cref="Dt295NativeLink.Write16"/>。
 /// 仕様書が 16 ビットと明記していない 0xF10014・0xF10018・0xF10118・0xF1011C は、値が 16 ビットに収まる (0xFFFF・0xD082 など) ことから 16 ビットとした。仕様書に無い
@@ -28,8 +28,8 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
 
     /// <summary>
     /// 機材が起動直後の状態か (仕様書 3.1: 0x82008 の 2 バイトが 0、hook が元のまま)。
-    /// 違えば <see cref="Dt295NativeWarmException"/> (途中で止まった自前の hook が残っている、ほかのファームウェアが動いたなど)。
-    /// 正常に閉じた自前方式は hook を戻すので、続けて開き直せる (実機で確かめた)
+    /// 違えば <see cref="Dt295NativeWarmException"/> (途中で止まった前の実行が書いた hook が残っている、ほかのファームウェアが動いたなど)。
+    /// 正常に閉じたときは hook を元に戻すので、続けて開き直せる (実機で確かめた)
     /// </summary>
     public void Preflight()
     {
@@ -39,7 +39,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
         {
             var ours = hook.AsSpan().SequenceEqual(Dt295NativePrograms.Build().HookBytes);
             throw new Dt295NativeWarmException(ours
-                ? "前の実行の自前の hook が残っています"
+                ? "前の実行が書いた hook が残っています"
                 : $"boot0 の hook が元の値ではありません ({Convert.ToHexString(hook)})");
         }
         if (state != 0) throw new Dt295NativeWarmException($"機材が起動直後の状態ではありません (状態 0x{state:X4})");
@@ -48,7 +48,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     /// <summary>
     /// 0xFD0090 (16 ビット) の手順 (仕様書 3.3 の 0xE1000)。外部メモリーの有効化と「推定」されている。
     /// bit1 を立て、bit4 が 0 になるまで読み、bit1 を落として bit0 を立てる。仕様書は最大 100000 回読むと書く。
-    /// ホストの読みは 1 回が制御転送 1 回なので、回数でなく 2 秒を上限にする (仕様書に無い)。
+    /// ホストの読み出しは 1 回が制御転送 1 回なので、回数でなく 2 秒を上限にする (仕様書に無い)。
     /// 仕様書の「= 0x0000」は初期値の記録と読み、書き込みにはしない
     /// </summary>
     public void EnableExternalMemory()
@@ -63,13 +63,13 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
             polls++;
             if (_clock.Elapsed > until) throw new Dt295NativeException("0xFD0090 の bit4 が 2 秒たっても落ちません");
         }
-        timeline?.Begin($"0xFD0090 の bit4 が落ちるまでの読み {polls} 回", "仕様書 3.3").Dispose();
+        timeline?.Begin($"0xFD0090 の bit4 が落ちるまでの読み出し {polls} 回", "仕様書 3.3").Dispose();
         link.Write16(Register, (ushort)(link.Read16(Register) & ~0x0002));
         link.Write16(Register, (ushort)(link.Read16(Register) | 0x0001));
     }
 
     // ---------------------------------------------------------------------
-    // 自前の body の導入 (仕様書 3.2)
+    // 機材に置くプログラム (body) の導入 (仕様書 3.2)
     // ---------------------------------------------------------------------
 
     /// <summary>
@@ -95,7 +95,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
 
     /// <summary>
     /// チップのクロック・端子の設定。仕様書 6 章の手順 1〜12 を順に。各書き込みは読み戻して確かめる。
-    /// どれかが合わなければ、保存した値を逆の順に戻して <see cref="Dt295NativeException"/>
+    /// どれかが合わなければ、保存した値を逆の順に戻して <see cref="Dt295NativeException"/>。
     /// 値を読む順も仕様書のとおり。0x1600000 のブロックは 0xF10118・0xF1011C を書く (手順 2・3) まで止まっていて 0 しか読めないので、
     /// 手順 4 の前に読まない。0xF001F0・0xF10004・0xF10018・0xF10014 は手順 7 で読む
     /// </summary>
@@ -204,13 +204,13 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     /// 0xF10080〜0xF10098 の 7 語に 0x00010000 を書く (32 ビットの書き込み。上半分が 0x0001、下半分が 0)。
     /// 仕様書に無い。実機の常駐イメージが、イメージを書き込む間 (BLOCK。INITIALIZE の前) に同じ値にしたのを観測した。INITIALIZE の前に呼ぶ。
     /// **この語は読まない。** 実機で 0xF10080〜0xF100FF を読むと、常駐イメージが時間切れ (-2603) になった (主 CPU と補助 CPU の
-    /// 受け渡しの旗のように、読むと状態が動くらしい)。書く前の値も、書いたあとの読み戻しもしない。元の値は 0 とみなして戻す。
+    /// 受け渡しのフラグのように、読むと状態が動くらしい)。書く前の値も、書いたあとの読み戻しもしない。元の値は 0 とみなして戻す。
     /// 書き込み自体が操作かもしれないので、この書き込みが正しいかは決まっていない (観測の値に合わせただけ)
     /// </summary>
     public void SetUpF10080()
     {
         foreach (var address in WordsF10080) link.Write32(address, 0x00010000);
-        log?.Invoke("0xF10080〜0xF10098 に 0x00010000 を書きました (この語は読むと常駐イメージが壊れるので、読み戻しません)");
+        log?.Invoke("0xF10080〜0xF10098 に 0x00010000 を書きました (以前の方式では、この語を読むと常駐イメージが時間切れになったので、読み戻しません)");
     }
 
     /// <summary><see cref="SetUpF10080"/> の語を 0 に戻す (冷えた機材の値。読んで確かめない)</summary>
@@ -220,8 +220,8 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     }
 
     /// <summary>
-    /// 0xF10114 のビット 21 (0x00200000) を足す (読み・足す・書き)。仕様書に 0xF10114 の記述は無い。実機の常駐イメージが I2C のブロックを動かす
-    /// SERVICE で 0x80000000 から 0x80200000 にした (回す写し)。I2C の準備の直前に呼ぶ。読み戻しは記録に出し、失敗にはしない。
+    /// 0xF10114 のビット 21 (0x00200000) を足す (読み出し・足す・書き込み)。仕様書に 0xF10114 の記述は無い。実機の常駐イメージが I2C のブロックを動かす
+    /// SERVICE で 0x80000000 から 0x80200000 にした。I2C の準備の直前に呼ぶ。読み戻しは記録に出し、失敗にはしない。
     /// 元の値を返すので、終わりに <see cref="RestoreF10114"/> で戻す
     /// </summary>
     public uint SetUpF10114()
@@ -253,7 +253,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     /// <summary>保存した値を書き戻す (仕様書 6 章の 0x80396F90 と同じ順: 0xF10018 → 0xF10014 → 0xF001F0 → 0x1600004・0x1600000 → 0x1600404 → 0xF1011C → 0xF10118)</summary>
     public void Restore(Saved saved)
     {
-        // 読めていなかった値(手順がそこまで進まなかったもの)は書かない
+        // 読めていなかった値 (手順がそこまで進まなかったもの) は書かない
         // 0xF1001C は仕様書の戻しの順に無い。最後に書いたものなので最初に戻す (実機の常駐イメージも SHUTDOWN で冷えた値に戻した)
         if (saved.RF1001C is { } r1c0) link.Write16(0xF1001C, r1c0);
         if (saved.R00F10018 is { } r18) link.Write16(0xF10018, r18);
@@ -281,13 +281,13 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     }
 
     // ---------------------------------------------------------------------
-    // USB のレジスタ (仕様書 8.4。仕様書では補助 CPU の起動の中でやる設定)
+    // USB のレジスタ (仕様書 8.4。仕様書では補助 CPU の起動の中で書く設定)
     // ---------------------------------------------------------------------
 
     /// <summary>
-    /// 仕様書 8.4 の 1〜7 を順に。保護レジスタ 0xFD814C に対象の組の番号 (1・2・6・8) を書いてから対象を書き、終わったら 0xF に戻す。
-    /// 元の値を読んで保存してから書き、読み戻しが合わなければ保存した値を戻して失敗する。
-    /// 補助 CPU の割り込み・端点の設定は書かない (本体のコメント)
+    /// 仕様書 8.4 のうち 2・6・7 の bulk IN の端点の設定だけを書く (補助 CPU の割り込み・端点など、書かないものは本体のコメント)。
+    /// 保護レジスタ 0xFD814C に対象の組の番号 (1・2・8) を書いてから対象を書き、終わったら 0xF に戻す。
+    /// 元の値を読んで保存してから書き、変えようとしたビットが読み戻しで 1 つも変わっていなければ、書いたときと同じ組の番号の下で保存した値を戻して失敗する
     /// </summary>
     public void SetUpUsb()
     {
@@ -305,25 +305,21 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
             }
             log?.Invoke($"0x{address:X}: 0x{value:X} を書いて 0x{back:X} が読めた (書く前 0x{before:X}。違うビットは変えようとしなかったか、変わらなかった)");
         }
-        var saved = new List<(uint Address, uint Value)>();
-        uint Original(uint address)
+        // アドレスごとの元の値と、書いた組の番号とアドレスの並び (戻すときも同じ組の番号の下で書く。0xF の下では書けない)
+        var saved = new Dictionary<uint, uint>();
+        var written = new List<(uint Group, uint Address)>();
+        void Put(uint group, uint address, uint value)
         {
-            var value = link.Read32(address);
-            if (saved.All(item => item.Address != address)) saved.Add((address, value));
-            return value;
-        }
-        void Put(uint group, uint address, uint value, bool verify = true)
-        {
-            var before = Original(address);
-            link.Write32(Dt295NativePrograms.Protect, group);
-            link.Write32(address, value);
-            link.Write32(Dt295NativePrograms.Protect, 0xF);
-            if (verify) Verify(address, before, value);
+            var before = link.Read32(address);
+            saved.TryAdd(address, before);
+            if (!written.Contains((group, address))) written.Add((group, address));
+            Guarded(group, address, value);
+            Verify(address, before, value);
         }
 
         try
         {
-            // 主 CPU の自前方式に要るものだけを書く。bulk IN の端点 (0xFDBD08・0C・84) の設定と有効化 (0xFDBC04・0xFDBC14)。
+            // 主 CPU で動かすプログラムに要るものだけを書く。bulk IN の端点 (0xFDBD08・0C・84) の設定と有効化 (0xFDBC04・0xFDBC14)。
             // 仕様書 8.4 の 2 と 6・7 の 0xFDBC14 がそれ (0xFDBC14 の 0x84 は、8.3.1 の開始が bit1 と bit17 を落とす元の値)。
             Put(1, 0xFDBC04, 0x85000000);                              // 8.4 の 2
             Put(8, 0xFDBC14, 0x04);                                    // 8.4 の 6
@@ -333,15 +329,14 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
             // 書かないもの (仕様書に無い判断。実機で 0xFD8010 = 0x08080000 を書いたあと、制御転送がすべて時間切れになった):
             // - 割り込み・クロックの設定: 0xFD808C (8.4 の 1)、0xFD8300・0xFD8320・0xFD8010・0xFD8014 (8.4 の 5)。
             //   仕様書は補助 CPU が起動のときに USB と I2C の割り込みを受け持つための設定として書いている。
-            //   自前方式は、TS を主 CPU の hook の中で送り (割り込みを使わない)、I2C を制御の bit0 を読んで待つので要らない
+            //   ここでは TS を主 CPU の hook の中で送り (割り込みを使わない)、I2C を制御の bit0 を読んで待つので要らない
             // - 補助 CPU の端点 0xFDBD10・14・18・1C・38 (8.4 の 3・6・7) と 0xFDBC0C (8.4 の 4。読んで同じ値を書くだけ)。
             //   TS の端点は主 CPU が 0xFDBD08 の組を 8.3.1 で自分で設定する。
             //   これで EP 0x81 から TS が出なければ、最初に疑うのはここ (0xFDBD10・0xFDBD38 のバッファアドレス 0x00FF6000 など)
         }
         catch (Dt295NativeException)
         {
-            link.Write32(Dt295NativePrograms.Protect, 0xF);
-            foreach (var (address, value) in saved.AsEnumerable().Reverse()) link.Write32(address, value);
+            foreach (var (group, address) in written.AsEnumerable().Reverse()) Guarded(group, address, saved[address]);
             throw;
         }
     }
@@ -418,7 +413,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     public void ResetPumpState() => link.WriteBytes(Dt295NativePrograms.Frame + Dt295NativePrograms.StateRp, new byte[16]);
 
     /// <summary>取り込みの元の値</summary>
-    public sealed record CaptureSaved(uint[] Table, uint R1900404, uint R1900020 = 0);
+    public sealed record CaptureSaved(uint[] Table, uint R1900404, uint R1900020);
 
     private uint ReadWidth(uint address, int width) => width == 2 ? link.Read16(address) : link.Read32(address);
 
@@ -442,7 +437,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
             link.Write32(0x1900000, 0x3002FFFF);
             link.Write32(0x1900000, 0x00020000);
             link.Write32(0x1900004, 0x00001100);
-            // 0x1900020: 仕様書の表に無い。実機の常駐イメージは、取り込みを始めるときに 0 から 0x22000200 にした (自前方式は 0x02000200 のままで bit29 が無かった)
+            // 0x1900020: 仕様書の表に無い。実機の常駐イメージは、取り込みを始めるときに 0 から 0x22000200 にした (このレジスタを書かなかったときは 0x02000200 のままで bit29 が無かった)
             link.Write32(0x1900020, 0x22000200);
             log?.Invoke($"0x1900020 = 0x22000200 を書いて 0x{link.Read32(0x1900020):X8} が読めました");
             for (var i = 2; i < CaptureTable.Length; i++)
@@ -473,7 +468,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
     }
 
     /// <summary>
-    /// 取り込みを始める。**0x1902010 に書く値は 0x02000000 (既定)。** 仕様書 8.1.4 は 0x00000200 と書くが、それを書いても
+    /// 取り込みを始める。**0x1902010 に書く値は 0x02000000。** 仕様書 8.1.4 は 0x00000200 と書くが、それを書いても
     /// 0x1902010 は 0 のままでリングに何も書かれなかった (実機)。実機の常駐イメージが取り込みを始めたとき、0x1902010 は 0x02000000 になった。
     /// 仕様書 8.1.4 の 0x200 と、5.1 の STOP の 0x04000000 は、バイトの並びが違う書き方 (5.1 と表の値と同じ並びの 0x02000000 を使う)。
     /// リングの先頭・長さ・読み出し位置を読んで確かめる (仕様書 8.2.1: 長さが 0x2FF 以下か、読み出し位置が長さ以上なら断る)
@@ -511,7 +506,7 @@ public sealed class Dt295NativeBoard(Dt295NativeLink link, Action<string>? log =
         }
     }
 
-    /// <summary>取り込みの設定を戻す (仕様書 8.1.4 の「戻し」: #27 から #2 の逆順、#1、#0、最後に 0x1900404)</summary>
+    /// <summary>取り込みの設定を戻す (仕様書 8.1.4 の「戻し」: #27 から #2 の逆順、#1、#0、0x1900404、最後に 0x1900020)</summary>
     public void RestoreCapture(CaptureSaved saved)
     {
         for (var i = CaptureTable.Length - 1; i >= 0; i--)

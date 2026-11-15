@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { hold } from "./hold";
   import Icon from "./Icon.svelte";
   import {
     type IconShape,
@@ -23,9 +24,20 @@
     onclick,
     children,
     menu,
+    onhold,
+    mark,
   }: {
     /** アイコン (`icons.ts`)。文字だけのボタンでは省く (`undefined` を渡しても同じ) */
     icon?: IconShape | undefined;
+    /**
+     * 長押し (タッチ)・右クリック・Shift+D でする別の操作 (`hold.ts`)。データ放送のボタン (d) の、自動で受信するかの切り替え
+     */
+    onhold?: (() => void) | undefined;
+    /**
+     * アイコンの右上に添える小さな字。押したときとは別の設定 (長押しで切り替えるもの) が入っている印。
+     * 読み上げには出さないので、同じことを `label` にも書く
+     */
+    mark?: string | undefined;
     /** 読み上げに出す名前。押すと役目が変わるものは、いまの役目を書く */
     label: string;
     /**
@@ -33,7 +45,7 @@
      * **渡したときだけ `aria-pressed` を付ける**。押すだけのボタン (閉じる・切り抜き) には渡さない
      */
     on?: boolean | undefined;
-    /** 押すと戻せないもの。**聞き返しの 2 回目**に立てる (`icons.ts` の `OVERLAY_DANGER`) */
+    /** 押すと戻せないもの。**戻せない操作の 2 回目**に立てる (`icons.ts` の `OVERLAY_DANGER`) */
     danger?: boolean;
     /** 中の `<form>` を送るボタンにする (削除など) */
     submit?: boolean;
@@ -57,19 +69,24 @@
   title={label}
   data-testid={testid}
   {...menu}
+  {@attach onhold !== undefined && hold(onhold)}
 >
   {#if icon !== undefined}
     <Icon {icon} />
   {/if}
   {@render children?.()}
+  {#if mark !== undefined}
+    <span class="ov-mark" aria-hidden="true">{mark}</span>
+  {/if}
 </button>
 
 <style>
   /*
-     * 映像の上に置くボタンの見た目はここ 1 箇所 (`icons.ts` の OVERLAY*。`:global` なので `<a>` や EdgeButton にも届く)。
-     * Pico の色の変数を差し替える。ボタンは塗らず (docs/design.md)、アイコンと字に小さな影を付ける。
-     * 指を乗せた・キーボードで触っているボタンだけ、ごく薄い地で示す
-     */
+   * 映像の上に置くボタンの見た目はここ 1 箇所 (`icons.ts` の OVERLAY*。`:global` なので `<a>` や EdgeButton にも届く)。
+   * Pico の色の変数を差し替える。ボタンは塗らず (docs/design.md)、アイコンと字に小さな影を付ける。
+   * 指を乗せた・キーボードで触っているボタンだけ、ごく薄い地で示す。
+   * 文字のボタン (速さの数字・EdgeButton) の左右の余白は 12px、狭い枠では 8px
+   */
   :global(.ov-btn) {
     position: relative;
     display: inline-flex;
@@ -79,7 +96,7 @@
     height: 3rem;
     min-height: 3rem;
     margin: 0;
-    padding: 0 1.25rem;
+    padding: 0 var(--dp-space-3);
     border: 0;
     border-radius: var(--dp-btn-radius);
     box-shadow: none;
@@ -95,11 +112,11 @@
     width: 3rem;
     padding: 0;
   }
-  /* 狭い枠 (`data-compact`) では 40px (指で押す的として割らない)。文字のボタンは左右の余白も詰める */
+  /* 狭い枠 (`data-compact`) では 40px (指で押せる大きさはこれより小さくしない)。文字のボタンは左右の余白も詰める */
   :global(.stage[data-compact] .ov-btn) {
     height: 2.5rem;
     min-height: 2.5rem;
-    padding: 0 0.5rem;
+    padding: 0 var(--dp-space-2);
     font-size: var(--dp-text-base);
   }
   :global(.stage[data-compact] .ov-btn.ov-round) {
@@ -113,15 +130,19 @@
     --pico-border-color: transparent;
     --pico-color: var(--dp-on-video);
     --pico-box-shadow: none;
-    filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.6));
+    filter: var(--dp-on-video-ink);
   }
   :global(.ov-btn:is(:hover, :focus-visible)) {
     --pico-background-color: var(--dp-on-video-hover);
   }
+  /* 焦点の線はテーマで変えない (`app.css` の `--dp-video-focus`) */
+  :global(:is(.ov, .ov-btn):focus-visible) {
+    outline-color: var(--dp-video-focus);
+  }
   /*
-     * オン (`aria-pressed="true"`) は空色のアイコンと下の短い線。線はほかの所と同じ「入っている切り替え」の 1 本 (`app.css`) で、
-     * 色だけ字に合わせる。戻せないものの 2 回目と「今」に張り付いた「ライブ」「最新」は赤 (塗らない)
-     */
+   * オン (`aria-pressed="true"`) は空色のアイコンと下の短い線。線はほかの所と同じ「入っている切り替え」の 1 本 (`app.css`) で、
+   * 色だけ字に合わせる。戻せないものの 2 回目と「今」に張り付いた「ライブ」「最新」は赤 (塗らない)
+   */
   :global(.ov-btn[aria-pressed="true"]) {
     --pico-color: var(--dp-on-video-on);
     --dp-on-mark: currentColor;
@@ -129,6 +150,19 @@
   :global(.ov-btn.ov-danger) {
     --pico-color: var(--dp-on-video-danger);
     --dp-on-mark: currentColor;
+  }
+  /*
+   * 長押しで切り替える設定が入っている印 (`mark`)。アイコンの右上の小さな字で、色はボタンと同じ (色だけに頼らない。
+   * オンの短い線とは別の意味なので、線にはしない)。押せる大きさは変えない
+   */
+  .ov-mark {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.25rem;
+    font-size: var(--dp-text-xs);
+    font-weight: 700;
+    line-height: 1;
+    pointer-events: none;
   }
   /* 透かしを減らす設定では、乗せたときの地も透かさない (並びの裏の影は `ControlBar` が濃くする) */
   @media (prefers-reduced-transparency: reduce) {

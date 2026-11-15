@@ -1,7 +1,7 @@
 import { SKIP } from "#lib/ts/watch.js";
 
 /**
- * 再生画面のキー操作。**3 画面 (ライブ・追っかけ・観る画面) で同じ割り当てにする** (観ているものは同じなので、
+ * 映像の画面のキー操作。**3 画面 (ライブ・追っかけ・観る画面) で同じ割り当てにする** (観ているものは同じなので、
  * 画面やエンコードの前後で押し方を変えない)。その画面でできないことは、押しても何も起きない (速さはライブの
  * 追っかけ中だけ、など。決めるのは画面のほう)。
  *
@@ -29,6 +29,11 @@ export interface PlayerKeys {
   toggleMute?: () => void;
   /** ↑ ↓ (音量。`volume.svelte.ts` の `step`) */
   stepVolume?: (direction: number) => void;
+  /**
+   * Shift+D (データ放送を自動で受信するか。`data-receive.ts`)。データ放送のボタンの長押しと同じ (`hold.ts`)。
+   * データ放送の無い画面・録画は省く
+   */
+  toggleDataAuto?: () => void;
 }
 
 export function playerKeys(
@@ -60,7 +65,7 @@ export function playerKeys(
       ArrowUp: stepVolume === undefined ? undefined : () => stepVolume(1),
       ArrowDown: stepVolume === undefined ? undefined : () => stepVolume(-1),
     };
-    const run = map[event.key];
+    const run = isShiftD(event) ? actions.toggleDataAuto : map[event.key];
     if (run === undefined) return;
     event.preventDefault();
     run();
@@ -68,11 +73,18 @@ export function playerKeys(
 }
 
 /**
- * **データ放送を出している間に、あちらのリモコンへ譲るキー** (空白・十字キー・f。`bml/engine.ts` の `aribKey`)。
- * ライブと観る画面で同じ。譲らないと、空白で再生/一時停止と文書の決定が同時に起きる
+ * Shift+D か (データ放送を自動で受信するかの切り替え。画面のキー操作と `hold.ts` で同じ)。字ではなく Shift で見る。
+ * Caps Lock の間は Shift 無しで `D`、Shift 付きで `d` が来るので、字で見ると d だけで切り替わり、Shift+D では切り替わらない
+ */
+export function isShiftD(event: KeyboardEvent): boolean {
+  return event.shiftKey && event.key.toLowerCase() === "d";
+}
+
+/**
+ * **データ放送を出している間に、あちらのリモコンへ譲るキー** (空白・十字キー。`bml/engine.ts` の `aribKey`)。
+ * ライブと観る画面で同じ。譲らないと、空白で再生/一時停止と文書の決定が同時に起きる。
+ * `f` は譲らずに全画面にする。エンジンは `f` (データ 2) をどのキーの組 (used-key-list) にも入れないので、譲っても文書に届かない
  */
 export function dataRemoteKey(event: KeyboardEvent): boolean {
-  return (
-    event.key === " " || event.key === "f" || event.key.startsWith("Arrow")
-  );
+  return event.key === " " || event.key.startsWith("Arrow");
 }

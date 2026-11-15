@@ -1,33 +1,101 @@
 import { type Actions, fail } from "@sveltejs/kit";
-import { count, eq, inArray, or, sql } from "drizzle-orm";
+import { asc, count, eq, or, sql } from "drizzle-orm";
 
+import { parseId } from "#lib/id.js";
+import {
+  serviceAgent,
+  serviceChannel,
+  unreceivableService,
+} from "#lib/server/agent-channels.js";
+import {
+  caName,
+  caSystemIds,
+  epgText,
+  logoText,
+} from "#lib/server/ca-observe.js";
 import { orm } from "#lib/server/db.js";
 import { collectNow, collectState } from "#lib/server/epg-collect.js";
 import { currentServices, typeRank } from "#lib/server/epg.js";
 import { lineupNotice, seenLineupChanges } from "#lib/server/lineup-follow.js";
+import { type Reception, receptionOf } from "#lib/server/reception.js";
 import {
-  type Reception,
-  receptionOf,
-  unreceivableChannels,
-} from "#lib/server/reception.js";
-import {
+  observedOf,
+  removeType,
   SCAN_KINDS,
   type ScanKind,
   scanState,
   start,
   stop,
 } from "#lib/server/scan.js";
-import { programs, services } from "#lib/server/schema.js";
+import {
+  agentChannels,
+  agents,
+  programs,
+  services,
+} from "#lib/server/schema.js";
 import { measureSignal } from "#lib/server/signal-quality.js";
-import type { ChannelType } from "#lib/types.js";
+import {
+  ALL_CHANNEL_TYPES,
+  type ChannelType,
+  type Origin,
+  origin,
+  type Transport,
+} from "#lib/types.js";
 
 /** 物理チャンネル 1 本と、そこに入っている局 */
 interface Coverage {
   type: ChannelType;
   channel: string;
+  /** このチャンネルを控えに持つエージェント (`agent-channels.serviceAgent`)。受信の様子と測定はこのエージェントのもの */
+  agent: number;
+  /** このチャンネルの TS を受けられるエージェントの名前 (並びの順)。画面は 2 台以上のときだけ出す */
+  agents: string[];
   /** 受信できるか。受信できないチャンネルも、印を付けて出す (`reception.ts`) */
   reception: Reception;
-  services: { id: number; name: string; programs: number; until: number }[];
+  /**
+   * CATV のチャンネルが再送信している元の放送 (`types.origin`。original_network_id で決める)。
+   * ケーブルの自主放送と、ほかの種別は null
+   */
+  origin: Exclude<Origin, "CATV"> | null;
+  /** 伝送の形式 (`services.transport`)。チャンネルごとに 1 つで、同じチャンネルに TS と TLV の局は混ざらない (形式は選んだ TS で決まる)。`tlv` はケーブルで受けた 4K の局 */
+  transport: Transport;
+  /** `decodable` はライブと録画に使える局か (`services.decodable`)。復号できない局も表には並べる */
+  services: {
+    id: number;
+    name: string;
+    programs: number;
+    until: number;
+    decodable: boolean;
+  }[];
+  /**
+   * SKY と CATV のチャンネルで、最後のスキャンで分かったこと (`ca-observe.ts`)。CA_system_id と番組表・ロゴが来ているか。
+   * スキャンしていない (denpa を再起動した) ものと、ほかの種別は null
+   */
+  observed: { caSystemIds: string[]; epg: string; logo: string } | null;
+}
+
+/** TS (`種別:network_id:transport_stream_id`) ごとの、受けられるエージェントの名前 (並びの順) */
+function receiversByTs(): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const row of orm()
+    .selectDistinct({
+      type: agentChannels.type,
+      network: agentChannels.network_id,
+      ts: agentChannels.transport_stream_id,
+      name: agents.name,
+      position: agents.position,
+      id: agents.id,
+    })
+    .from(agentChannels)
+    .innerJoin(agents, eq(agents.id, agentChannels.agent_id))
+    .orderBy(asc(agents.position), asc(agents.id))
+    .all()) {
+    const key = `${row.type}:${row.network}:${row.ts}`;
+    const names = out.get(key) ?? [];
+    if (!names.includes(row.name)) names.push(row.name);
+    out.set(key, names);
+  }
+  return out;
 }
 
 /**
@@ -44,51 +112,50 @@ interface Coverage {
  * **受信できないチャンネルの局は出す** (番組表やライブからは外れている。外れた理由をここで言う)
  */
 function coverage(): Coverage[] {
-  const unreceivable = unreceivableChannels();
-  const blocked = [...unreceivable].map((key) =>
-    key.slice(key.indexOf(":") + 1),
-  );
   const rows = orm()
     .select({
       id: services.id,
       name: services.name,
       type: services.type,
-      channel: services.channel,
+      channel: serviceChannel(),
+      agent: serviceAgent(),
+      network_id: services.network_id,
+      transport_stream_id: services.transport_stream_id,
+      decodable: services.decodable,
+      transport: services.transport,
       programs: count(programs.id),
       until: sql`COALESCE(MAX(${programs.end_at}), 0)`.mapWith(Number),
-      current: sql`CASE WHEN ${currentServices()} THEN 1 ELSE 0 END`.mapWith(
-        Number,
-      ),
     })
     .from(services)
     .leftJoin(programs, eq(programs.service_id, services.id))
-    // 取り残しの局は出さない
-    .where(
-      blocked.length === 0
-        ? currentServices()
-        : or(currentServices(), inArray(services.channel, blocked)),
-    )
+    // 取り残しの局は出さない。全部のエージェントで受信できないと決めた局は、一覧から外れていても出す
+    .where(or(currentServices(), unreceivableService()))
     .groupBy(services.id)
     .orderBy(services.service_id)
-    .all()
-    // 名前だけで絞ったぶんを、種別と名前の組で絞り直す (いまの局はそのまま)
-    .filter(
-      (row) =>
-        !blocked.includes(row.channel) ||
-        unreceivable.has(`${row.type}:${row.channel}`) ||
-        row.current === 1,
-    );
+    .all();
 
+  const receivers = receiversByTs();
   const channels = new Map<string, Coverage>();
-  for (const { id, name, type, channel, programs, until } of rows) {
+  for (const row of rows) {
+    const { id, name, type, channel, agent, programs, until, decodable } = row;
+    // チャンネルの分からない局 (エージェントの控えの写しがまだ無い) は出さない
+    if (channel === null || agent === null) continue;
     const key = `${type}:${channel}`;
+    const from = type === "CATV" ? origin(row.network_id) : null;
     const entry = channels.get(key) ?? {
       type,
       channel,
+      agent,
+      agents:
+        receivers.get(`${type}:${row.network_id}:${row.transport_stream_id}`) ??
+        [],
       reception: "ok" as Reception,
+      origin: from === "CATV" ? null : from,
+      transport: row.transport,
       services: [],
+      observed: observation(type, channel),
     };
-    entry.services.push({ id, name, programs, until });
+    entry.services.push({ id, name, programs, until, decodable });
     channels.set(key, entry);
   }
   const list = [...channels.values()];
@@ -100,6 +167,17 @@ function coverage(): Coverage[] {
       typeRank(a.type) - typeRank(b.type) ||
       a.channel.localeCompare(b.channel, "en", { numeric: true }),
   );
+}
+
+/** 最後のスキャンで分かったことを、画面に出す文字にする。数えるのは SKY と CATV だけ (`scan.ts`) */
+function observation(type: ChannelType, channel: string): Coverage["observed"] {
+  const observed = observedOf(type, channel);
+  if (observed === undefined) return null;
+  return {
+    caSystemIds: caSystemIds(observed).map(caName),
+    epg: epgText(observed),
+    logo: logoText(observed),
+  };
 }
 
 export function load() {
@@ -136,13 +214,16 @@ export const actions = {
     const form = await request.formData();
     const types = form
       .getAll("types")
-      // 画面の選ぶ欄は 1 つ。「すべて」は `GR,BS,CS`、CATV は `CATV` で来る
+      // 画面の選ぶ欄は 1 つ。「すべて」は `GR,BS,CS` (CATV・SKY を選んだチューナーがあれば `GR,BS,CS,CATV,SKY` のように足す)、パススルーも回す地上波は `PASSTHROUGH` で来る
       .flatMap((value) => String(value).split(","))
       .filter((t): t is ScanKind => SCAN_KINDS.includes(t as ScanKind));
     if (types.length === 0)
       return fail(400, { message: "スキャンする種別を選んでください" });
 
-    const result = start({ types });
+    const agents = chosenAgents(form);
+    if (agents !== undefined && agents.length === 0)
+      return fail(400, { message: "スキャンするエージェントを選んでください" });
+    const result = start({ types, agents });
     if (!result.started) return fail(409, { message: result.message });
     return { success: true, scan: result.message };
   },
@@ -154,6 +235,27 @@ export const actions = {
   seenLineup: () => {
     seenLineupChanges();
     return { success: true };
+  },
+
+  /**
+   * 1 つの種別のチャンネルと局を消す。種別はどれでもよく、チューナーの有無も問わない (`scan.ts` の `removeType`)。
+   * 画面は押し間違いを防ぐ 2 回目 (「削除を確定」) で送ってくる
+   */
+  removeType: async ({ request }) => {
+    const form = await request.formData();
+    const type = String(form.get("type") ?? "");
+    const agents = chosenAgents(form);
+    if (agents !== undefined && agents.length === 0)
+      return fail(400, { message: "局を削除するエージェントを選んでください" });
+    if (!ALL_CHANNEL_TYPES.includes(type as ChannelType))
+      return fail(400, { message: "削除する種別の指定が不正です" });
+    try {
+      const result = await removeType(type as ChannelType, agents);
+      if (!result.removed) return fail(409, { message: result.message });
+      return { success: true, scan: result.message };
+    } catch (error) {
+      return fail(502, { message: `局を削除できませんでした: ${error}` });
+    }
   },
 
   /** 走っているスキャンを中断する。設定は書き換えないまま止まる */
@@ -177,9 +279,13 @@ export const actions = {
     );
     if (found === undefined)
       return fail(400, { message: "チャンネルを選んでください" });
-    const { type, channel } = found;
+    const { type, channel, agent } = found;
     try {
-      const quality = await measureSignal(type, channel, request.signal);
+      const quality = await measureSignal(
+        type,
+        { agent, channel },
+        request.signal,
+      );
       return { success: true, measured: { type, channel, ...quality } };
     } catch (error) {
       return fail(502, {
@@ -188,3 +294,17 @@ export const actions = {
     }
   },
 } satisfies Actions;
+
+/**
+ * スキャンと局の削除で選んだエージェント (`agents`。行の ID をカンマで並べたもの。チップは 2 台以上のときだけ出す)。
+ * 送られてこなければ全部 (undefined)。チップを出していて何も選んでいなければ空
+ */
+function chosenAgents(form: FormData): number[] | undefined {
+  const raw = form.get("agents");
+  if (raw === null) return undefined;
+  return String(raw)
+    .split(",")
+    .filter((value) => value !== "")
+    .map((value) => parseId(value))
+    .filter((id): id is number => id !== null);
+}

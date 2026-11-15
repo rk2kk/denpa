@@ -3,7 +3,7 @@
  *
  * logoframe はロゴを「色と濃さ (α)」で覚えていた。濃さを測るには**ロゴの後ろが
  * のっぺりしたコマ**が要り、BSテレ東 のように後ろが明るいセットばかりの局では
- * `initial logo estimate contains too few active pixels` で止まっていた (`docs/cm.md`)。
+ * `initial logo estimate contains too few active pixels` で止まっていた (`docs/cm.md`「logoframe から乗り換えた」)。
  *
  * こちらが覚えるのは**線の向き**だけ。ロゴは後ろが何であれ毎コマ同じ所に同じ向きの
  * 縁を出し、中身の縁の向きはコマごとにばらばら。画素ごとに勾配の向きを足し合わせると、
@@ -321,7 +321,7 @@ export interface Span {
  * 出ている/いないを決める境目。**上がるときと下がるときで分ける** (ヒステリシス)。
  * 境目近くを行き来するコマで区間が細切れにならないように
  */
-const ON = 0.25;
+export const ON = 0.25;
 export const OFF = 0.12;
 /** 1 コマごとの点を、前後これだけのコマの中央値でならす (奇数)。白いフラッシュ 1 枚で切れないように */
 const SMOOTH = 9;
@@ -423,7 +423,7 @@ interface Readings {
  *    「点が OFF を割った割合」を数え、`MISS_MAX` を超える段は判断しない。
  *    実機のテレ東では、明るさ 176〜207 で肌理のある所が 1〜2 割、208 以上は半分以上割っていた
  *
- * 判断しないコマは、直前の判断を持ち越す (`logoSpans`)
+ * 判断しないコマは、直前の判断を持ち越す (`spansOf`)
  */
 function byLevel(r: Readings, fps: number): Uint8Array {
   /*

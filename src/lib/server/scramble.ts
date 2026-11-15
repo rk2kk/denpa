@@ -1,5 +1,6 @@
-import { closeSync, openSync, readSync } from "node:fs";
-import { isAbsolute, relative, sep } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import { PACKET, SYNC } from "@danything/arib/psi";
 
@@ -13,8 +14,10 @@ import {
   string,
   tolerate,
 } from "../shape";
-import { agentFetch } from "./agent-client";
+import { fetchAgent } from "./agent-client";
+import { type Agent, listAgents, primaryAgent } from "./agents";
 import { config } from "./config";
+import { openRecordingSync, type RecordingSyncHandle } from "./recording-io";
 
 /**
  * スクランブルの検出と復号。
@@ -43,11 +46,179 @@ const THRESHOLD = 0.5;
  * 正常なら 0 に近い。カードが読めていないと 98〜99% になる。
  */
 export function scrambledRatio(path: string): number {
-  let fd: number;
+  const counted = countPackets(path);
+  return counted === null || counted.total === 0
+    ? 0
+    : counted.scrambled / counted.total;
+}
+
+export function isScrambled(path: string): boolean {
+  return scrambledRatio(path) > THRESHOLD;
+}
+
+/**
+ * **復号できていると言える TS か** (有料の録画を契約の手がかりにする。`contracts.noteDecoded`)。
+ * `isScrambled` の否定より厳しく、読めない・同期が取れていない・パケットが `SAMPLE` 個に届かないファイルは false にする。
+ * 中身がほとんど無い録画を、復号できたことの証拠にしないため
+ */
+export function isDecoded(path: string): boolean {
+  const counted = countPackets(path);
+  return (
+    counted !== null &&
+    counted.total >= SAMPLE &&
+    counted.scrambled / counted.total <= THRESHOLD
+  );
+}
+
+/** `ServiceFilter.streams` (`種別:PID` の並び) から、映像・音声・字幕の PID。PMT を読む前は空 */
+export function mediaPids(streams: string | null): Set<number> {
+  const pids = new Set<number>();
+  for (const one of streams?.split(",") ?? []) {
+    const pid = Number(one.split(":")[1]);
+    if (Number.isInteger(pid)) pids.add(pid);
+  }
+  return pids;
+}
+
+/**
+ * **TS のパケットが、局の映像・音声・字幕のうちスクランブルされたまま届いたものか。** 数えないパケットは null。
+ *
+ * エージェントは、カードが鍵を返さなかった ES (未契約) をスクランブルされたまま流す ([docs/agent.md](../../../docs/agent.md))。
+ * denpa が読むのはその印 (transport_scrambling_control)。PAT・PMT・ECM・EIT のようなセクションは掛からないので数えない
+ * (割合が下がって、復号できたように見える)。ペイロードの無いパケットもスクランブルの対象にならないので数えない
+ *
+ * @param media その局の映像・音声・字幕の PID (`mediaPids`)
+ */
+function scrambledMedia(
+  packet: Uint8Array,
+  media: Set<number>,
+): boolean | null {
+  if (packet[0] !== SYNC) return null;
+  if (!media.has(((packet[1]! & 0x1f) << 8) | packet[2]!)) return null;
+  if ((packet[3]! & 0x10) === 0) return null;
+  // 4 バイト目の上位 2 ビットが transport_scrambling_control
+  return (packet[3]! & 0xc0) !== 0;
+}
+
+/**
+ * **局の映像・音声・字幕のパケットのうち、スクランブルされたまま届いたものを数える** (契約の復号テストとライブ)。
+ * TS は 188 バイトのパケットを 1 つずつ (`feed`)、4K の局 (TLV) は MMTP のパケットの数をまとめて (`add`) 渡す
+ */
+export class ScrambleCount {
+  total = 0;
+  scrambled = 0;
+
+  /** @param limit これだけ数えたら、あとは数えない */
+  constructor(readonly limit: number) {}
+
+  /** `limit` まで数え終えた */
+  get full(): boolean {
+    return this.total >= this.limit;
+  }
+
+  /** TS のパケットを 1 つ (188 バイト)。`media` はその局の映像・音声・字幕の PID (`mediaPids`) */
+  feed(packet: Uint8Array, media: Set<number>): void {
+    if (this.full) return;
+    const scrambled = scrambledMedia(packet, media);
+    if (scrambled !== null) this.add(1, scrambled ? 1 : 0);
+  }
+
+  /** 数えたパケットの数と、そのうちスクランブルされていた数を足す。`limit` を超えたぶんも足す (まとめて渡されたとき) */
+  add(total: number, scrambled: number): void {
+    if (this.full) return;
+    this.total += total;
+    this.scrambled += scrambled;
+  }
+
+  /** 掛かったままと言えるか。数えたのが `least` 個に満たなければ言えない (false) */
+  stillScrambled(least: number): boolean {
+    return this.total >= least && this.scrambled / this.total > THRESHOLD;
+  }
+}
+
+/**
+ * **ライブで、局の映像・音声・字幕がスクランブルされたまま届き続けているかを決める** (`live.ts`)。TS の局も 4K の局 (TLV) も同じ決まり。
+ *
+ * 復号できる局でも、選局したての数百パケットがスクランブルされたまま届くことがある。鍵がそろう前のパケットで、
+ * 本番 (2026-11-11、PT3 の地上波) ではエージェントが PMT の来ていない番組の ES をそのまま流していた ([docs/agent.md](../../../docs/agent.md))。
+ * カードが鍵を返さない (未契約の) 局は、そのあともスクランブルされたまま届く。先頭だけで決めると、無料の局を「契約されていない」として止める。
+ *
+ * そこで `window` 個ずつ数え、スクランブルされているのが半分以下の窓が 1 つ来たら、復号できているとして数えるのをやめる (`verdict` が `clear`)。
+ * 半分を超えてスクランブルされた窓が 2 つ以上、`lasting` ミリ秒続いたら、スクランブルされたままと決める (`scrambled`)。
+ * 窓を 2 つ要るのは、500 個に何秒もかかる低いビットレートの局で、先頭の窓 1 つだけで決めないため
+ */
+export class LastingScramble {
+  /** 決めた結果。決まるまで null */
+  verdict: "clear" | "scrambled" | null = null;
+  private count: ScrambleCount;
+  /** 最後に数え終えた窓 */
+  private done: ScrambleCount | null = null;
+  /** いまの窓の最初のパケットを数えた時刻 */
+  private openedAt = 0;
+  /** スクランブルされた窓が続き始めた時刻。そういう窓がまだ無ければ null */
+  private since: number | null = null;
+  /** スクランブルされた窓が続いている数 */
+  private runs = 0;
+
+  constructor(
+    readonly window: number,
+    readonly lasting: number,
+  ) {
+    this.count = new ScrambleCount(window);
+  }
+
+  /** TS のパケットを 1 つ (188 バイト)。`media` はその局の映像・音声・字幕の PID (`mediaPids`)、`now` は受けた時刻 (ミリ秒) */
+  feed(packet: Uint8Array, media: Set<number>, now: number): void {
+    if (this.verdict !== null) return;
+    const scrambled = scrambledMedia(packet, media);
+    if (scrambled !== null) this.add(1, scrambled ? 1 : 0, now);
+  }
+
+  /**
+   * 数えたパケットの数と、そのうちスクランブルされていた数を足す (4K の局。MMTP のパケットを 1 塊ぶんまとめて)。
+   * まとめて渡されたぶんは 1 つの窓に入れる (窓が `window` 個を少し超える)
+   */
+  add(total: number, scrambled: number, now: number): void {
+    if (this.verdict !== null || total === 0) return;
+    if (this.count.total === 0) this.openedAt = now;
+    this.count.add(total, scrambled);
+    if (!this.count.full) return;
+    this.done = this.count;
+    this.count = new ScrambleCount(this.window);
+    if (!this.done.stillScrambled(this.window)) {
+      this.verdict = "clear";
+      return;
+    }
+    this.since ??= this.openedAt;
+    this.runs++;
+    if (this.runs >= 2 && now - this.since >= this.lasting)
+      this.verdict = "scrambled";
+  }
+
+  /** いちばん新しく数えた窓。いまの窓が `least` 個に届いていればそれ、届いていなければ最後に数え終えた窓 */
+  newest(least: number): ScrambleCount | null {
+    return this.count.total >= least ? this.count : this.done;
+  }
+
+  /**
+   * **いまスクランブルされたままと言えるか** (ffmpeg が `verdict` の決まる前に降りたとき)。いちばん新しく数えた窓 (`newest`) で決める。
+   * 窓がまだ無ければ言えない (false)
+   */
+  stillScrambled(least: number): boolean {
+    if (this.verdict !== null) return this.verdict === "scrambled";
+    return this.newest(least)?.stillScrambled(least) ?? false;
+  }
+}
+
+/** 先頭から `SAMPLE` 個までのパケットの数と、そのうちスクランブルされている数。読めない・同期が取れていないファイルは null */
+function countPackets(
+  path: string,
+): { total: number; scrambled: number } | null {
+  let file: RecordingSyncHandle;
   try {
-    fd = openSync(path, "r");
+    file = openRecordingSync(path);
   } catch {
-    return 0;
+    return null;
   }
 
   try {
@@ -57,25 +228,21 @@ export function scrambledRatio(path: string): number {
     let offset = 0;
 
     while (total < SAMPLE) {
-      const read = readSync(fd, buffer, 0, buffer.length, offset);
+      const read = file.read(buffer, 0, buffer.length, offset);
       if (read < PACKET) break;
       offset += read;
 
       for (let i = 0; i + PACKET <= read; i += PACKET) {
         // 同期が取れていないファイルは判定しない。誤って復号に回すより素通しがまし
-        if (buffer[i] !== SYNC) return 0;
+        if (buffer[i] !== SYNC) return null;
         total++;
         if ((buffer[i + 3]! & 0xc0) !== 0) scrambled++;
       }
     }
-    return total === 0 ? 0 : scrambled / total;
+    return { total, scrambled };
   } finally {
-    closeSync(fd);
+    file.close();
   }
-}
-
-export function isScrambled(path: string): boolean {
-  return scrambledRatio(path) > THRESHOLD;
 }
 
 /** `/denpa/card` の 1 行。リーダー 1 つ */
@@ -89,7 +256,7 @@ const CARD_READER = object({
   active: boolean,
   /** このカードで復号しているチューナー */
   tuners: array(string),
-  /** 覗けなかった理由。挿さっていないだけなら無い */
+  /** カードを読めなかった理由。挿さっていないだけなら無い */
   error: optional(string),
   /** 使わない設定のリーダー。開いていないので、カードの有無も分からない */
   disabled: optional(boolean),
@@ -132,6 +299,15 @@ export type CardStatus = {
   readers: CardReader[];
 };
 
+/** そのエージェントが復号に使うカードの番号 (16 桁)。鍵を配る相手のカード、使用中のリーダー、カードのあるリーダーの順に探す */
+export function getActiveCardId(card: CardStatus): string | null {
+  if (card.source === "remote" && card.ids.length > 0)
+    return card.ids[0] ?? null;
+  const reader =
+    card.readers.find((r) => r.state === "active" && r.ids.length > 0) ??
+    card.readers.find((r) => r.ids.length > 0);
+  return reader?.ids[0] ?? null;
+}
 function strings(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((v): v is string => typeof v === "string")
@@ -193,8 +369,11 @@ function failed(message: string): CardStatus {
  * 使わないカードリーダーを入れ替える (設定の「受信」のカードリーダーの表のスイッチ)。
  * 渡すのは使わないリーダーの名前の一覧。使っている最中のリーダーなら、エージェントが手放して次のリーダーで繋ぎ直す
  */
-export async function putCardReaders(disabled: string[]): Promise<void> {
-  const res = await agentFetch("/denpa/card/readers", {
+export async function putCardReaders(
+  disabled: string[],
+  agent: Agent,
+): Promise<void> {
+  const res = await fetchAgent(agent, "/denpa/card/readers", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ disabled }),
@@ -211,15 +390,20 @@ export async function putCardReaders(disabled: string[]): Promise<void> {
 const DECODED = object({ ok: optional(boolean), error: optional(string) });
 
 /**
- * カードリーダーの状態。設定画面に出す。
+ * カードリーダーの状態。設定画面に出す。`agent` を渡さなければ並びの先頭のエージェント。
+ * 渡さないのは、どのエージェントか分からないときだけ (録ったエージェントの分からない録画・エージェントが 1 台も無いときの理由)。
  *
  * リーダーが見えていてもカードを読めていないことがある (挿さっていない・USB が黙る)。
  * そのまま録ると上に書いた壊れ方になるので、画面から見えるようにしてある。
  */
-export async function cardStatus(): Promise<CardStatus> {
+export async function cardStatus(
+  agent?: Agent,
+  /** 答えを待つ上限 (ms) */
+  wait = 10_000,
+): Promise<CardStatus> {
   try {
-    const res = await agentFetch("/denpa/card", {
-      signal: AbortSignal.timeout(10_000),
+    const res = await fetchAgent(agent ?? primaryAgent(), "/denpa/card", {
+      signal: AbortSignal.timeout(wait),
     });
     if (!res.ok) {
       return failed(
@@ -241,12 +425,23 @@ export async function cardStatus(): Promise<CardStatus> {
  * 大きいものを渡すと詰まる)。
  *
  * **返事だけでは信じない。** 出来上がったものを読み、掛かったままなら失敗にする。
+ *
+ * 送る先は `agent`、渡さなければ `decodeAgent` が選ぶ (カードの準備ができていて、置き場が見えるエージェント)
  */
 export async function descramble(
   input: string,
   output: string,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; error: string; stillScrambled?: boolean }> {
+  agent?: Agent,
+): Promise<{
+  ok: boolean;
+  error: string;
+  /** 復号させたエージェント (`agents.id`)。送る前に失敗したら無い */
+  agent?: number;
+  stillScrambled?: boolean;
+  /** 掛かったまま終わったときに、そのエージェントが使っていたカードの番号 (`contracts.noteStillScrambled`) */
+  cardId?: string | null;
+}> {
   /*
    * 向こうのマウント先はこちらと同じとは限らないので、元の TS の置き場からの相対で渡す。
    * 掛かったままの TS は必ずここにある (引き継いだ録画も、移行のときに
@@ -268,9 +463,11 @@ export async function descramble(
     };
   }
 
+  let chosen: Agent;
   try {
+    chosen = agent ?? (await decodeAgent());
     // 復号は数十分かかることがある。中止を押されたらここで切る
-    const res = await agentFetch("/denpa/decode", {
+    const res = await fetchAgent(chosen, "/denpa/decode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: from, output: to }),
@@ -284,6 +481,7 @@ export async function descramble(
     if (!res.ok || body.ok !== true) {
       return {
         ok: false,
+        agent: chosen.id,
         error:
           body.error ??
           `エージェントへの復号のリクエストが失敗しました (${res.status})`,
@@ -295,16 +493,114 @@ export async function descramble(
 
   if (isScrambled(output)) {
     // 素通しされた。ほぼカードが読めていない
-    const card = await cardStatus();
+    const card = await cardStatus(chosen);
     const why = card.ok
       ? "カードは読めているので、鍵が合わないか ECM が流れていません"
       : card.message;
     // カードは読めていて掛かったまま = 鍵を貰えなかった (契約が無い・切れたことが多い。`contracts.noteStillScrambled`)
     return {
       ok: false,
+      agent: chosen.id,
       error: `復号してもスクランブルが残っています。${why}`,
       stillScrambled: card.ok,
+      cardId: card.ok ? getActiveCardId(card) : null,
     };
   }
-  return { ok: true, error: "" };
+  return { ok: true, agent: chosen.id, error: "" };
+}
+
+/** `POST /denpa/raw/probe` の答え。見つかれば中身の SHA-256、無ければ `error` */
+const RAW_PROBE = object({
+  sha256: optional(string),
+  error: optional(string),
+});
+
+/** エージェントが知らない API に返す `error` (エージェントの Program.cs の `MapFallback`) */
+const UNKNOWN_API = "not found";
+
+/** 確かめた結果 (メモリだけ)。見えた・見えなかったものだけ控え、確かめられなかったものは次に訊き直す */
+const probed = new Map<number, boolean>();
+
+/** 置き場を確かめた結果を捨てる。`agent` を渡さなければ全部 (エージェントに繋がり直したとき。runtime.ts) */
+export function forgetRawProbe(agent?: number): void {
+  if (agent === undefined) probed.clear();
+  else probed.delete(agent);
+}
+
+/**
+ * **元の TS の置き場 (`RAW_DIR`) が、エージェントから見えるか。** denpa が `RAW_DIR/.denpa/probe-<エージェントの ID>-<乱数>` に乱数を書き、
+ * エージェントに `POST /denpa/raw/probe` でその中身の SHA-256 を返させて比べる。書いたファイルは確かめ終えたら消す。
+ *
+ * true は見える、false は見えない (ファイルが無い・中身が違う)、null は確かめられない (繋がらない・`/denpa/raw/probe` の無い古いエージェント)
+ */
+export async function probeRaw(agent: Agent): Promise<boolean | null> {
+  // 同じエージェントを同時に確かめても、互いのファイルを消さないよう名前に乱数を足す
+  const nonce = randomBytes(8).toString("hex");
+  const name = `.denpa/probe-${agent.id}-${nonce}`;
+  const path = join(config.rawDir, ".denpa", `probe-${agent.id}-${nonce}`);
+  const content = randomBytes(32).toString("hex");
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content);
+  } catch (error) {
+    console.warn(`[decode] 元の TS の置き場に書けません (${path}): ${error}`);
+    return null;
+  }
+  try {
+    const res = await fetchAgent(agent, "/denpa/raw/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: name }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const raw: unknown = await res.json().catch(() => null);
+    // 本文が JSON でない (405 など) なら確かめられない
+    if (raw === null) return null;
+    const body = tolerate(RAW_PROBE, raw, "エージェントの /denpa/raw/probe");
+    if (res.ok && typeof body.sha256 === "string")
+      return body.sha256 === createHash("sha256").update(content).digest("hex");
+    // 無いのがファイルなら見えない。知らない API には、古いエージェントも 404 と `not found` を返す (`MapFallback`) ので、それは確かめられない
+    return res.status === 404 &&
+      typeof body.error === "string" &&
+      body.error !== UNKNOWN_API
+      ? false
+      : null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
+
+/** 置き場が見えるか。控えがあればそれ、無ければ確かめる (`probeRaw`)。設定の「エージェント」の行にも出す (`agent-admin.ts`) */
+export async function rawVisible(agent: Agent): Promise<boolean | null> {
+  const kept = probed.get(agent.id);
+  if (kept !== undefined) return kept;
+  const seen = await probeRaw(agent);
+  if (seen !== null) probed.set(agent.id, seen);
+  return seen;
+}
+
+/**
+ * **後から復号させるエージェント** (`descramble`)。カードの準備ができている (`/denpa/card` の `ok` とカードの番号がある) エージェントのうち、
+ * 置き場が見える (`probeRaw`) ものを並びの順に選ぶ。見えるものが無ければ確かめられないもの、それも無ければカードの準備ができている先頭
+ * (エージェントが「見つかりません」と断り、今までどおり復号できなかった録画として残る)。カードの準備ができているものが無ければ並びの先頭。
+ *
+ * **エージェントが 1 台なら、確かめずにそこへ送る** (1 台のときの動きは変わらない)
+ */
+export async function decodeAgent(): Promise<Agent> {
+  const all = listAgents();
+  if (all.length <= 1) return primaryAgent();
+  const cards = await Promise.all(all.map((agent) => cardStatus(agent)));
+  const ready = all.filter(
+    (_, i) => cards[i]!.ok && getActiveCardId(cards[i]!) !== null,
+  );
+  if (ready.length === 0) return all[0]!;
+  let unknown: Agent | null = null;
+  for (const agent of ready) {
+    const seen = await rawVisible(agent);
+    if (seen === true) return agent;
+    if (seen === null) unknown ??= agent;
+  }
+  return unknown ?? ready[0]!;
 }

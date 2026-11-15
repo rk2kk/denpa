@@ -36,6 +36,7 @@ function harness() {
     stepSpeed: (direction) => done.push(`speed ${direction}`),
     toggleMute: () => done.push("mute"),
     stepVolume: (direction) => done.push(`volume ${direction}`),
+    toggleDataAuto: () => done.push("data-auto"),
   });
   return {
     done,
@@ -45,7 +46,22 @@ function harness() {
 }
 
 describe("再生画面のキー", () => {
-  test("空白と k で再生/一時停止、左右で 10秒", () => {
+  test("Shift+D でデータ放送を自動で受信するかを切り替える (d だけでは何もしない)", () => {
+    const { done, press } = harness();
+    expect(press("D", { shiftKey: true })).toBe(true);
+    expect(press("d")).toBe(false);
+    expect(done).toEqual(["data-auto"]);
+  });
+
+  test("Caps Lock の間も Shift+D で切り替え、Shift 無しの D では切り替えない", () => {
+    const { done, press } = harness();
+    // Caps Lock の間は、Shift 付きで "d"、Shift 無しで "D" が来る
+    expect(press("d", { shiftKey: true })).toBe(true);
+    expect(press("D")).toBe(false);
+    expect(done).toEqual(["data-auto"]);
+  });
+
+  test("空白と k で再生/一時停止、左右で 10 秒", () => {
     const { done, press } = harness();
     expect(press(" ")).toBe(true);
     press("k");
@@ -127,20 +143,13 @@ describe("再生画面のキー", () => {
 describe("データ放送を出している間に譲るキー", () => {
   const yields = (key: string) => dataRemoteKey({ key } as KeyboardEvent);
 
-  test("空白・十字キー・f はデータ放送のリモコンへ譲る (ライブと観る画面で同じ)", () => {
-    for (const key of [
-      " ",
-      "f",
-      "ArrowUp",
-      "ArrowDown",
-      "ArrowLeft",
-      "ArrowRight",
-    ])
+  test("空白・十字キーはデータ放送のリモコンへ譲る (ライブと観る画面で同じ)", () => {
+    for (const key of [" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"])
       expect(yields(key)).toBe(true);
   });
 
-  test("ほかのキー (k・c・s・m・速さ) は再生の操作のまま", () => {
-    for (const key of ["k", "c", "s", "m", "<", ">"])
+  test("ほかのキー (f・k・c・s・m・速さ) は再生の操作のまま", () => {
+    for (const key of ["f", "k", "c", "s", "m", "<", ">"])
       expect(yields(key)).toBe(false);
   });
 });

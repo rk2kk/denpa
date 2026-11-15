@@ -15,6 +15,24 @@ function load(source: string, css = ""): BmlDocument {
 }
 
 describe("XML", () => {
+  test("前置きを付けた script・style も、前置き付きの閉じタグで閉じる (後ろの文書を飲み込まない)", () => {
+    const xml = parseXml(
+      "<bml><head><bml:script>f();</bml:script><bml:style>p{}</bml:style></head><body><p>x</p></body></bml>",
+    );
+    const [head, body] = xml?.children ?? [];
+    if (head?.kind !== "element") throw new Error();
+    expect(
+      head.children.map((c) =>
+        c.kind === "element"
+          ? [c.name, c.children.map((t) => (t.kind === "text" ? t.text : ""))]
+          : null,
+      ),
+    ).toEqual([
+      ["script", ["f();"]],
+      ["style", ["p{}"]],
+    ]);
+    expect(body?.kind === "element" && body.name).toBe("body");
+  });
   test("寛容に読む: 閉じ忘れ・実体参照・CDATA・DOCTYPE・前置き", () => {
     const xml = parseXml(
       '<?xml version="1.0" encoding="EUC-JP"?><!DOCTYPE bml PUBLIC "x" "y"><bml><body><bml:p a="&quot;q&quot;" b=raw>A &amp; B &unknown;<![CDATA[<raw>]]></bml:p><div></body></bml>',
@@ -49,7 +67,7 @@ describe("XML", () => {
   });
 });
 
-describe("文字の空白 (付属2 5.3.2)", () => {
+describe("文字の空白 (付属 2 5.3.2)", () => {
   test("先頭と末尾と、2 バイト文字どうしのあいだの改行は消える", () => {
     const doc = load(
       '<bml><body><p id="p">\n  天気\n  予報  \n</p></body></bml>',
@@ -68,6 +86,33 @@ describe("文字の空白 (付属2 5.3.2)", () => {
       .getElementById("p")!
       .children.map((c) => (c.kind === "text" ? c.data : `[${c.tag}]`));
     expect(texts).toEqual(["A ", "[span]", " C"]);
+  });
+
+  /** 表 5-11 の最初の決まり「制御符号だけの文字列にはテキストノードを作らない」が、表 5-12 より先に効く */
+  test("span と span のあいだが空白 1 つだけなら、文字を作らない", () => {
+    const doc = load(
+      '<bml><body><p id="p"><span>NHK</span> <span>ニュース</span>\n<a href="x.bml">詳しく</a></p></body></bml>',
+    );
+    expect(doc.getElementById("p")!.children.map((c) => c.kind)).toEqual([
+      "element",
+      "element",
+      "element",
+    ]);
+  });
+
+  test("1 バイト文字をはさむ空白と改行の並びは 0x20 1 つに、2 バイト文字どうしなら消す", () => {
+    const doc = load(
+      '<bml><body><p id="a">abc\n    def</p><p id="b">12月\n  3日\t\t放送</p><p id="c">x<span>y</span>天気\n  予報\n</p></body></bml>',
+    );
+    const last = (id: string) => {
+      const children = doc.getElementById(id)!.children;
+      const node = children[children.length - 1];
+      return node?.kind === "text" ? node.data : null;
+    };
+    expect(last("a")).toBe("abc def");
+    expect(last("b")).toBe("12月 3日放送");
+    // span の後ろで p が終わるときも、終了タグの直前の並びは消す
+    expect(last("c")).toBe("天気予報");
   });
 
   test("空の p・span・a も文字を 1 つ持つ (スクリプトが firstChild.data に書く先)", () => {
@@ -230,8 +275,25 @@ describe("CSS", () => {
     );
     const d = doc.getElementById("d")!.style();
     expect(d.left).toBe(0);
-    expect(d.colorIndex).toBe(7);
+    expect(d.colorIndex).toBe(0);
     expect(d.navIndex).toBe(506);
+  });
+
+  test("継ぐプロパティの読めない値は、既定でなく親の値になる", () => {
+    const doc = load(
+      '<bml><body><p style="color-index: 7; font-size: 30px; letter-spacing: 2px; grayscale-color-index: 1 2">x<span id="s" style="color-index: abc; font-size: 1em; letter-spacing: x; grayscale-color-index: 1">y</span></p></body></bml>',
+    );
+    const s = doc.getElementById("s")!.style();
+    expect([s.colorIndex, s.fontSize, s.letterSpacing]).toEqual([7, 30, 2]);
+    expect(s.grayscale).toEqual([1, 2]);
+  });
+
+  test("文字の色の既定は黒 (0)。指定の無い段落は body から黒を継ぐ (地震お知らせ表示設定の「利用する」)", () => {
+    const doc = load(
+      '<bml><body><div id="w" style="background-color-index: 168"><p id="none">利用する</p><p id="white" style="color-index: 7">地震</p></div></body></bml>',
+    );
+    expect(doc.getElementById("none")!.style().colorIndex).toBe(0);
+    expect(doc.getElementById("white")!.style().colorIndex).toBe(7);
   });
 });
 
@@ -276,7 +338,7 @@ describe("CLUT", () => {
   });
 });
 
-describe("見直しで足したもの", () => {
+describe("崩れた書き方と重ね合わせの細部", () => {
   test("閉じない br は後ろを飲み込まない。script の CDATA は幾つあってもつなぐ", () => {
     const doc = load(
       '<bml><head><script><![CDATA[a();]]><!-- x --><![CDATA[b();]]></script></head><body><p id="p">A<br>B</p></body></bml>',
@@ -299,7 +361,7 @@ describe("見直しで足したもの", () => {
     expect([p.style().colorIndex, p.style().fontSize]).toEqual([2, 30]);
   });
 
-  test("div と object の padding は 0、継がない特性の inherit は親の値、枠の線は列挙だけ", () => {
+  test("div と object の padding は 0、継がないプロパティの inherit は親の値、枠の線は列挙だけ", () => {
     const doc = load(
       '<bml><body><div id="d" style="padding:9px;background-color-index:4"><div id="c" style="background-color-index:inherit;border-style:solid;color:red"></div><p id="p" style="border-style:x;url(y)"></p></div></body></bml>',
     );

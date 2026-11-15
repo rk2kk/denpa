@@ -19,6 +19,7 @@ const realAgent = config.agentUrl;
 config.agentUrl = "https://127.0.0.1:9";
 
 const { now, orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { clockOf, jstOf } = await import("../rule-time");
 const { previewFor } = await import("./rule-preview");
 const {
@@ -68,7 +69,6 @@ beforeEach(() => {
         name: "TOKYO MX1",
         type: "GR",
         service_type: 1,
-        channel: "T16",
         updated_at: now(),
       },
       {
@@ -78,11 +78,14 @@ beforeEach(() => {
         name: "BS11",
         type: "BS",
         service_type: 1,
-        channel: "BS09_0",
         updated_at: now(),
       },
     ])
     .run();
+  placeServices([
+    { id: MX, channel: "T16" },
+    { id: BS11, channel: "BS09_0" },
+  ]);
 });
 
 function program(
@@ -428,5 +431,158 @@ describe("人が取り消した放送", () => {
       1: { kind: "skip", reason: "declined" },
       2: { kind: "record" },
     });
+  });
+});
+
+/*
+ * 分割していない間は、同じ回が枝番の局 (23608 / 23609) の両方に載る。予約を立てるとき (`applyRules`) は
+ * 小さいほうだけ立てるので、下見も同じ (`rules.oneBroadcast`)。前は両方を「録る」と出していた
+ */
+describe("枝番の局で同じ放送", () => {
+  const MX_SUB = 3239123609;
+
+  test("本チャンネルを録り、枝番のほうは「録らない」(本チャンネルと同じ番組)。中身が違えば両方録る", async () => {
+    orm()
+      .insert(services)
+      .values({
+        id: MX_SUB,
+        service_id: 23609,
+        network_id: 32391,
+        name: "TOKYO MX1",
+        type: "GR",
+        service_type: 1,
+        updated_at: now(),
+      })
+      .run();
+    placeServices([{ id: MX_SUB, channel: "T16" }]);
+    // 枝番のほうを先に入れる (並び順に左右されない)
+    program(2, "テスト魔法 #1", 5 * HOUR, MX_SUB);
+    program(1, "テスト魔法 #1", 5 * HOUR);
+    program(3, "テスト魔法 #2", 8 * HOUR);
+    program(4, "別の番組テスト魔法", 8 * HOUR, MX_SUB);
+    const preview = await previewFor(
+      draftRule(form({ keyword: "テスト魔法", dedupe: "0" }))!,
+      { ids: [1, 2, 3, 4] },
+    );
+    expect(preview.verdicts).toEqual({
+      1: { kind: "record" },
+      2: { kind: "skip", reason: "simulcast" },
+      3: { kind: "record" },
+      4: { kind: "record" },
+    });
+  });
+
+  // 取り消しは物理チャンネルとタイトルと時刻で当てるので、片方を取り消すと両方とも録らない (`applyRules` と同じ)
+  test("本チャンネルのほうを取り消したら、枝番のほうも「取り消し済み」", async () => {
+    orm()
+      .insert(services)
+      .values({
+        id: MX_SUB,
+        service_id: 23609,
+        network_id: 32391,
+        name: "TOKYO MX1",
+        type: "GR",
+        service_type: 1,
+        updated_at: now(),
+      })
+      .run();
+    placeServices([{ id: MX_SUB, channel: "T16" }]);
+    program(1, "テスト魔法 #1", 5 * HOUR);
+    program(2, "テスト魔法 #1", 5 * HOUR, MX_SUB);
+    orm()
+      .insert(reservations)
+      .values({
+        program_id: 1,
+        rule_id: null,
+        service_id: MX,
+        name: "テスト魔法 #1",
+        description: "",
+        start_at: base + 5 * HOUR,
+        end_at: base + 6 * HOUR,
+        priority: 2,
+        manual: true,
+        state: "canceled",
+        created_at: now(),
+        updated_at: now(),
+      })
+      .run();
+    const preview = await previewFor(
+      draftRule(form({ keyword: "テスト魔法", dedupe: "0" }))!,
+      { ids: [1, 2] },
+    );
+    expect(preview.verdicts).toEqual({
+      1: { kind: "skip", reason: "declined" },
+      2: { kind: "skip", reason: "declined" },
+    });
+  });
+});
+
+/**
+ * 番組表を読めるが復号できない局 (ケーブルの 4K の局など。`types.epgReadableService`)。番組表には出るが、ルールは当てない
+ */
+describe("復号できない局", () => {
+  const CABLE_4K = (0x10000 + 0x000b) * 100000 + 161;
+
+  test("下見では「録らない」(復号できない局)。同じ回をまとめる相手にもせず、予約も立てない", async () => {
+    orm()
+      .insert(services)
+      .values({
+        id: CABLE_4K,
+        service_id: 161,
+        network_id: 0x000b,
+        name: "ＢＳでんぱ　４Ｋ",
+        type: "CATV",
+        service_type: 1,
+        decodable: false,
+        epg_readable: true,
+        transport: "tlv",
+        updated_at: now(),
+      })
+      .run();
+    // 4K の局のほうが先に流す同じ回。まとめる相手にすると、あとの MX の放送が「同じ回」で落ちる
+    program(1, "テスト魔法 #1", 5 * HOUR, CABLE_4K);
+    program(2, "テスト魔法 #1", 8 * HOUR);
+    const rule = draftRule(form({ keyword: "テスト魔法" }))!;
+    const preview = await previewFor(rule, { ids: [1, 2] });
+    expect(preview.verdicts).toEqual({
+      1: { kind: "skip", reason: "undecodable" },
+      2: { kind: "record" },
+    });
+    expect(preview.programs.find((row) => row.id === 1)?.skip).toEqual({
+      kind: "undecodable",
+    });
+
+    // 保存したルールも同じ。予約を立てるのは MX の放送だけ。局が復号できなくなる前に立てた予約は引っ込める
+    const { applyRules } = await import("./rules");
+    orm()
+      .insert(ruleTable)
+      .values({
+        id: 9,
+        name: "テスト魔法",
+        keyword: "テスト魔法",
+        enabled: true,
+        created_at: now(),
+      })
+      .run();
+    orm()
+      .insert(reservations)
+      .values({
+        program_id: 1,
+        rule_id: 9,
+        service_id: CABLE_4K,
+        name: "テスト魔法 #1",
+        start_at: base + 5 * HOUR,
+        end_at: base + 6 * HOUR,
+        created_at: now(),
+        updated_at: now(),
+      })
+      .run();
+    expect(applyRules()).toMatchObject({ created: 1, dropped: 1 });
+    expect(
+      orm()
+        .select({ program_id: reservations.program_id })
+        .from(reservations)
+        .all(),
+    ).toEqual([{ program_id: 2 }]);
   });
 });

@@ -3,12 +3,13 @@
 
   import {
     CHANNEL_NOTICE_ACTION,
+    CHANNEL_NOTICE_SECTION,
     CHANNEL_NOTICE_TEXT,
     type ChannelNotice,
   } from "#lib/channel-notice.js";
 
   /**
-   * チャンネルのお知らせ (局が無い・チャンネルを書き換えた・地上波が違う) と、設定の「チャンネル」へのリンク (`#lib/channel-notice.ts`)。
+   * 局が無いときの案内 (エージェントが無い・局が 1 つも無い・どれも復号できない) と、設定の「受信」へのリンク (`#lib/channel-notice.ts`)。
    *
    * - `bar` … 画面の上に貼る 1 行 (録画・番組表・ライブ。`+layout.svelte`)。閉じるボタンは無い
    * - `center` … 空の番組表の真ん中に置く。文とボタンを縦に積む
@@ -34,7 +35,7 @@
 >
   <p>{text}</p>
   <a
-    href={`${resolve("settings/reception")}#channels`}
+    href={`${resolve("settings/reception")}#${CHANNEL_NOTICE_SECTION[kind]}`}
     class="button small {variant === 'bar' ? 'secondary outline' : ''}"
     >{CHANNEL_NOTICE_ACTION[kind]}</a
   >
@@ -51,14 +52,14 @@
   }
   /*
      * **枠で囲まない、画面の幅いっぱいの 1 行。** ヘッダーの下に貼る。見た目はページの中の通知 (`app.css` の `.notice.info`。
-     * 淡い面と頭の ⓘ。地を案内の色で塗らない) を、角を落として 1 行の高さに詰めたもの。
-     * 狭い画面で文が長ければ折り返し、ボタンは右に残す
+     * 淡い面と先頭の ⓘ。地を案内の色で塗らない) を、角を落として 1 行の高さに詰めたもの。
+     * 狭い画面で文が長ければ折り返し、ボタンは右に残す。左右の余白は本文と同じ (`+layout.svelte` の `--dp-gutter`)
      */
   .bar {
-    --bar-pad: 1rem;
+    --bar-pad: var(--dp-gutter);
     justify-content: space-between;
     padding: 0.375rem var(--bar-pad) 0.375rem
-      calc(var(--bar-pad) + 0.5rem + 1.125em);
+      calc(var(--bar-pad) + var(--dp-space-2) + 1.125em);
     border-radius: 0;
     font-size: var(--dp-text-sm);
   }
@@ -67,15 +68,10 @@
     translate: 0 -50%;
     left: var(--bar-pad);
   }
-  @media (min-width: 768px) {
-    .bar {
-      --bar-pad: 1.5rem;
-    }
-  }
   .bar .button {
     flex-shrink: 0;
     margin: 0;
-    padding-block: 0.15rem;
+    padding-block: var(--dp-space-1);
   }
   .center {
     flex-direction: column;

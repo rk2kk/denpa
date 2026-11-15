@@ -7,15 +7,15 @@ namespace Denpa.Agent;
 
 /// <summary>
 /// macOS の IOKit の <see cref="IUsbDevice"/>。カーネルの拡張も DriverKit も使わず、ユーザーの側の IOUSBLib を P/Invoke で呼ぶ
-/// (Apple の公開しているヘッダー IOUSBLib.h・USB.h の形どおり)。
+/// (Apple の公開しているヘッダー IOUSBLib.h・USB.h の定義どおり)。
 ///
 /// <para>
 /// 並べるのは <c>IOServiceMatching("IOUSBHostDevice")</c> に <c>idVendor</c>・<c>idProduct</c> を足したもの。ポートの名前は
-/// <c>locationID</c> から Linux の sysfs と同じ形にする (<see cref="UsbDevices.MacPort"/>)。**挿すポートを変えると別の名前になる。**
+/// <c>locationID</c> から Linux の sysfs と同じ形式にする (<see cref="UsbDevices.MacPort"/>)。**挿すポートを変えると別の名前になる。**
 /// </para>
 ///
 /// <para>
-/// IOUSBLib のインターフェースは関数の表 (COM に似た形) なので、表の何番目かで関数ポインタを取って呼ぶ
+/// IOUSBLib のインターフェースは関数の表 (COM に似た仕組み) なので、表の何番目かで関数ポインタを取って呼ぶ
 /// (<c>delegate* unmanaged</c>。リフレクションも <c>Marshal.GetDelegateForFunctionPointer</c> も使わないので Native AOT で通る)。
 /// 表の先頭の 4 つは IUnknown (予約・QueryInterface・AddRef・Release)。番号は IOUSBDeviceInterface182・IOUSBInterfaceInterface182 のもの。
 /// </para>
@@ -209,7 +209,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         SetNumber(matching, "idVendor", vendor);
         SetNumber(matching, "idProduct", product);
         uint iterator = 0;
-        // IOServiceGetMatchingServices は matching を手放す (こちらで CFRelease しない)
+        // IOServiceGetMatchingServices が matching を解放する (こちらで CFRelease しない)
         if (IOServiceGetMatchingServices(0, matching, &iterator) != Success) return found;
         try
         {
@@ -243,7 +243,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         CFRelease(key);
     }
 
-    /// <summary>プラグインを作って、欲しいインターフェースを取る。取れなければ null</summary>
+    /// <summary>プラグインを作って、使うインターフェースを取る。取れなければ null</summary>
     private static void* Query(uint service, nint pluginType, nint interfaceId)
     {
         void** plugin = null;
@@ -256,8 +256,8 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         return hr == 0 ? result : null;
     }
 
-    /// <summary>開いて、最初のインターフェースを開き、代替設定 0 を選ぶ</summary>
-    public static IoKitDevice Open(UsbLocation location, int vendor, int product)
+    /// <summary>開いて、最初のインターフェースを開き、代替設定 0 を選ぶ (<paramref name="selectAlternate"/> が false なら選ばない)</summary>
+    public static IoKitDevice Open(UsbLocation location, int vendor, int product, bool selectAlternate = true)
     {
         var name = $"usb {location.Port}";
         var services = Services(vendor, product);
@@ -276,7 +276,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         {
             foreach (var (service, _) in services) IOObjectRelease(service);
         }
-        if (device is null) throw new IOException($"{name} を開けません (見当たらないか、IOKit が開かせません)");
+        if (device is null) throw new IOException($"{name} を開けません (見当たらないか、IOKit でプラグインを作れません)");
 
         var open = ((delegate* unmanaged[Cdecl]<void*, int>)Slot(device, DeviceOpen))(device);
         if (open != Success)
@@ -315,7 +315,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
                     ? $"{name} はほかのソフト (かドライバ) が使っています"
                     : $"{name} のインターフェースを開けません (IOReturn 0x{opened:X8})");
             }
-            Check(name, "代替設定を選べません", ((delegate* unmanaged[Cdecl]<void*, byte, int>)Slot(@interface, SetAlternateInterface))(@interface, 0));
+            if (selectAlternate) Check(name, "代替設定を選べません", ((delegate* unmanaged[Cdecl]<void*, byte, int>)Slot(@interface, SetAlternateInterface))(@interface, 0));
             result.MapPipes(location.Path);
             return result;
         }
@@ -335,7 +335,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
     private readonly record struct PipeInfo(byte Ref, byte Type, int MaxPacket);
 
     /// <summary>
-    /// IOUSBLib は端点を pipeRef (1 から) で指すので、端点のアドレスとの対応を作る。転送の種類も覚える (interrupt は読み方が違う)。
+    /// IOUSBLib は端点を pipeRef (1 から) で指すので、端点のアドレスとの対応を作る。転送の種類も控える (interrupt は読み方が違う)。
     /// 一覧はその場所で初めて開いたときだけ記録に出す (実機で確かめていない macOS で、何が見えているかを残すため)
     /// </summary>
     private void MapPipes(string location)
@@ -355,7 +355,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         {
             if (!Described.Add(location)) return;
         }
-        Log.Write($"{Name}: {UsbDevices.DescribePipes(_pipes.OrderBy(pair => pair.Value.Ref).Select(pair => (pair.Key, (int)pair.Value.Type, pair.Value.MaxPacket)))}");
+        Log.Write($"[{Name}] {UsbDevices.DescribePipes(_pipes.OrderBy(pair => pair.Value.Ref).Select(pair => (pair.Key, (int)pair.Value.Type, pair.Value.MaxPacket)))}");
     }
 
     private PipeInfo Pipe(byte endpoint) =>
@@ -403,19 +403,19 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
 
     /// <summary>
     /// interrupt のパイプには <c>ReadPipeTO</c> の時間切れが効かない (IOUSBLib.h)。時間切れの無い <c>ReadPipe</c> を
-    /// 出し続ける読み (<see cref="UsbReadPump"/>) を端点ごとに初めて読むときに作り、届いた答えを自前の時間で待つ
+    /// 出し続ける転送要求 (<see cref="UsbReadPump"/>) を端点ごとに初めて読むときに作り、届いた応答を自前の時間切れで待つ
     /// </summary>
-    public int InterruptRead(byte endpoint, Span<byte> buffer, int timeoutMs)
+    public int Read(byte endpoint, Span<byte> buffer, int timeoutMs)
     {
         var pipe = Pipe(endpoint);
-        if (pipe.Type != TransferInterrupt) return Read(endpoint, buffer, timeoutMs);
+        if (pipe.Type != TransferInterrupt) return ReadTimed(endpoint, buffer, timeoutMs);
         UsbReadPump pump;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_interface is null, Name);
             if (!_pumps.TryGetValue(endpoint, out pump!))
             {
-                // 読みの大きさは最大パケット長ちょうど (下位 11 ビット)。大きくすると、ちょうどの長さの答えで読みが終わらない
+                // 転送要求の大きさは最大パケット長ちょうど (下位 11 ビット)。大きくすると、ちょうどの長さの応答で転送が終わらない
                 var size = pipe.MaxPacket & 0x7FF;
                 pump = _pumps[endpoint] = new UsbReadPump(
                     $"{Name} EP 0x{endpoint:X2}", size > 0 ? size : 64, read => ReadOnce(endpoint, pipe.Ref, read), () => Abort(pipe.Ref));
@@ -424,7 +424,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         return pump.Read(buffer, timeoutMs);
     }
 
-    /// <summary>時間切れの無い読みを 1 回 (<see cref="UsbReadPump"/> のスレッドから)。取り消されたら 0</summary>
+    /// <summary>時間切れの無い転送要求を 1 回 (<see cref="UsbReadPump"/> のスレッドから)。取り消されたら 0</summary>
     private int ReadOnce(byte endpoint, byte pipe, byte[] buffer)
     {
         fixed (byte* start = buffer)
@@ -438,7 +438,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
     }
 
     /// <summary>
-    /// 出している読みを取り消す (閉じるときだけ)。取り消したあと端点を立て直す <c>ClearPipeStall</c> は呼ばない。
+    /// 出している転送要求を取り消す (閉じるときだけ)。取り消したあと端点を立て直す <c>ClearPipeStall</c> は呼ばない。
     /// このあとインターフェースごと閉じ、次に開くときは代替設定を選び直すので、データトグルはそこで両側とも初めに戻る
     /// </summary>
     private void Abort(byte pipe)
@@ -446,7 +446,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
         if (_interface is not null) ((delegate* unmanaged[Cdecl]<void*, byte, int>)Slot(_interface, AbortPipe))(_interface, pipe);
     }
 
-    private int Read(byte endpoint, Span<byte> buffer, int timeoutMs)
+    private int ReadTimed(byte endpoint, Span<byte> buffer, int timeoutMs)
     {
         var pipe = Pipe(endpoint).Ref;
         fixed (byte* start = buffer)
@@ -478,20 +478,31 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
 
     public IUsbInStream OpenInStream(byte endpoint, int transferSize, int depth) => new InStream(this, Pipe(endpoint).Ref, transferSize, depth);
 
+    /// <summary>開いたときに IOKit から読んだ端点の一覧 (<see cref="MapPipes"/>)</summary>
+    public IReadOnlyList<UsbPipe> Pipes() =>
+        [.. _pipes.OrderBy(pair => pair.Value.Ref).Select(pair => new UsbPipe(pair.Key, pair.Value.Type, pair.Value.MaxPacket & 0x7FF))];
+
+    /// <summary>端点のストールをクリアする (ClearPipeStall)。実機で確かめていない</summary>
+    public void ClearHalt(byte endpoint)
+    {
+        var pipe = Pipe(endpoint).Ref;
+        Check(Name, $"EP 0x{endpoint:X2} のストールをクリアできません", ((delegate* unmanaged[Cdecl]<void*, byte, int>)Slot(Interface, ClearPipeStall))(Interface, pipe));
+    }
+
     public void Dispose()
     {
         lock (_gate)
         {
-            // interrupt の読みを先に取り消して戻らせる (出したままインターフェースを閉じない)
+            // interrupt の転送要求を先に取り消して戻らせる (出したままインターフェースを閉じない)
             var stuck = _pumps.Values.Where(pump => !pump.Stop()).ToList();
             if (_interface is not null)
             {
-                // 閉じるとインターフェースの読みは全部取り消されるので、戻らなかった読みもここでもう一度待つ
+                // 閉じるとインターフェースの転送要求は全部取り消されるので、戻らなかった転送要求もここでもう一度待つ
                 ((delegate* unmanaged[Cdecl]<void*, int>)Slot(_interface, InterfaceClose))(_interface);
                 if (stuck.Any(pump => !pump.Stop()))
                 {
-                    // 戻らない読みがまだインターフェースを使っている。解放すると読みが消えたものに触るので、手放さずに残す
-                    Log.Write($"{Name}: interrupt の読みが取り消しても戻らないので、インターフェースを解放せずに閉じます");
+                    // 戻らない転送要求がまだインターフェースを使っている。解放すると転送要求が消えたものに触るので、手放さずに残す
+                    Log.Write($"[{Name}] interrupt の転送要求が取り消しても戻らないので、インターフェースを解放せずに閉じます");
                 }
                 else
                 {
@@ -511,7 +522,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
 
     /// <summary>
     /// <c>ReadPipeAsync</c> を何本も出しておく読み。完了は CFRunLoop を回す専用のスレッドで受け、その場で中身を写して同じバッファで
-    /// 出し直す (1 本の端点の読みは出した順に済むので、写した順がそのまま届いた順)
+    /// 出し直す (1 本の端点の転送要求は出した順に済むので、写した順がそのまま届いた順)
     /// </summary>
     private sealed class InStream : IUsbInStream
     {
@@ -552,7 +563,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
             {
                 var error = _error;
                 Dispose();
-                throw Failure(_owner.Name, "TS の読みを出せません", error);
+                throw Failure(_owner.Name, "TS の転送要求を出せません", error);
             }
         }
 
@@ -610,8 +621,8 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
             {
                 var length = (int)(nint)transferred;
                 /*
-                 * **溜めるのは読みの本数ぶんまで。** 越えたら届いたものを捨てる。Linux (usbfs) と Windows (WinUSB) は済んだ読みを
-                 * 読む側が受け取るまで出し直さないので、溜まるのは読みの本数ぶんで、その間に来た TS は機材の側で抜ける。
+                 * **溜めるのは転送要求の本数ぶんまで。** 越えたら届いたものを捨てる。Linux (usbfs) と Windows (WinUSB) は済んだ転送要求を
+                 * 読む側が受け取るまで出し直さないので、溜まるのは転送要求の本数ぶんで、その間に来た TS は機材の側で抜ける。
                  * ここは済んだその場で出し直すので、上限が無いと読む側が詰まっている間 (最大 5 秒) 溜まり続けた。
                  * 足すのはこのスレッドだけなので、数えてから足しても越えない
                  */
@@ -629,7 +640,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
 
         public int Read(Span<byte> buffer, int timeoutMs)
         {
-            if (_error is not (Success or Aborted)) throw Failure(_owner.Name, "TS の読みが失敗しました", _error);
+            if (_error is not (Success or Aborted)) throw Failure(_owner.Name, "TS の読み出しが失敗しました", _error);
             var copied = 0;
             while (copied < buffer.Length)
             {
@@ -645,6 +656,18 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
             return copied;
         }
 
+        /// <summary>届いた転送を 1 つ返す (0 バイトの転送はバッファに入れていない)。実機で確かめていない</summary>
+        public int ReadTransfer(Span<byte> buffer, int timeoutMs)
+        {
+            if (_error is not (Success or Aborted)) throw Failure(_owner.Name, "TS の読み出しが失敗しました", _error);
+            if (_current is null && !_chunks.TryTake(out _current, timeoutMs)) return 0;
+            var take = Math.Min(_current!.Length - _offset, buffer.Length);
+            _current.AsSpan(_offset, take).CopyTo(buffer);
+            _current = null;
+            _offset = 0;
+            return take;
+        }
+
         public void Dispose()
         {
             if (_closing) return;
@@ -652,7 +675,7 @@ public sealed unsafe partial class IoKitDevice : IUsbDevice
             var @interface = _owner._interface;
             if (@interface is not null) ((delegate* unmanaged[Cdecl]<void*, byte, int>)IoKitDevice.Slot(@interface, AbortPipe))(@interface, _pipe);
             _loop.Join(TimeSpan.FromSeconds(3));
-            // 返ってこなかった読みのバッファは、IOKit がまだ持っているかもしれないので返さない
+            // 返ってこなかった転送要求のバッファは、IOKit がまだ持っているかもしれないので返さない
             if (Volatile.Read(ref _outstanding) != 0) return;
             for (var i = 0; i < _buffers.Length; i++)
             {

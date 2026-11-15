@@ -2,12 +2,12 @@
  * **録画を canvas に描いて観る**。観る画面が `<video>` を使わずに観るときのプレイヤー。
  *
  * 使うのは、`<video>` の再生が止まる端末 (テスラの車載ブラウザ) の互換モード (`canvas-video.ts`) と、
- * 元の TS (MPEG-2) を選んだとき。サーバへのリクエストの仕方は `<video>` で
+ * 元の TS (MPEG-2) で観るとき (選んだときと、エンコード済みの無い録画を家の中の自動で開いたとき)。サーバへのリクエストの仕方は `<video>` で
  * その場で流すとき (`remux-player.ts`) と同じ `/api/recordings/<id>/stream` で、届いたものを MSE ではなく
  * ライブ・追っかけと同じエンジン (`raw/engine.ts`) へ流す。
  *
- * - `fmp4` … H.264 / AV1 の fMP4。時刻はページの物差しのまま (`PlayAxis`)。箱の切れ目で割ってから渡す
- *   (`ts/fmp4.ts` の `Fmp4Splitter`。worker は箱ごとに受け取る)
+ * - `fmp4` … H.264 / AV1 の fMP4。時刻はページの物差しのまま (`PlayAxis`)。ボックスの切れ目で割ってから渡す
+ *   (`ts/fmp4.ts` の `Fmp4Splitter`。worker はボックスごとに受け取る)
  * - `ts-mpeg2` … 元の TS (MPEG-2)。時刻は放送の PTS なので、応答の `X-Denpa-Origin` (物差しの 0 にあたる PTS)
  *   を引いて物差しに直す (`ts/seek.ts` の `sinceHead`)
  * - `mkv` … **端末に保存した録画** (エンコード済みの Matroska)。サーバではなく Blob を切り出して読む
@@ -28,7 +28,7 @@
  * 速さは等速だけ (音を自前で鳴らしている)。DOM はエンジン (`RawEngine`) が触る canvas と `<audio>` だけ
  */
 
-import { CLOCK, WRAP } from "@danything/arib/pes";
+import { CLOCK } from "@danything/arib/pes";
 
 import type { AudioSide } from "#lib/arib.js";
 import { RawEngine } from "#lib/raw/engine.js";
@@ -91,11 +91,11 @@ interface CanvasOptions {
   paused: boolean;
   /** 繋ぎ直している・打ち切った・戻った・混んでいて断られた */
   state(state: StreamState): void;
-  /** 描けなくなった (間に合わない・デコーダが失敗し続ける・音が来ない)。**画面がほかの方式へ移す** */
-  gaveUp(reason: string): void;
+  /** 描けなくなった (間に合わない・デコーダが失敗し続ける・音が来ない)。**画面がほかの方式へ移す**。`slow` は `RawEvents.gaveUp` と同じ */
+  gaveUp(reason: string, slow?: string): void;
   /** 外 (ロック画面・車の操作) から止められた・再開された */
   remote(paused: boolean): void;
-  /** 貯めを使い切って止まった / また流れ出した (読み込み中の輪) */
+  /** バッファを使い切って止まった / また流れ出した (読み込み中の輪) */
   waiting(on: boolean): void;
   /** 終わりまで鳴らした */
   ended(): void;
@@ -189,7 +189,7 @@ export function canvasPlayer(options: CanvasOptions): CanvasPlayer {
   let fed = 0;
   /** リクエストし直した位置 (秒)。そこから観た長さぶんだけ先へ読む (`bytesPerSecond`) */
   let loadedFrom = options.start;
-  /** 貯めを使い切って止まっているか (読み込み中の輪) */
+  /** バッファを使い切って止まっているか (読み込み中の輪) */
   let starving = false;
   const meter = new Meter();
 
@@ -204,8 +204,8 @@ export function canvasPlayer(options: CanvasOptions): CanvasPlayer {
         starving = true;
         options.waiting(true);
       },
-      gaveUp: (reason) => {
-        if (!closed) options.gaveUp(reason);
+      gaveUp: (reason, slow) => {
+        if (!closed) options.gaveUp(reason, slow);
       },
       remote: (stop) => {
         if (stop === paused) return;
@@ -249,7 +249,7 @@ export function canvasPlayer(options: CanvasOptions): CanvasPlayer {
     // 元の TS の先頭の少し前 (音と映像の先頭のずれ) は負になる。物差しの先頭に揃える
     time = Math.max(
       0,
-      input === "ts-mpeg2" ? sinceHead(pts % WRAP, origin) : pts / CLOCK,
+      input === "ts-mpeg2" ? sinceHead(pts, origin) : pts / CLOCK,
     );
     return time;
   }

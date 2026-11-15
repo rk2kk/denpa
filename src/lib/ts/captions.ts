@@ -18,8 +18,8 @@ export interface Cue {
 
 /** 出しておく長さ (`CaptionPage.duration`) を過ぎていれば消す。**次の 1 枚を待たずに消える字幕がある** */
 export function showing(cue: Cue | null, at: number): CaptionPage | null {
-  const page = cue?.page ?? null;
-  if (page === null || cue === null) return null;
+  if (cue === null || cue.page === null) return null;
+  const page = cue.page;
   if (page.duration !== null && at >= cue.at + page.duration / 1000)
     return null;
   return page;
@@ -58,7 +58,7 @@ export function currentCue(cues: Cue[], at: number): Cue | null {
  * 残さないと、次が来るまでの間に出すものが無くなる (字幕は出しっぱなし)。
  * 上限を超えたぶんは、古いほうから落とす。
  *
- * @param at いまの再生位置 (秒)
+ * @param at これより前へは戻らない位置 (秒)。いまの再生位置か、溜めの中で戻れるいちばん前
  */
 export function trimCues(cues: Cue[], at: number): Cue[] {
   // 過ぎたものの中でいちばん新しい 1 つより前は、もう使わない

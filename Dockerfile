@@ -189,7 +189,7 @@ ENV CURL="curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-time
 # GPU が無ければ試しのエンコードが落ちて使わないだけなのは VA-API と同じ。
 # デコードとインタレ解除は CPU でするので、NVIDIA のデコーダ (nvdec) と CUDA のフィルタは組まない
 # (GPU に寄せるときは `--enable-nvdec`・`--enable-cuda-llvm` と clang を足す。docs/encode.md「NVIDIA でエンコードする」)
-ENV DEV="curl ca-certificates build-essential cmake pkg-config nasm patch zlib1g-dev libx264-dev libdav1d-dev libva-dev"
+ENV DEV="curl ca-certificates build-essential cmake pkg-config nasm patch zlib1g-dev libx264-dev libdav1d-dev libva-dev libzimg-dev"
 
 # renovate: datasource=github-tags depName=FFmpeg/FFmpeg extractVersion=^n(?<version>.*)$
 ENV FFMPEG_VERSION=9.0.2
@@ -236,14 +236,15 @@ COPY patches/ /patches/
 #   (ソフトウェアでは H.265 をエンコードしない。docs/encode.md「H.265 は GPU でだけ」)。
 #   nvenc は amd64、rkmpp は arm64 だけで、相手の arch では configure が黙って外す
 # - パーサ: demuxer が頼るのに configure が自分で足さないもの。画像の *_pipe は区切りをパーサに任せる
-# - bsf: h264_mp4toannexb・hevc_mp4toannexb は concat の demuxer が H.264・H.265 の mkv に差し込む (cm-cut.ts)。
-#   extract_extradata は libavformat が入力を調べるときに使う (無いと `-ss` で途中から読んだ MPEG-2 が次のシーケンスヘッダまで
+# - bsf: extract_extradata は libavformat が入力を調べるときに使う (無いと `-ss` で途中から読んだ MPEG-2 が次のシーケンスヘッダまで
 #   デコードできず、エラーを並べる)
 # - フィルタ: 引数に書いたもののほか、ffmpeg が自分で差し込むもの (buffer・null・format・aformat・scale・
 #   aresample・trim・atrim・fps、回転の印がある画像の transpose・hflip・vflip・rotate)
 # - overlay は切り抜きに字幕・コメントを重ねる (clips.ts)
 # - scale_vaapi は回線に合わせて画質を下げたライブ・変換で、VA-API でデコードした映像を GPU の上で縮める
 #   (hwenc.ts の liveHwArgs の `cap`。フレームを CPU に降ろさないため)
+# - setparams・zscale・tonemap (libzimg) は 4K の局のライブで、HLG (BT.2020・10 ビット) を SDR (BT.709・8 ビット) に直す
+#   (live.ts の HLG_TO_SDR)
 # - testsrc2・sine・telecine・tinterlace・noise は denpa は使わず、イメージの確かめで素材を作るためだけ
 #   (.github/image-smoke.sh と scripts/fps-smoke.ts)。合わせても数百 KB
 RUN case "${TARGETARCH}" in \
@@ -287,6 +288,7 @@ RUN case "${TARGETARCH}" in \
       --enable-libsvtav1 \
       --enable-libx264 \
       --enable-libdav1d \
+      --enable-libzimg \
       --enable-vaapi \
       $arch_flags \
       --disable-everything \
@@ -294,11 +296,11 @@ RUN case "${TARGETARCH}" in \
       --enable-decoder=mpeg2video,h264,aac,opus,libdav1d,png,mjpeg,webp,hevc,ac3,eac3,mp2,aac_latm,wrapped_avframe,pcm_s16le \
       --enable-encoder=libsvtav1,libx264,libopus,aac,h264_vaapi,av1_vaapi,hevc_vaapi,h264_nvenc,av1_nvenc,hevc_nvenc,h264_rkmpp,hevc_rkmpp,mpeg2video,mjpeg,rawvideo,wrapped_avframe,pcm_s16le \
       --enable-hwaccel=mpeg2_vaapi,h264_vaapi \
-      --enable-demuxer=mpegts,matroska,mov,concat,ffmetadata,image2,png_pipe,jpeg_pipe,webp_pipe \
+      --enable-demuxer=mpegts,matroska,mov,ffmetadata,image2,png_pipe,jpeg_pipe,webp_pipe \
       --enable-muxer=matroska,mp4,adts,avif,rawvideo,null,image2,mpegts \
       --enable-parser=mpegvideo,h264,aac,av1,opus,png,mjpeg,webp,hevc,ac3,mpegaudio,aac_latm \
-      --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
-      --enable-filter=buffer,buffersink,abuffer,abuffersink,null,anull,format,aformat,scale,aresample,trim,atrim,fps,transpose,hflip,vflip,rotate,bwdif,setsar,scdet,metadata,ametadata,silencedetect,channelsplit,pan,hwupload,deinterlace_vaapi,scale_vaapi,crop,split,vstack,field,separatefields,signalstats,thumbnail,nullsrc,testsrc2,sine,telecine,tinterlace,noise,overlay \
+      --enable-bsf=aac_adtstoasc,extract_extradata \
+      --enable-filter=buffer,buffersink,abuffer,abuffersink,null,anull,format,aformat,scale,aresample,trim,atrim,fps,transpose,hflip,vflip,rotate,bwdif,setsar,scdet,metadata,ametadata,silencedetect,channelsplit,pan,hwupload,deinterlace_vaapi,scale_vaapi,crop,split,vstack,field,separatefields,signalstats,thumbnail,nullsrc,testsrc2,sine,telecine,tinterlace,noise,overlay,setparams,zscale,tonemap \
       --enable-indev=lavfi \
       --enable-protocol=file,pipe \
     && \
@@ -416,7 +418,7 @@ COPY --from=mpeg2wasm /opt/denpa/mpeg2 /mpeg2
 # (エージェントを同じコンテナに入れる denpa-aio は libssl を要るので、あちらで足す。.github/aio.Dockerfile)。
 # その段が「土台にもうあるライブラリ」を見分けるのにも使うので、段に名前を付けておく
 # ---------------------------------------------------------------------------
-FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:d710a5c8bfe4cf7e726d7e1afd73e363a9fb02c2a11ad893d2d6185c1b9a89cb AS distroless
+FROM gcr.io/distroless/base-nossl-debian13:latest@sha256:3a2dbf10c2fdafe5865e2b03a4a3b9b23f2e280229a81730415379b76dc70592 AS distroless
 
 # ---------------------------------------------------------------------------
 # 本番イメージへ写すライブラリを集める段。**本番イメージにはシェルも apt も無い**ので、
@@ -447,7 +449,7 @@ RUN case "${TARGETARCH}" in \
     sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
     apt-get -y --no-install-recommends install \
-      libx264-164 libdav1d7 \
+      libx264-164 libdav1d7 libzimg2 \
       libva2 libva-drm2 $gpu && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

@@ -108,7 +108,7 @@ test.describe("設定のチューナーとチャンネル", () => {
     );
   });
 
-  test("種別を1つも選ばなければ断る", async ({ request }) => {
+  test("種別を 1 つも選ばなければ断る", async ({ request }) => {
     // 画面の選ぶ欄は必ずどれかが入っている。画面の外から空で来たものは断る
     const res = await request.post("/settings/reception?/scan", {
       form: {},
@@ -275,6 +275,13 @@ test.describe("設定のチューナーとチャンネル", () => {
     );
     await expect(page.getByTestId("tuner-signal-raw-note")).toHaveCount(0);
 
+    // 強度は dBm で測れる機材 (DVB の一部・CECH-ZD1 J) だけ、C/N の前に出す
+    await request.post(`${stack.agentUrl}/__control/signal?value=strength`);
+    await expect(using.getByTestId("tuner-signal")).toHaveText(
+      "同期しています・強度: -35.0 dBm・C/N: 25.3 dB",
+      { timeout: 15_000 },
+    );
+
     await request.post(`${stack.agentUrl}/__control/signal?value=tune`);
     await expect(using.getByTestId("tuner-signal")).toHaveText(
       "同期しています・C/N: 18.2 dB (選局したとき)",
@@ -337,6 +344,46 @@ test.describe("チューナーの設定", () => {
         })),
       },
     });
+  });
+
+  /*
+   * **続けて押しても、押したぶん全部を保存する** (`autosave` の `edits`)。前の保存の返事で画面を読み直すと、
+   * その間に押したスイッチが元に戻り、その値のまま次を送っていた (0.2 秒おきに 5 つ押すと 2 つしか残らなかった)
+   */
+  test("「使う」を続けて押しても、全部を保存する", async ({
+    page,
+    request,
+    stack,
+  }) => {
+    await goto(page, "/settings/reception");
+    const card = page.getByTestId("tuner-section");
+    const rows = card.getByTestId("tuner-list").getByTestId("tuner-row");
+    await expect(rows).toHaveCount(4);
+
+    const disabled = async () => {
+      const res = await request.get(`${stack.agentUrl}/denpa/tuners`);
+      const { tuners } = (await res.json()) as {
+        tuners: { disabled: boolean }[];
+      };
+      return tuners.map((tuner) => tuner.disabled);
+    };
+    for (let i = 0; i < 4; i++) {
+      await rows.nth(i).getByTestId("tuner-use").click();
+      await page.waitForTimeout(200);
+    }
+    await expect.poll(disabled).toEqual([true, true, true, true]);
+    await expect(card.getByTestId("saved-result")).toBeVisible();
+    for (let i = 0; i < 4; i++)
+      await expect(rows.nth(i).getByTestId("tuner-use")).not.toBeChecked();
+
+    // 戻すときも同じ
+    for (let i = 0; i < 4; i++) {
+      await rows.nth(i).getByTestId("tuner-use").click();
+      await page.waitForTimeout(200);
+    }
+    await expect.poll(disabled).toEqual([false, false, false, false]);
+    for (let i = 0; i < 4; i++)
+      await expect(rows.nth(i).getByTestId("tuner-use")).toBeChecked();
   });
 
   test("画面から台数と種別を変えられる", async ({ page }) => {
@@ -406,7 +453,7 @@ test.describe("チューナーの設定", () => {
     await expect(rows.nth(3).getByTestId("tuner-use")).toBeChecked();
   });
 
-  test("種別を1つも選ばない行は断る", async ({ page }) => {
+  test("種別を 1 つも選ばない行は断る", async ({ page }) => {
     await goto(page, "/settings/reception");
 
     const card = page.getByTestId("tuner-section");
@@ -419,9 +466,38 @@ test.describe("チューナーの設定", () => {
     await expect(card.getByTestId("settings-error")).toContainText(
       "種別を 1 つ以上",
     );
+    // 衛星を使わないときは種別を外すのではなく「使う」をオフにする、と案内する (#2386)
+    await expect(card.getByTestId("settings-error")).toContainText(
+      "「使う」をオフに",
+    );
     await expect(
       card.locator('input[name^="type.0."]:checked').first(),
     ).toBeChecked();
+  });
+
+  /*
+   * **機材が受けられない種別は選ばせない。** BS/CS 専用の受信機に GR を入れて保存でき、その台に割り振られた
+   * 地上波のライブ視聴がエージェントの選局で断られ続けた (#2386)。画面を通さずに送っても保存で断る
+   */
+  test("機材が受けられない種別は選べず、送っても断る", async ({ page }) => {
+    await goto(page, "/settings/reception");
+
+    const card = page.getByTestId("tuner-section");
+    // 偽エージェントの adapter0 は BS/CS、adapter1 は GR だけを受けられる
+    await expect(card.locator('input[name="type.0.GR"]')).toBeDisabled();
+    await expect(card.locator('input[name="type.0.BS"]')).toBeEnabled();
+    await expect(card.locator('input[name="type.1.BS"]')).toBeDisabled();
+    await expect(card.locator('input[name="type.1.GR"]')).toBeEnabled();
+
+    // 押せないようにしたのを外して入れても、保存で断って元に戻す
+    const gr = card.locator('input[name="type.0.GR"]');
+    await gr.evaluate((el) => el.removeAttribute("disabled"));
+    // 入れたら保存し、断られてすぐ外れる。check() は入った姿を確かめようとして外れたあとに読むことがあるので、押すだけにする
+    await gr.click({ force: true });
+    await expect(card.getByTestId("settings-error")).toContainText(
+      "「地上波」を受信できません",
+    );
+    await expect(gr).not.toBeChecked();
   });
 
   /*

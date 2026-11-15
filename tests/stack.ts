@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 
 import { type BrowserContext, test as base } from "@playwright/test";
 
@@ -74,7 +74,7 @@ export interface Stack {
    * 偽の放送の PMT は既定で字幕を載せない (`/__control/captions` で載せる)
    */
   liveNoCaptionsFile: string;
-  /** ライブ視聴で偽 ffmpeg に渡された TS の頭。1 局に絞れているかを見る */
+  /** ライブ視聴で偽 ffmpeg に渡された TS の先頭。1 局に絞れているかを見る */
   liveTsFile: string;
   /**
    * これを置くとライブの AV1 の偽 ffmpeg が、本物の AV1 + Opus の fMP4 を流す (`tests/fake/fmp4-loop.ts`)。
@@ -93,6 +93,11 @@ export interface Stack {
   encodeArgsFile: string;
   /** 偽 ffmpeg がエンコードしていた間 (`start`/`end`・ミリ秒・入力・出力をタブで区切った行が 1 行ずつ足される。`helpers.encodeSpans`) */
   encodeSpansFile: string;
+  /**
+   * 本数を書いて置くと、偽 ffmpeg は同じ録画のエンコードがその本数そろって始まるまで終えない (30 秒で諦める)。
+   * コーデックを同時にエンコードしていることを、時刻の差に頼らずに確かめるのに使う
+   */
+  encodeTogetherFile: string;
 }
 
 /** 資格情報を持たずに呼ぶ関数。返るのは素の Response */
@@ -204,6 +209,7 @@ export async function boot(
     hwDir: `${root}/gpu`,
     encodeArgsFile: `${root}/encode-ffmpeg-args`,
     encodeSpansFile: `${root}/encode-ffmpeg-spans`,
+    encodeTogetherFile: `${root}/encode-together`,
   };
 
   rmSync(root, { recursive: true, force: true });
@@ -283,6 +289,7 @@ export async function boot(
       NVIDIA_DIR: stack.hwDir,
       FAKE_FFMPEG_ENCODE_ARGS_FILE: stack.encodeArgsFile,
       FAKE_FFMPEG_ENCODE_SPANS_FILE: stack.encodeSpansFile,
+      FAKE_FFMPEG_ENCODE_TOGETHER_FILE: stack.encodeTogetherFile,
       FAKE_FFMPEG_FAIL_ENCODER_FILE: stack.failEncoderFile,
       /*
        * 新しいバージョンの通知。GitHub の代わりに偽通知先が「最新のリリース」を返す
@@ -493,6 +500,8 @@ export async function bootSpare(
   index: number,
   root: string,
   agentUrl: string,
+  /** 常駐処理 (予約・録画・エンコード・通知の購読) を回すか。既定は回さない */
+  autostart = false,
 ): Promise<Spare> {
   const port = APP_PORT + index * STRIDE + 6;
   const dir = `${root}/spare`;
@@ -504,6 +513,9 @@ export async function bootSpare(
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(spare.encodedDir, { recursive: true });
   mkdirSync(spare.rawDir, { recursive: true });
+  // ライブのエンコードした出口は、作り置きの fMP4 を流す (`fmp4-loop.ts`)。素通しの TS では最初の 1 バイトも返らない
+  const liveFmp4File = `${dir}/live-fmp4`;
+  writeFileSync(liveFmp4File, "");
   const launch = async (): Promise<Started> => {
     const app = start(["bun", "./server.js"], {
       TZ: "Asia/Tokyo",
@@ -513,10 +525,21 @@ export async function bootSpare(
       RAW_DIR: spare.rawDir,
       ENCODED_DIR: spare.encodedDir,
       FFMPEG: "./tests/fake/ffmpeg.sh",
+      FAKE_FFMPEG_LIVE_FMP4_FILE: liveFmp4File,
       TUNER_AGENT_URL: agentUrl,
-      DENPA_AUTOSTART: "0",
+      DENPA_AUTOSTART: autostart ? "1" : "0",
       DENPA_VERSION: "v1.0.0",
       SHUTDOWN_WAIT: "0",
+      // 定期処理は止め、テストから API で走らせる (`boot` と同じ)
+      RECONCILE_INTERVAL: "86400000",
+      EPG_COLLECT_INTERVAL: "86400000",
+      CHANNEL_SYNC_INTERVAL: "86400000",
+      EPG_CHANNEL_TIMEOUT: "10000",
+      EPG_SWEEP_SETTLE: "500",
+      SCHEDULER_TICK: "500",
+      START_MARGIN: "0",
+      END_MARGIN: "500",
+      DISK_LOW_THRESHOLD: "0",
       TRUSTED_NETWORKS: "127.0.0.1",
     });
     try {
@@ -542,32 +565,81 @@ export async function bootSpare(
   };
 }
 
+/** 2 台目の偽エージェント (`bootSecondAgent`) */
+export interface SecondAgent {
+  /** 平文のポート。テストが `/__control/...` を呼ぶ */
+  agentUrl: string;
+  /** 登録用の URL (TLS。`#pair=` 付き)。画面の「エージェントを追加」に貼る */
+  pairUrl: string;
+  shutdown: () => Promise<void>;
+}
+
 /**
- * **ライブを H.264 を選んだ端末として開く** (`LAST_COOKIE` の `choice`)。E2E は 127.0.0.1 で開くので家の中で、
- * 「自動」なら MPEG-2 (放送のまま) になる (`#lib/live-choice.ts`)。ライブの試験の多くは `<video>` (MSE) で
- * 観ることを前提にしているので、既定のページはこれを置いてから始める。自動を見る試験は cookie を消す
- * (`61-live-auto`)。自分で作る文脈 (`browser.newContext`) にも呼ぶ
+ * **2 台目の偽エージェント** (`66-agents`)。別の鍵と証明書で立ち (プロセスごとに作る)、名前は `name` (`AGENT_NAME`)。
+ * 範囲の +2 と +3 (1 台目の偽エージェントの平文と TLS の次)。元の TS の置き場は `rawDir` (denpa と同じものを見せる)
  */
-export async function keepH264(
-  context: BrowserContext,
-  appUrl: string,
-): Promise<void> {
-  const { hostname } = new URL(appUrl);
-  await context.addCookies([
-    {
-      name: "denpa_live_last",
-      value: encodeURIComponent(JSON.stringify({ choice: "h264" })),
-      domain: hostname,
-      path: "/live",
-    },
-  ]);
+export async function bootSecondAgent(
+  index: number,
+  rawDir: string,
+  name: string,
+  /** 範囲の中でずらす数。+2 か +4 (平文がこれ、TLS が次) */
+  offset: 2 | 4 = 2,
+): Promise<SecondAgent> {
+  const port = AGENT_PORT + index * STRIDE + offset;
+  const agent = start(["bun", "tests/fake/agent.ts"], {
+    FAKE_AGENT_PORT: String(port),
+    FAKE_AGENT_TLS_PORT: String(port + 1),
+    AGENT_NAME: name,
+    DENPA_VERSION: "v1.0.0",
+    FAKE_SLOTS: "30",
+    RAW_DIR: rawDir,
+  });
+  const agentUrl = `http://127.0.0.1:${port}`;
+  try {
+    await waitFor(`${agentUrl}/denpa/tuners`, agent, "2 台目の偽エージェント");
+  } catch (error) {
+    await stop(agent);
+    throw error;
+  }
+  return {
+    agentUrl,
+    pairUrl: fakeAgentUrl(port + 1),
+    shutdown: () => stop(agent),
+  };
+}
+
+/**
+ * **ライブを MPEG-2 をデコードできない端末として開く。** E2E は 127.0.0.1 で開くので家の中で、「自動」は
+ * MPEG-2 → H.264 → AV1 の順 (`#lib/live-choice.ts` の `autoOrder`)。ライブの試験の多くは `<video>` (MSE) の H.264 で
+ * 観ることを前提にしていて、H.264 はメニューに並ばない (`HIDDEN_CODECS`) ので選べない。そこでライブの画面 (`/live`) だけ
+ * WebGL2 が無いことにして (`raw/support.ts` の `rawUnsupported`)、自動に H.264 を選ばせる。録画の観る画面と追っかけはそのまま。
+ * MPEG-2 で観る試験は `test.use({ liveMpeg2: true })` で外す。自分で作る文脈 (`browser.newContext`) にも呼ぶ
+ */
+export async function liveWithoutMpeg2(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const get = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (
+      this: HTMLCanvasElement,
+      type: string,
+      ...rest: unknown[]
+    ) {
+      if (type === "webgl2" && /\/live\/?$/.test(location.pathname))
+        return null;
+      return (get as (...args: unknown[]) => unknown).call(this, type, ...rest);
+    } as typeof get;
+  });
 }
 
 /**
  * `stack` はワーカーに 1 つ。`auto` にしてあるので、明示的に受け取らないテストでも
  * 立ち上がった状態で始まる (`baseURL` がこれに乗っているため)。
  */
-export const test = base.extend<{ anonymous: Anonymous }, { stack: Stack }>({
+export const test = base.extend<
+  { anonymous: Anonymous; liveMpeg2: boolean },
+  { stack: Stack }
+>({
+  /** ライブで MPEG-2 をデコードできる端末として開くか (`liveWithoutMpeg2`)。既定はできない */
+  liveMpeg2: [false, { option: true }],
   stack: [
     // oxlint-disable-next-line no-empty-pattern -- Playwright は分割代入でないと受け付けない
     async ({}, use, workerInfo) => {
@@ -577,9 +649,9 @@ export const test = base.extend<{ anonymous: Anonymous }, { stack: Stack }>({
     },
     { scope: "worker", auto: true },
   ],
-  // ライブは H.264 を選んだ端末として開く (`keepH264`)
-  context: async ({ context, stack }, use) => {
-    await keepH264(context, stack.appUrl);
+  // ライブは MPEG-2 をデコードできない端末として開き、自動で H.264 を観る (`liveWithoutMpeg2`)
+  context: async ({ context, liveMpeg2 }, use) => {
+    if (!liveMpeg2) await liveWithoutMpeg2(context);
     await use(context);
   },
   // page.goto('/') や request.post('/api/sync') の宛先。ワーカーごとに違う

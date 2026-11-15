@@ -60,7 +60,8 @@ describe("取得できたロゴの数", () => {
  * 衛星の外れの中継を閉じた直後に CS の空きを訊いて 0 と見え、残りの CS を諦めていた
  */
 describe("空きチューナーの数", () => {
-  const tuner = (types: string[], users: string[] = []) => ({
+  const tuner = (types: string[], users: string[] = [], agent = 1) => ({
+    agent,
     disabled: false,
     types: types as ("GR" | "BS" | "CS")[],
     channel:
@@ -89,6 +90,13 @@ describe("空きチューナーの数", () => {
     expect(countFree(tuners, "GR")).toBe(1);
   });
 
+  test("中継を受けられるエージェントを渡せば、そのエージェントのチューナーだけを数える", () => {
+    const tuners = [tuner(["BS"], [], 1), tuner(["BS"], [], 2)];
+    expect(countFree(tuners, "BS")).toBe(2);
+    expect(countFree(tuners, "BS", [], [2])).toBe(1);
+    expect(countFree([tuner(["BS"], [], 1)], "BS", [], [2])).toBe(0);
+  });
+
   test("利用者のいない選局 (エージェントが畳むまでの余韻) は空きとして数える", () => {
     // 外れの中継を閉じた直後と、番組表の取得が終わった直後。チャンネルは付いたまま利用者だけが空になる
     const lingering = {
@@ -108,7 +116,8 @@ describe("空きチューナーの数", () => {
  * 閉じた後に自分で開き直して衛星のチューナーを 1 台塞ぎ、「いますぐ」が CS の空きを 0 と見て諦めていた
  */
 describe("共有しに行く選局", () => {
-  const tuner = (channel: string | null, users: string[] = []) => ({
+  const tuner = (channel: string | null, users: string[] = [], agent = 1) => ({
+    agent,
     channel: channel === null ? null : { type: "BS" as const, channel },
     users: users.map((use) => ({ use, priority: 1 })),
   });
@@ -118,8 +127,10 @@ describe("共有しに行く選局", () => {
       tuner("BS03_0", ["logo BS/BS03_0"]),
       tuner("BS11_0", ["epg BS11_0", "logo BS/BS11_0"]),
       tuner("BS15_0", ["rec 3"]),
+      tuner("BS13_0", ["rec 4"], 2),
       tuner(null),
     ]);
-    expect([...open].sort()).toEqual(["BS11_0", "BS15_0"]);
+    // エージェントとそのチャンネルの組 (`agent-order.placesKey`)。共有しに行くのは開いているエージェントだけ
+    expect([...open].sort()).toEqual(["1	BS11_0", "1	BS15_0", "2	BS13_0"]);
   });
 });

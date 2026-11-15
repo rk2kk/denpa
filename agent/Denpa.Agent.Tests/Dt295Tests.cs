@@ -39,7 +39,7 @@ public class Dt295Tests
             Usb(dir, "1-3", "054c", "04b2");
             Usb(dir, "1-2:1.0", "06b8", "103b");
             Usb(dir, "2-1.4", "06b8", "103b");
-            await Assert.That(Dt295.Ports(dir.FullName, null)).IsEquivalentTo(new[] { "1-2", "2-1.4" });
+            await Assert.That(Dt295.Ports(new SysfsUsbHost(dir.FullName), null)).IsEquivalentTo(new[] { "1-2", "2-1.4" });
         }
         finally
         {
@@ -55,7 +55,7 @@ public class Dt295Tests
     [Arguments(0x04C5, 0x202F, "PIX-DTxxx (SPI モード)", false)]
     public async Task 公式_INF_の_ID_を見分けて_DT295_だけを使う(int vendor, int product, string name, bool supported)
     {
-        var model = Dt295.Find(vendor, product);
+        var model = Dt295.Family.FirstOrDefault(item => item.Vendor == vendor && item.Product == product);
         await Assert.That(model).IsNotNull();
         await Assert.That(model!.Name).IsEqualTo(name);
         await Assert.That(model.Supported).IsEqualTo(supported);
@@ -81,7 +81,7 @@ public class Dt295Tests
     }
 
     [Test]
-    public async Task sysfs_から同じドライバーの機材を見分けて並べる()
+    public async Task sysfs_から同じドライバの機材を見分けて並べる()
     {
         if (OperatingSystem.IsWindows()) return;
         var dir = Directory.CreateTempSubdirectory("dt295family");
@@ -91,10 +91,10 @@ public class Dt295Tests
             Usb(dir, "1-2", "06b8", "103c");
             Usb(dir, "1-3", "06b8", "1038");
             Usb(dir, "1-6", "06b8", "103a");
-            await Assert.That(Dt295.Identify(dir.FullName, "1-3")?.Name).IsEqualTo("PIXELA PIX-DT420");
-            await Assert.That(Dt295.Identify(dir.FullName, "1-6")).IsNull();
+            await Assert.That(Dt295.Identify(new SysfsUsbHost(dir.FullName), "1-3")?.Name).IsEqualTo("PIXELA PIX-DT420");
+            await Assert.That(Dt295.Identify(new SysfsUsbHost(dir.FullName), "1-6")).IsNull();
             List<string> warnings = [];
-            await Assert.That(Dt295.Ports(dir.FullName, warnings.Add)).IsEquivalentTo(new[] { "1-1" });
+            await Assert.That(Dt295.Ports(new SysfsUsbHost(dir.FullName), warnings.Add)).IsEquivalentTo(new[] { "1-1" });
             await Assert.That(warnings.Count).IsEqualTo(2);
         }
         finally
@@ -104,7 +104,7 @@ public class Dt295Tests
     }
 
     [Test]
-    public async Task dt295_の_device_は開かずに自前方式のチューナーにする()
+    public async Task dt295_の_device_は開かずに_Dt295NativeTuner_にする()
     {
         using var tuner = TunerPool.OpenDevice("dt295:1-2", null);
         await Assert.That(tuner).IsTypeOf<Dt295NativeTuner>();

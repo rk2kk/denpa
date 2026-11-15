@@ -24,7 +24,7 @@
  * ## 追っかけは放送の今を追わない (`follow`)
  *
  * 追っかけ (`RawEngine` の `chase`。互換モードと MPEG-2) は録画を観ているので、**溜まっても飛ばない**。
- * サーバは倍速で送り込んでくる (`server/chase.ts`) ので、溜まりは伸び続けるのが普通。
+ * サーバは倍速で送り込んでくる (`server/chase.ts`) ので、バッファは伸び続けるのが普通。
  * **止めて再開は止めた所から** (止めている間も届いたぶんは捨てない。溢れないようにするのは worker の側)。
  *
  * ## 録画も同じ決め方に、飛ぶ先と終わりを足す
@@ -34,7 +34,7 @@
  *
  * - **飛ぶ先** (`reset` の `from`)。サーバは飛び先の少し手前 (キーフレーム・1 秒前) から流してくるので、
  *   手前のぶんは鳴らさず、ここから鳴らし始める
- * - **終わり** (`finish`)。もう届かないと言われたら、貯めが `target` に届かなくても残りを鳴らし、
+ * - **終わり** (`finish`)。もう届かないと言われたら、バッファが `target` に届かなくても残りを鳴らし、
  *   使い切ったら貯め直さずに `end` を返す
  *
  * DOM も Web Audio も触らないので、ここだけ単体で確かめられる (`playout.test.ts`)。
@@ -46,9 +46,9 @@ import { CLOCK } from "@danything/arib/pes";
 export const LEAD = 0.05;
 /** 残りがこれを切ったら「使い切った」(秒) */
 export const DRY = 0.03;
-/** 溜まりがこれだけ `target` を超えたら飛ぶ (秒) */
+/** バッファがこれだけ `target` を超えたら飛ぶ (秒) */
 export const SLACK = 1;
-/** 飛ぶまでに溜まりすぎが続く時間 (秒)。**一瞬の塊では飛ばない** */
+/** 飛ぶまでにバッファが多すぎる状態が続く時間 (秒)。**一瞬の塊では飛ばない** */
 export const SLACK_FOR = 3;
 /** 終わりと言われてから、鳴らすものが 1 つも来ないまま終わりにするまで (秒。`finish`) */
 export const LAST_WAIT = 2;
@@ -90,7 +90,7 @@ export class Playout<T extends Chunk> {
   /** 鳴らしている間の対応: 時計の `base` 秒に PTS `origin` が鳴る */
   private base = 0;
   private origin = 0;
-  /** 溜まりすぎが始まった時刻 (時計の秒)。溜まりすぎでなければ NaN */
+  /** バッファが多すぎる状態が始まった時刻 (時計の秒)。多すぎなければ NaN */
   private overSince = Number.NaN;
 
   /** どれだけ貯めるか (秒)。呼ぶ側が決める (`pacing.nextTarget`) */
@@ -177,7 +177,7 @@ export class Playout<T extends Chunk> {
         this.finished = false;
         return { kind: "end" };
       }
-      // 終わりまで届いていれば、貯めが足りなくても残りを鳴らす
+      // 終わりまで届いていれば、バッファが足りなくても残りを鳴らす
       if (this.held || lead < DRY || (lead < this.target && !this.finished))
         return { kind: "none" };
       return { kind: "start", schedule: this.startAt(now) };
@@ -243,19 +243,19 @@ export class Playout<T extends Chunk> {
 
   /**
    * 選局し直したとき・録画で飛んだとき。**前の音は 1 つも残さない。**
-   * `from` (90kHz。届く音と同じ物差し) を渡すと、追っかけ (`follow`) はそこから鳴らし始める
+   * 追っかけ (`follow`) で鳴らし始める所は `aim` で決める
    */
-  reset(from: number | null = null): void {
+  reset(): void {
     this.running = false;
     this.chunks = [];
     this.overSince = Number.NaN;
-    this.resumeAt = from;
+    this.resumeAt = null;
     this.finished = false;
     this.finishedAt = Number.NaN;
   }
 
   /**
-   * 鳴らし始める所を決め直す (`reset` の `from` と同じ)。**物差しを届いた音に合わせてから渡すとき**。
+   * 追っかけで鳴らし始める所を決める (90kHz。届く音と同じ物差し)。
    * 放送の PTS は一周するので、届いた最初のコマの近くに伸ばしてから決める (`engine.ts`)
    */
   aim(from: number): void {

@@ -28,6 +28,7 @@ import {
 } from "../ts/logo-detect";
 import type { ScanLogo } from "./cm-scan";
 import { config } from "./config";
+import { recordingInput } from "./recording-io";
 import { run } from "./stream";
 
 /**
@@ -158,8 +159,7 @@ async function learn(
       // キーフレームしかデコードしない。散らして見るだけなので全部は要らない
       "-skip_frame",
       "nokey",
-      "-i",
-      input,
+      ...recordingInput(input),
       "-an",
       "-sn",
       "-dn",
@@ -264,6 +264,8 @@ interface LogoResult {
   learned: { file: string; again: boolean } | null;
   /** 覚え書き (落ちたときの理由 / 通ったときの要約) */
   note: string;
+  /** 当てた型の在り処と大きさ (`枠 x,y,幅,高さ、型 N 画素`)。落ちたときは空 */
+  model: string;
 }
 
 /**
@@ -313,6 +315,7 @@ export async function openLogo(
         scores: new Float32Array(),
         learned: null,
         note,
+        model: "",
       });
       let current = first;
       let spans = current.spans(fps);
@@ -358,6 +361,12 @@ export async function openLogo(
         0,
       );
       const share = Math.round((lit / Math.max(1, current.frames())) * 100);
+      const where = `枠 ${rect.x},${rect.y},${rect.width},${rect.height}、型 ${current.points} 画素`;
+      const how = learnedNow
+        ? keep
+          ? " (この録画で覚えた)"
+          : " (この録画だけで覚えた。前の型は残す)"
+        : "";
       return {
         code: 0,
         spans,
@@ -369,7 +378,8 @@ export async function openLogo(
                 again: relearned,
               }
             : null,
-        note: `枠 ${rect.x},${rect.y},${rect.width},${rect.height} 型 ${current.points} 画素 / ロゴ ${share}%${learnedNow ? (keep ? " (この録画で覚えた)" : " (この録画だけで覚えた。前の型は残す)") : ""}`,
+        note: `${where} / ロゴ ${share}%${how}`,
+        model: `${where}${how}`,
       };
     },
   };

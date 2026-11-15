@@ -1,9 +1,12 @@
 import { error, redirect } from "@sveltejs/kit";
 import { eq } from "drizzle-orm";
 
+import { parseId } from "#lib/id.js";
 import { orm } from "#lib/server/db.js";
+import { aribServiceId } from "#lib/server/encoder.js";
 import { recordingJikkyo } from "#lib/server/jikkyo.js";
 import { relative } from "#lib/server/paths.js";
+import { recordedBroadcast } from "#lib/server/recorded-broadcast.js";
 import { recordings } from "#lib/server/schema.js";
 import { settings } from "#lib/server/settings.js";
 import { viewingOptions } from "#lib/server/viewing.js";
@@ -18,8 +21,8 @@ import type { PageServerLoad } from "./$types";
  * (`server/live.ts` の `openChase`)。どちらにするかの決め方もライブと同じ (`#lib/live-choice.ts`)。
  */
 export const load: PageServerLoad = ({ params, url }) => {
-  const id = Number(params.id);
-  if (!Number.isInteger(id)) error(404, "録画が見つかりません");
+  const id = parseId(params.id);
+  if (id === null) error(404, "録画が見つかりません");
 
   const rec = orm()
     .select()
@@ -56,14 +59,19 @@ export const load: PageServerLoad = ({ params, url }) => {
       series_last_episode: rec.series_last_episode,
       series_repeat: rec.series_repeat,
     },
+    /**
+     * 録画の放送のコーデック (`recordedBroadcast`)。4K の局の録画 (`.mmts` と、PMT の映像が HEVC の `.m2ts`) は `hevc` で、
+     * 放送のままは HEVC を写したもの (`live-player` の `openChase`)
+     */
+    broadcast: recordedBroadcast(rec.ts_path, aribServiceId(rec.service_id)),
     /** 実況を流せるか (世帯の設定)。オンのときだけ ⚙ に「実況」の行を出す */
     jikkyoAllowed: settings().jikkyo,
     /** 実況の NG ワード (世帯の設定)。含むコメントは流さない */
     jikkyoNg: settings().jikkyoNg,
-    /** コーデックのメニューから外すもの (世帯の設定。`#lib/live-choice.ts` の `HIDDEN_CODECS`) */
-    hidden: viewing.hidden,
     /** 開いた名前が家の中か (`#lib/host.ts` の `indoorHost`)。「自動」の形式をライブと同じ決め方で画面が決める */
     indoor: viewing.indoor,
+    /** その場でエンコードできるコーデック (`viewing.viewingOptions`)。コーデックのメニューに並べる 1 つを画面が選ぶ */
+    liveCodecs: viewing.liveCodecs,
     /** 実況のチャンネルと先頭・終わりの放送時刻。古いところは過去ログ API、新しいところは NX-Jikkyo から取る */
     jikkyo: recordingJikkyo(rec),
   };

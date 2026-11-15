@@ -9,9 +9,9 @@
 import {
   type AdaptDecision,
   type AdaptSample,
+  autoValue,
   RungAdapter,
   type Step,
-  stepLabel,
 } from "./adapt";
 import { CODEC_LABEL } from "./hw";
 import type { LiveCodec } from "./live";
@@ -28,22 +28,21 @@ export function rungQuery(rung: Rung, playable: readonly LiveCodec[]): string {
   return `&rung=${rung}&playable=${playable.join(",")}`;
 }
 
-/** コーデックのメニューの「自動」の行の値 (「自動 (H.264 540p)」)。段 0 は「自動」だけ */
+/**
+ * 観る画面のコーデックのメニューの「自動」の行の値 (組み立ては `adapt.ts` の `autoValue`)。
+ * 段 0 は「自動」だけ (いまの形式は添えない)
+ */
 export function autoLabel(step: Step, codec: string | null): string {
   if (step === 0) return "自動";
   const name =
     codec === "h264" || codec === "hevc" || codec === "av1"
       ? CODEC_LABEL[codec]
       : "";
-  return `自動 (${stepLabel(step, name)})`;
+  return autoValue(step, name);
 }
 
-/** 段を切り替えようとして、サーバが混んでいて断られたとき。`down` は下げようとしたか */
-export function busyNote(down: boolean): string {
-  return down
-    ? "サーバが混んでいるため、画質を下げられませんでした"
-    : "サーバが混んでいるため、画質を上げられませんでした";
-}
+/** サーバが混んでいて段を替えられなかったときの文言。ライブのサーバの通知と同じ文なので、段の表 (`rungs.ts`) が持つ */
+export { busyNote } from "./rungs";
 
 /** 呼ぶたびに観る画面が渡すもの。`now`・`route`・`pace` はここで足す */
 export type WatchSample = Omit<AdaptSample, "now" | "route" | "pace"> & {
@@ -107,20 +106,16 @@ export function watchAdapt(host: WatchAdaptHost): WatchAdapt {
         return;
       }
       const at = now();
-      // 止めていた間の溜まりの伸びを、回線のぶんとして読まない
+      // 止めていた間のバッファの伸びを、回線のぶんとして読まない
       if (idle) adapter.reset(at);
       idle = false;
-      poll(s.paceId, at);
+      const { paceId, ...sample } = s;
+      poll(paceId, at);
       const decision = adapter.tick({
+        ...sample,
         now: at,
         route: "watch",
-        current: s.current,
-        manual: s.manual,
-        throughput: s.throughput,
-        ahead: s.ahead,
-        waiting: s.waiting,
         pace,
-        baseKbps: s.baseKbps,
       });
       if (decision !== null) host.decide(decision);
     },

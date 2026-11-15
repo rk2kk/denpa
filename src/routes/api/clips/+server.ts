@@ -1,6 +1,7 @@
 import { error, json } from "@sveltejs/kit";
 
 import { CLIP_BYTES_MOST, parseClipQuery } from "#lib/clips.js";
+import { parseId } from "#lib/id.js";
 import {
   ClipError,
   DELETE_MOST,
@@ -63,7 +64,8 @@ export async function POST({ url, request }) {
       if (raw !== null && source === null) error(400, "source が不正です");
       scene = recordingScene(recording, place, at, source);
     } else if (place === "live") {
-      const service = number(url, "service");
+      // 局は ID なので、ほかの ID と同じく 10 進の整数だけ読む (`1e3`・`0x10` は通さない。docs/api.md)
+      const service = parseId(url.searchParams.get("service"));
       if (service === null) error(400, "局が不正です");
       const aired = number(url, "aired");
       // 端末の時計は信じすぎない。1 日より離れていれば受け取った時刻にする
@@ -103,8 +105,8 @@ export async function POST({ url, request }) {
 export function DELETE({ url }) {
   const ids = (url.searchParams.get("ids") ?? "")
     .split(",")
-    .map(Number)
-    .filter((id) => Number.isSafeInteger(id) && id > 0);
+    .map(parseId)
+    .filter((id): id is number => id !== null && id > 0);
   if (ids.length === 0) error(400, "消す切り抜きを指定してください");
   if (ids.length > DELETE_MOST)
     error(400, `一度に消せるのは ${DELETE_MOST} 枚までです`);

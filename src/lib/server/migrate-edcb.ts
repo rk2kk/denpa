@@ -33,12 +33,13 @@ import {
   recordCounts,
   recordPlan,
   ruleImported,
+  type RuleValues,
   running,
-  serviceById,
+  serviceOf,
   SlotWindows,
   track,
 } from "./migrate";
-import { programKey, serviceKey } from "./tuner";
+import { busy as transferBusy, BUSY_MESSAGE } from "./transfer";
 
 /**
  * EDCB のジャンル 1 件を denpa の書き方 (`"7"` / `"7-0"`) に。写せないものは null。
@@ -155,23 +156,7 @@ function wordsOf(text: string): string[] {
 /** 語ごとに探す範囲を変える印 (`:title:` など) と、語ごとの正規表現 (`::`) */
 const PER_WORD = /^(::|:(title|event|genre|video|audio):)/;
 
-/** ルールに入れる値 ({@link convertRule}) */
-interface EdcbRuleValues {
-  name: string;
-  keyword: string;
-  ignore_keyword: string;
-  search_fields: string;
-  service_ids: number[];
-  genres: string[] | null;
-  time_from: number | null;
-  time_to: number | null;
-  weekdays: number[] | null;
-  enabled: boolean;
-  dedupe: boolean;
-}
-
-type ConvertedRule =
-  { values: EdcbRuleValues; notes: string[] } | { skip: string };
+type ConvertedRule = { values: RuleValues; notes: string[] } | { skip: string };
 
 /**
  * EDCB のルール 1 件を denpa のルールに。写せないものは `skip` に理由を、写したが意味が少し変わる
@@ -241,6 +226,11 @@ export function convertRule(
   if (rule.aimai) notes.push("あいまい検索は普通の検索として取り込みました");
   if (caseSensitive)
     notes.push("大文字と小文字の区別は普通の検索として取り込みました");
+  // denpa のルールに無料放送だけの条件は無い (EPGStation の `isFree` と同じ扱い。`migrate.ts`)
+  if (rule.freeCA === 1)
+    notes.push(
+      "無料放送だけの条件は外して取り込みました (有料放送にも当たります)",
+    );
   const recording = rule.recMode >= 0 && rule.recMode <= 3;
   if (!disabled && !recording)
     notes.push("録画しないルールなので無効にして取り込みました");
@@ -266,11 +256,6 @@ export function convertRule(
     },
     notes,
   };
-}
-
-/** 局の内部 ID。denpa の局に無ければ undefined */
-function serviceOf(networkId: number, serviceId: number): number | undefined {
-  return serviceById(serviceKey(networkId, serviceId))?.id;
 }
 
 /** 記録に出すルールの呼び名 */
@@ -302,7 +287,10 @@ export function importEdcbRules(
       tally.skipped++;
       continue;
     }
-    const converted = convertRule(rule, serviceOf);
+    const converted = convertRule(
+      rule,
+      (networkId, serviceId) => serviceOf(networkId, serviceId)?.id,
+    );
     if ("skip" in converted) {
       record(`${converted.skip}: ${ruleLabel(rule)}`);
       tally.skipped++;
@@ -313,13 +301,13 @@ export function importEdcbRules(
     for (const note of notes) record(`  ${note}: ${ruleLabel(rule)}`);
     tally.imported++;
     // 優先度 (EDCB の 1〜5) と録画の設定は写さない (`insertRule`)
-    if (options.apply) insertRule({ ...values, service_types: null }, source);
+    if (options.apply) insertRule(values, source);
   }
 }
 
 /**
  * 手で入れた予約を入れる。ルールが作った予約 (`EPG自動予約` で始まるコメント) は、ルールを入れれば
- * denpa が作り直すので触らない。番組は ONID・SID・event_id で引く (`programKey`。EPGStation と同じく番組の ID で予約する)
+ * denpa が作り直すので触らない。番組は ONID・SID・event_id で引く (`importReservation`)
  */
 export async function importEdcbReservations(
   list: EdcbReserve[],
@@ -351,8 +339,8 @@ export async function importEdcbReservations(
       continue;
     }
     await importReservation(
-      programKey(row.networkId, row.serviceId, row.eventId),
-      row.title,
+      [row.networkId, row.serviceId, row.eventId],
+      row.title || `${row.networkId}-${row.serviceId}-${row.eventId}`,
       options,
     );
   }
@@ -386,8 +374,8 @@ export function importEdcbHistory(
     entries.push({
       sources: [`edcb:recinfo:${key}`, `edcb:recinfo2:${key}`],
       name: row.title,
-      serviceId: serviceKey(row.networkId, row.serviceId),
-      serviceName: row.serviceName,
+      serviceName:
+        serviceOf(row.networkId, row.serviceId)?.name ?? row.serviceName,
       endAt: row.startAt + row.duration,
     });
   }
@@ -483,8 +471,9 @@ export async function startEdcb(
   } finally {
     starting = false;
   }
-  // 読んでいる間に EPGStation の引き継ぎが走り出していたら譲る
+  // 読んでいる間に EPGStation の引き継ぎか、別の機械へ移す書き出し・取り込みが走り出していたら譲る
   if (running()) return { started: false, message: "すでに実行中です" };
+  if (transferBusy()) return { started: false, message: BUSY_MESSAGE };
   void runEdcb(lists, options);
   return {
     started: true,

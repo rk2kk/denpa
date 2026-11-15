@@ -6,16 +6,22 @@ import {
   COPY_NEVER_REASON,
   NOT_CANCELABLE_REASON,
 } from "../format";
-import type { Reservation, ReservationState } from "../types";
+import { parseId } from "../id";
+import {
+  type Reservation,
+  type ReservationState,
+  undecodableReason,
+} from "../types";
 import { now, orm } from "./db";
 import { stopRecording } from "./recorder";
 import { resolveConflicts } from "./scheduler";
 import {
-  latestRecordingId,
+  latestReservationRecordingId,
   programs,
   recordings,
   reservations,
   reservationState,
+  services,
 } from "./schema";
 import { settings } from "./settings";
 
@@ -52,10 +58,25 @@ export async function reserve(programId: number): Promise<Reservation> {
    * 予約を立てても「録画しない」になるだけで、押した人には録れたように見えてしまう
    */
   if (program.copy_never) throw new Error(COPY_NEVER_REASON);
+  /*
+   * **復号できない局の番組も録らない** (`services.decodable`)。番組表を読める局は番組表に出るが、録ってもスクランブルのままで観られない
+   * (局の行が無い番組は断らない。番組は局の行がある局にしか書かないので、ふつうは起きない)
+   */
+  const service = orm()
+    .select({
+      type: services.type,
+      transport: services.transport,
+      decodable: services.decodable,
+    })
+    .from(services)
+    .where(eq(services.id, program.service_id))
+    .get();
+  if (service !== undefined && !service.decodable)
+    throw new Error(undecodableReason(service.type, service.transport));
   // 手動で入れたものはルール由来 (既定 1) より上。**予約どうしだけの物差し**
   const priority = 2;
-  // 録画のしかたは全体で 1 つ。「エンコードするか否か」だけ予約時に固定する。
-  // エンコード方法の細目 (元の TS を残すか・CM の扱い・コーデック) はエンコードするときに settings を見る
+  // 録画のしかたは全体で 1 つ。「エンコードするか否か」は予約時の設定を写す (録り終えたときの設定が「エンコードしない」なら、こちらが true でもエンコードしない)。
+  // エンコードの細目 (元の TS を残すか・コーデック) はエンコードするときに settings を見る
   const encode = settings().encode;
 
   orm()
@@ -99,15 +120,20 @@ export async function reserve(programId: number): Promise<Reservation> {
     .get()!;
 }
 
-/** 画面の「予約」のアクション (番組表・検索)。フォームの `programId` を予約し、断ったときはその理由を返す */
-export async function reserveFromForm(form: FormData): Promise<string | null> {
-  const programId = Number(form.get("programId"));
-  if (!Number.isSafeInteger(programId)) return "番組 ID が不正です";
+/**
+ * 画面の「予約」のアクション (番組表・検索)。フォームの `programId` を予約し、予約した番組の ID を返す。
+ * 断ったときはその理由 (`refused`) を返す
+ */
+export async function reserveFromForm(
+  form: FormData,
+): Promise<{ programId: number } | { refused: string }> {
+  const programId = parseId(form.get("programId"));
+  if (programId === null) return { refused: "番組 ID が不正です" };
   try {
     await reserve(programId);
-    return null;
+    return { programId };
   } catch (error) {
-    return reason(error);
+    return { refused: reason(error) };
   }
 }
 
@@ -193,12 +219,9 @@ export async function cancel(reservationId: number): Promise<boolean> {
 export async function cancelProgram(
   programId: number,
   at = now(),
-): Promise<
-  | { ok: true; stopped: boolean }
-  | { ok: false; status: 404 | 409; message: string }
-> {
+): Promise<CancelResult> {
   const reservation = orm()
-    .select({ id: reservations.id, end_at: reservations.end_at })
+    .select({ id: reservations.id })
     .from(reservations)
     .where(
       and(
@@ -209,7 +232,27 @@ export async function cancelProgram(
     .get();
   if (reservation === undefined)
     return { ok: false, status: 404, message: "予約が見つかりません" };
-  const state = reservationStates([programId]).get(programId) ?? null;
+  return cancelReservation(reservation.id, at);
+}
+
+type CancelResult =
+  | { ok: true; stopped: boolean }
+  | { ok: false; status: 404 | 409; message: string };
+
+/**
+ * **予約を ID で取り消す** (ホームと検索の画面の取消)。決まりは {@link cancelProgram} と同じで、
+ * 予約が無いか取り消し済みなら 404、録り終えた・録り逃したものは 409
+ */
+export async function cancelReservation(
+  reservationId: number,
+  at = now(),
+): Promise<CancelResult> {
+  const reservation = byId(reservationId);
+  if (reservation === undefined || reservation.state === "canceled")
+    return { ok: false, status: 404, message: "予約が見つかりません" };
+  const state =
+    reservationStates([reservation.program_id]).get(reservation.program_id) ??
+    null;
   if (!cancelable(state, reservation.end_at, at))
     return { ok: false, status: 409, message: NOT_CANCELABLE_REASON };
   return { ok: true, stopped: await cancel(reservation.id) };
@@ -335,8 +378,8 @@ export function reservationStates(
   const rows = orm()
     .select({ programId: r.program_id, state: reservationState(r, rec) })
     .from(r)
-    // 録り直すと同じ番組に複数ぶら下がる。いちばん新しい現存分だけ見る (番組表と同じ)
-    .leftJoin(rec, eq(rec.id, latestRecordingId(r.program_id)))
+    // その予約で録れたいちばん新しい録画 (消したものも含める。`latestReservationRecordingId`)
+    .leftJoin(rec, eq(rec.id, latestReservationRecordingId(r.id)))
     .where(and(inArray(r.program_id, programIds), ne(r.state, "canceled")))
     .all();
   return new Map(rows.map((row) => [row.programId, row.state]));

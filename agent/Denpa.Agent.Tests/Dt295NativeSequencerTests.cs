@@ -3,7 +3,7 @@ using TUnit.Assertions.Enums;
 namespace Denpa.Agent.Tests;
 
 /*
- * 機材の中の I2C の順次実行 (Dt295NativePrograms の操作 2) と、ホストが 1 つずつ行う場合 (Dt295NativeI2c.Run) が、
+ * 機材の中の I2C の順次実行 (Dt295NativePrograms の操作 2) と、ホストが 1 つずつ実行する場合 (Dt295NativeI2c.Run) が、
  * 同じ手順で同じ結果になることを、偽の機材 (Dt295Fake。I2C のコントローラのモデルつき) で確かめる。機材のプログラムは FR30 のエミュレータで動かす。
  */
 public class Dt295NativeSequencerTests
@@ -22,7 +22,7 @@ public class Dt295NativeSequencerTests
     [Test]
     [Arguments(true)]
     [Arguments(false)]
-    public async Task 書きと読みの並びは機材の中でもホストでも同じ結果と同じ_I2C_の転送になる(bool sequencer)
+    public async Task 書きと読み出しの並びは機材の中でもホストでも同じ結果と同じ_I2C_の転送になる(bool sequencer)
     {
         var (fake, _, i2c) = Rig(sequencer);
         var batch = new Dt295I2cBatch();
@@ -43,7 +43,7 @@ public class Dt295NativeSequencerTests
     [Test]
     [Arguments(true)]
     [Arguments(false)]
-    public async Task 読み_変更_書きは直前の読みの先頭バイトから書く値を作る(bool sequencer)
+    public async Task リード_モディファイ_ライトは直前の読み出しの先頭バイトから書く値を作る(bool sequencer)
     {
         var (fake, _, i2c) = Rig(sequencer);
         fake.Terrestrial.Regs[0x20] = 0x23;
@@ -51,7 +51,7 @@ public class Dt295NativeSequencerTests
         batch.Write(0x10, 0x20);
         batch.Read(0x10, 1);
         batch.WriteModified(0x10, [0x20], 0x0F, 0x40);
-        // 読みが 2 バイトなら先頭のバイトを使う (衛星の選局の t=16)
+        // 読み出しが 2 バイトなら先頭のバイトを使う (衛星の選局の t=16)
         batch.Write(0x11, 0x00);
         batch.Read(0x11, 2);
         batch.WriteModified(0x11, [0xFE, 0xC0, 0x50], 0x01, 0xF0);
@@ -97,7 +97,7 @@ public class Dt295NativeSequencerTests
 
         await Assert.That(reply.Code).IsEqualTo(Dt295NativePrograms.I2cNack);
         await Assert.That(reply.Index).IsEqualTo(2u);
-        // 止まったあとの転送は行わない
+        // 止まったあとの転送は実行しない
         await Assert.That(fake.I2cLog).IsEquivalentTo(new[] { "10 W 0123", "11 W 0234" }, CollectionOrdering.Matching);
         // バスは空いていて、次の並びが通る
         var next = new Dt295I2cBatch();
@@ -116,14 +116,14 @@ public class Dt295NativeSequencerTests
     }
 
     [Test]
-    public async Task 分けるときは読みの結果を使う書きを読みと同じ塊に入れる()
+    public async Task 分けるときは読み出しの結果を使う書きを読み出しと同じ塊に入れる()
     {
         var batch = new Dt295I2cBatch();
         batch.Write(0x10, 0x20);
         batch.Read(0x10, 1);
         batch.WriteModified(0x10, [0x20], 0x0F, 0x40);
         var chunks = batch.Split(opLimit: 8, resultLimit: 100).ToList();
-        // 上限が小さくても、読みと書きは別の塊にならない
+        // 上限が小さくても、読み出しと書きは別の塊にならない
         await Assert.That(chunks.Any(chunk => chunk.Any(op => op.Modified) && !chunk.Any(op => op.Read > 0))).IsFalse();
     }
 
@@ -140,7 +140,7 @@ public class Dt295NativeSequencerTests
     [Test]
     public async Task TS_の要求と_I2C_の順次実行を別のスレッドから交互に出しても_応答が混ざらない()
     {
-        // 機材のプログラムの要求と応答は同じ 64 バイトの場所を通る。要求と応答の読みの間に別の要求が入ると、応答が壊れる
+        // 機材のプログラムの要求と応答は同じ 64 バイトの場所を通る。要求と応答の読み出しの間に別の要求が入ると、応答が壊れる
         var (fake, link, i2c) = Rig(true);
         fake.Terrestrial.Regs[0x20] = 0x5A;
         var ring = new List<byte>();
@@ -179,7 +179,7 @@ public class Dt295NativeSequencerTests
             try
             {
                 var read = i2c.Run(batch);
-                if (read.Length != 1 || read[0] != 0x5A) lock (failures) failures.Add($"読み {Convert.ToHexString(read)}");
+                if (read.Length != 1 || read[0] != 0x5A) lock (failures) failures.Add($"読み出し {Convert.ToHexString(read)}");
             }
             catch (Exception error)
             {
@@ -193,7 +193,7 @@ public class Dt295NativeSequencerTests
     }
 
     [Test]
-    public async Task 受信中に_C_N_の読みを繰り返しても_TS_は止まらず_読みも壊れない()
+    public async Task 受信中に_C_N_の読み出しを繰り返しても_TS_は止まらず_読み出しも壊れない()
     {
         var fake = new Dt295Fake();
         var ring = new List<byte>();
@@ -210,7 +210,7 @@ public class Dt295NativeSequencerTests
         var port = $"test-{Guid.NewGuid():N}";
         var tuner = new Dt295NativeTuner("test", () => Dt295NativeDevice.Acquire(port, () => fake, null, _ => { }, 2000), () => Dt295NativeDevice.CloseIfIdle(port));
         var tuning = ChannelTable.Parse("T25")!;
-        tuner.Tune(tuning, tuning.StreamId);
+        tuner.Tune(tuning);
 
         for (var i = 0; i < 30; i++)
         {
@@ -223,7 +223,7 @@ public class Dt295NativeSequencerTests
     }
 
     [Test]
-    public async Task 要求と応答の読みの間に別のスレッドの要求が入ろうとしても_応答は壊れない()
+    public async Task 要求と応答の読み出しの間に別のスレッドの要求が入ろうとしても_応答は壊れない()
     {
         var (fake, link, i2c) = Rig(true);
         fake.Terrestrial.Regs[0x20] = 0x5A;

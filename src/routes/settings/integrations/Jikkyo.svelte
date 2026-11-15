@@ -17,7 +17,7 @@
   let { data }: { data: PageData } = $props();
   const save = new SaveState();
   /** 連携を始めるリンク (サーバが hub へ送る。`niconico/link`) */
-  const linkHref = resolve("/settings/integrations/niconico/link");
+  const linkHref = resolve("settings/integrations/niconico/link");
 
   /** 連携を始められなかったとき (リンクの移動なので、理由は URL に載って戻ってくる) */
   const linkError = $derived(page.url.searchParams.get("niconico_error"));
@@ -30,7 +30,7 @@
     named = !homeHost(location.hostname);
   });
   /**
-   * 連携を外すのは 2 回押させる (削除と同じ `arming`)。外すと手元のトークンを消すので、戻すにはニコニコでもう一度許可する。
+   * 連携の解除は 2 回押させる (削除と同じ `arming`)。解除すると手元のトークンを消すので、戻すにはニコニコでもう一度許可する。
    * 押す場所は 1 つなので、`armKey` は 0 で足りる
    */
   const unlinking = arming('[data-testid^="niconico-unlink"]');
@@ -42,7 +42,7 @@
     **実況のコメント (世帯の設定。既定はオフ)。** オンにすると、端末の ⚙ に「実況」の行が出る
     (端末ごとのオン・オフはそちら)。コメントは denpa のサーバを通らず、端末が NX-Jikkyo と
     過去ログ API に直接繋ぐ (ニコニコと連携していれば、書き込みだけは denpa のサーバが公式のニコニコ実況へ送る)。
-    相手に何が見えるかと、書き込んだものが公開されて消せないことは説明の頭に出す (隠さない。docs/architecture.md)
+    相手に何が見えるかと、書き込んだものが公開されて消せないことは説明の冒頭に出す (隠さない。docs/architecture.md)
 -->
 <div class="sections readable">
   <section class="section">
@@ -60,6 +60,7 @@
         <label class="check-row">
           <input
             type="checkbox"
+            role="switch"
             name="jikkyo"
             checked={data.jikkyo}
             data-testid="jikkyo-setting"
@@ -146,7 +147,7 @@
             action="?/unlinkNiconico"
             class="small"
             testid="niconico-unlink"
-            label="連携を外す"
+            label="連携を解除"
             confirmLabel="連携の解除を確定"
           />
         </div>

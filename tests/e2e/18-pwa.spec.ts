@@ -216,7 +216,7 @@ test.describe("PWA", () => {
     await expect(page.getByTestId("measure")).toHaveCount(0);
   });
 
-  test("サービスワーカーが登録され、APIは横取りしない", async ({ page }) => {
+  test("サービスワーカーが登録され、API は横取りしない", async ({ page }) => {
     await goto(page, "/");
     const registered = await page.evaluate(async () => {
       const registration = await navigator.serviceWorker.getRegistration();
@@ -374,7 +374,7 @@ test.describe("PWA", () => {
       { width: 999, height: 700, touch: false },
       // 縦のタブレット (指の端末)
       { width: 820, height: 1180, touch: true },
-      // 横にしたスマホ。一覧の画面では下のタブが出る (映像の画面では隠す。20-live)
+      // 横にしたスマホ。一覧の画面では下のタブが出る (映像の画面では隠す。20-live-player)
       { width: 844, height: 390, touch: true },
     ];
     for (const size of sizes) {
@@ -491,12 +491,12 @@ test.describe("PWA", () => {
    * 番組表は窓ではなく表の箱 (`.grid-box`) の中で巻くので、箱の縦の巻き取りで出し入れする (`+layout.svelte`)。
    * 表は画面の下の端まで伸びていて、出し入れで箱の大きさも巻いた位置も変わらない (中身が跳ねない)。
    * 開いたときの箱の位置は時刻で変わるので、時計を止めて 2 通り見る。昼は「いま」への位置合わせで巻かれていて、
-   * 表の頭 (4:00) は頭のまま (初めての巻き取りで隠す)。夜遅くは開いた時点で表の最後に着いていて下へ送れない
+   * 表の先頭 (4:00) は先頭のまま (初めての巻き取りで隠す)。夜遅くは開いた時点で表の最後に着いていて下へ送れない
    * (0 時台に CI で落ちていた) ので使わない
    */
   for (const [hours, when] of [
     [8, "昼"],
-    [0, "表の頭"],
+    [0, "表の先頭"],
   ] as const) {
     test(`スマホの番組表は、表の箱を下へ送ると下のタブと操作の1行が引っ込み、上へ戻すと出る (${when})`, async ({
       page,

@@ -232,6 +232,62 @@
       "when": 1794048306680,
       "tag": "0032_services-epg-at",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1794192075117,
+      "tag": "0033_recordings-video-loss",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1794300780301,
+      "tag": "0034_services-decodable",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1794385169840,
+      "tag": "0035_services-transport",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1794388366349,
+      "tag": "0036_services-epg-readable",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1794468974536,
+      "tag": "0037_services-listed",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1794480248368,
+      "tag": "0038_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1794484847332,
+      "tag": "0039_agent-channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1794495166848,
+      "tag": "0040_recording-agent",
+      "breakpoints": true
     }
   ]
 }

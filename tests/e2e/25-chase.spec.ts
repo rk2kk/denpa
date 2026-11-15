@@ -146,7 +146,7 @@ async function checkChase(
 
   /*
    * **スマホの縦 (360px・320px) でも、操作バーのボタンは 1 行** (観る画面・ライブと同じ)。
-   * 残すのは再生・最新・読みもの・⚙・全画面だけで、畳んだ音は ⚙ の頭の行から押せる
+   * 残すのは再生・最新・読みもの・⚙・全画面だけで、畳んだ音は ⚙ の先頭の行から押せる
    */
   for (const width of [360, 320]) {
     const context = await browser.newContext({
@@ -169,7 +169,7 @@ async function checkChase(
       path: test.info().outputPath(`chase-${width}.png`),
     });
 
-    // 畳んだ音は ⚙ の頭の「消音」の行。「ほか」(⋯) のボタンはもう無い
+    // 畳んだ音は ⚙ の先頭の「消音」の行。「ほか」(⋯) のボタンはもう無い
     const sound = tab.getByTestId("chase-sound");
     await expect(sound).toBeHidden();
     await expect(tab.getByTestId("chase-more")).toHaveCount(0);
@@ -250,4 +250,19 @@ async function checkChase(
   );
   await expect(badges.getByTestId("detail-audio").first()).toBeVisible();
   await page.unroute("/api/programs/*");
+
+  /*
+   * **スマホの形 (1000px 未満) では、ほかの画面と同じく下のタブを出してヘッダーを隠す。**
+   * タブを出さなかった頃は、観る画面と追っかけだけ上にヘッダーが出ていた。ナビの画面ではないので、どのタブにも印は付けない
+   */
+  const size = page.viewportSize()!;
+  await page.setViewportSize({ width: 390, height: 844 });
+  try {
+    const tabbar = page.getByTestId("tabbar");
+    await expect(tabbar).toBeVisible();
+    await expect(page.locator(".navbar")).toBeHidden();
+    await expect(tabbar.locator('[aria-current="page"]')).toHaveCount(0);
+  } finally {
+    await page.setViewportSize(size);
+  }
 }

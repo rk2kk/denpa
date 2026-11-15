@@ -11,6 +11,8 @@
     earlier: "前の回",
     "copy-never": "コピー禁止",
     declined: "取り消し済み",
+    simulcast: "本チャンネルと同じ番組",
+    undecodable: "復号できない局",
     airing: "放送中",
     ignore: "除外",
     service: "局",
@@ -30,14 +32,12 @@
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { untrack } from "svelte";
-  import X from "~icons/lucide/x";
 
   import { submitting } from "#lib/actions.js";
   import { GENRE_TREE } from "#lib/arib.js";
   import type { Arming } from "#lib/arming.svelte.js";
   import ActionButton from "#lib/components/ActionButton.svelte";
   import ArmedDelete from "#lib/components/ArmedDelete.svelte";
-  import Icon from "#lib/components/player/Icon.svelte";
   import { SERVICE_TYPE_LABEL, WEEKDAYS } from "#lib/format.js";
   import { clockOf, minutesOf, slotSummary } from "#lib/rule-time.js";
   import {
@@ -45,6 +45,7 @@
     SEARCH_FIELD_LABEL,
     SEARCH_FIELDS,
   } from "#lib/search.js";
+  import { ALL_CHANNEL_TYPES } from "#lib/types.js";
 
   import type { PageData } from "./$types";
   import type { Preview } from "./+page.server";
@@ -71,7 +72,7 @@
     draft: PageData["draft"];
     /** 探した言葉。直していないキーワードはこれに付いていく */
     q: string;
-    /** 結果の一覧に出している番組。行ごとの「録るか」を聞く */
+    /** 結果の一覧に出している番組。行ごとの「録るか」を問い合わせる */
     ids: number[];
     /** 画面の読み直し (予約・取消・保存のあと)。変わったら数え直す */
     refresh: unknown;
@@ -246,7 +247,6 @@
         total: 0,
         skipped: 0,
         programs: [],
-        conflicts: 0,
         verdicts: {},
         failed: String(error),
       };
@@ -312,12 +312,10 @@
   // ---- 局とジャンル ----
   /** 局は 50 以上あるので種別ごとにまとめる */
   const grouped = $derived(
-    ["GR", "BS", "CS", "SKY"]
-      .map((type) => ({
-        type,
-        services: draft.services.filter((s) => s.type === type),
-      }))
-      .filter((g) => g.services.length > 0),
+    ALL_CHANNEL_TYPES.map((type) => ({
+      type,
+      services: draft.services.filter((s) => s.type === type),
+    })).filter((g) => g.services.length > 0),
   );
   const serviceSummary = $derived.by(() => {
     if (serviceTypes.length + serviceIds.length === 0) return "全局";
@@ -331,6 +329,13 @@
   });
 </script>
 
+<!-- スマホの形で下から出しているときは、ほかの窓と同じく Esc でも閉じる (docs/design.md の「メニュー・ダイアログ・検索の候補」) -->
+<svelte:window
+  onkeydown={(event) => {
+    if (open && event.key === "Escape" && !event.defaultPrevented) open = false;
+  }}
+/>
+
 <aside
   class="draft"
   class:open
@@ -338,29 +343,17 @@
   data-testid="rule-draft"
 >
   <div class="draft-head">
-    <div>
-      {#if draft.editing !== null}
-        <p class="eyebrow small" data-testid="rule-mode">
-          <span class="muted">編集中:</span>
-          <span class="bold">{draft.editing.name}</span>
-          {#if !draft.editing.enabled}<span class="tag">無効</span>{/if}
-        </p>
-        <h2>ルールを直す</h2>
-      {:else}
-        <p class="eyebrow small muted">この検索を</p>
-        <h2>ルールとして保存</h2>
-      {/if}
-    </div>
-    <!-- スマホの形だけ。下から出した欄を閉じる -->
-    <button
-      type="button"
-      class="ghost close"
-      aria-label="閉じる"
-      onclick={() => (open = false)}
-      data-testid="rule-draft-close"
-    >
-      <Icon icon={X} size="size-4" />
-    </button>
+    {#if draft.editing !== null}
+      <p class="eyebrow small" data-testid="rule-mode">
+        <span class="muted">編集中:</span>
+        <span class="bold">{draft.editing.name}</span>
+        {#if !draft.editing.enabled}<span class="tag">無効</span>{/if}
+      </p>
+      <h2>ルールを直す</h2>
+    {:else}
+      <p class="eyebrow small muted">この検索を</p>
+      <h2>ルールとして保存</h2>
+    {/if}
   </div>
 
   {#if draft.origin !== null}
@@ -667,7 +660,8 @@
         いまの番組表では、この条件で録る番組はありません
         (これから出てくる番組に当てます)
       {:else}
-        一覧では、録る番組は明るく、録らない番組は薄く出ます。条件を変えるとすぐ変わります
+        一覧の番組に「録る」「録らない」を出します
+        (録らない番組は薄い字)。条件を変えるとすぐ変わります
       {/if}
     </p>
     {#if saved !== null}
@@ -699,19 +693,31 @@
         />
       </div>
     {/if}
-    <button
-      type="submit"
-      form="rule-draft-form"
-      class="save"
-      disabled={empty || slotError !== null}
-      data-testid={draft.editing !== null ? "rule-update" : "rule-submit"}
-    >
-      {draft.editing !== null
-        ? "更新"
-        : recordable === null || recordable === 0
-          ? "ルールを保存"
-          : `${recordable} 件を録るルールを保存`}
-    </button>
+    <!--
+      スマホの形で下から出しているときは、ほかの窓と同じく左下に「閉じる」、主の保存は右端
+      (右上の ✕ は置かない。docs/design.md の「メニュー・ダイアログ・検索の候補」)
+    -->
+    <div class="foot-actions">
+      <button
+        type="button"
+        class="secondary close"
+        onclick={() => (open = false)}
+        data-testid="rule-draft-close">閉じる</button
+      >
+      <button
+        type="submit"
+        form="rule-draft-form"
+        class="save"
+        disabled={empty || slotError !== null}
+        data-testid={draft.editing !== null ? "rule-update" : "rule-submit"}
+      >
+        {draft.editing !== null
+          ? "更新"
+          : recordable === null || recordable === 0
+            ? "ルールを保存"
+            : `${recordable} 件を録るルールを保存`}
+      </button>
+    </div>
   </div>
 </aside>
 <!-- スマホの形で下から出しているときの後ろの幕。押すと閉じる -->
@@ -788,23 +794,12 @@
     border-radius: 0;
     background: var(--dp-backdrop);
   }
-  .draft-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--dp-space-3);
-  }
   .draft-head h2 {
     margin: 0;
   }
   .eyebrow {
     margin: 0 0 0.125rem;
     overflow-wrap: anywhere;
-  }
-  .close {
-    width: auto;
-    margin: 0;
-    padding: var(--dp-space-1);
   }
   .draft-body {
     display: flex;
@@ -820,7 +815,7 @@
      * 行の塗りは左右に字の余白ぶんはみ出し、字の左端は上の欄の左端にそろえる
      */
   .rows {
-    margin-inline: -0.75rem;
+    margin-inline: calc(-1 * var(--dp-space-3));
     padding: 0;
   }
   .row {
@@ -846,7 +841,7 @@
   label.row select {
     width: auto;
     margin: 0;
-    padding-block: 0.25rem;
+    padding-block: var(--dp-space-1);
     border: 0;
     background-color: transparent;
     color: var(--dp-muted);
@@ -856,7 +851,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--dp-space-2);
-    padding: var(--dp-space-1) 0.75rem var(--dp-space-3);
+    padding: var(--dp-space-1) var(--dp-space-3) var(--dp-space-3);
   }
   .group-title {
     font-size: var(--dp-text-xs);
@@ -872,7 +867,7 @@
     margin: 0.125rem 0;
   }
   .children {
-    margin-inline-start: 1.5rem;
+    margin-inline-start: var(--dp-space-5);
   }
   /* 時刻の欄は「19:00 から 20:00 まで」と 1 行に。狭い幅では「から」の後ろで折り返す */
   .times {
@@ -932,8 +927,18 @@
     flex-wrap: wrap;
     gap: var(--dp-space-2);
   }
-  .save {
-    width: 100%;
+  /* 広い形 (右の列) は保存だけを列の幅いっぱいに。スマホの形は「閉じる」を左端、保存を右端に置き、全幅にしない */
+  .foot-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--dp-space-2);
+  }
+  .foot-actions > button {
+    width: auto;
     margin: 0;
+  }
+  :global(:where(html:not([data-phone]))) .save {
+    flex: 1 1 0%;
   }
 </style>

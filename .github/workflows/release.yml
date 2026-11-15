@@ -46,7 +46,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
 
-# **出したものには出所の証明 (attestation) を付けます** (actions/attest)。イメージ3つと、Windows・Mac の denpa 本体の zip・tar.gz と、
+# **出したものには出所の証明 (attestation) を付けます** (actions/attest)。イメージ3つと、Windows・Mac の denpa 本体の zip・tar.gz と、Android の APK と、
 # リリースに添えるエージェントの tar.gz / zip。.sha256 は同じリリースに置くので、壊れた
 # ファイルは見分けられても、すり替えまでは防げない — 証明はこのリポジトリのこの workflow が
 # 作ったことを Sigstore の署名で示すので、`gh attestation verify <ファイル> -R danything/denpa`
@@ -254,10 +254,11 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
       # 名前はタグから `v` を落としたバージョンで (denpa-agent-1.2.3-darwin-arm64.tar.gz)。
-      # 中身はエージェントとメニューバーのアプリ (tray/mac。ad-hoc で署名する) の実行ファイル 2 個。.sha256 は install.sh が確かめる
+      # 中身はエージェントとメニューバーのアプリ (tray/mac。ad-hoc で署名する) の実行ファイル 2 個と、エージェントに埋め込んだ Siano のファームウェアの許諾の文面 (LICENCE.siano)。
+      # .sha256 は install.sh が確かめる
       - name: Build
         id: build
         run: |
@@ -270,7 +271,9 @@ jobs:
           # ad-hoc 署名 (curl で取ったものには隔離の印が付かないので、Developer ID の署名と公証は要らない。docs/install-mac.md)
           codesign --force --sign - out/denpa-agent out/denpa-tray
           asset="denpa-agent-${tag#v}-darwin-arm64.tar.gz"
-          tar -czf "$asset" -C out denpa-agent denpa-tray
+          # Siano のファームウェアはエージェントに埋め込んである。許諾の文面を添える (agent/Denpa.Agent/firmware/README.md)
+          cp agent/Denpa.Agent/firmware/LICENCE.siano out/
+          tar -czf "$asset" -C out denpa-agent denpa-tray LICENCE.siano
           shasum -a 256 "$asset" > "$asset.sha256"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
@@ -305,9 +308,16 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: "10.0.403"
+          dotnet-version: "11.0.100"
 
-      # denpa-agent-1.2.3-windows-x64.zip (中身は denpa-agent.exe と、通知領域のアイコンの denpa-tray.exe。tray/Denpa.Tray) と
+      # wdi-simple.exe (libwdi。Zadig のコマンドライン版)。install.ps1 -WinUsb がチューナーのドライバを WinUSB に替えるのに使う。
+      # libwdi のリリースには Zadig しか無いので、決めたタグのソースからビルドする (コミットと sha256 で確かめる。scripts/build-wdi-simple.ps1)
+      - name: Build wdi-simple (libwdi)
+        shell: pwsh
+        run: ./scripts/build-wdi-simple.ps1 -Out out\libwdi
+
+      # denpa-agent-1.2.3-windows-x64.zip (中身は denpa-agent.exe と、通知領域のアイコンの denpa-tray.exe (tray/Denpa.Tray) と、
+      # wdi-simple.exe とそのライセンスの文書を入れた libwdi フォルダと、エージェントに埋め込んだ Siano のファームウェアの許諾の文面 LICENCE.siano) と
       # .sha256 (shasum と同じ形式)
       - name: Build
         id: build
@@ -318,7 +328,9 @@ jobs:
           dotnet publish agent/Denpa.Agent/Denpa.Agent.csproj -c Release -r win-x64 -p:InformationalVersion="$tag" -o out
           dotnet publish tray/Denpa.Tray/Denpa.Tray.csproj -c Release -r win-x64 -o out
           asset="denpa-agent-${tag#v}-windows-x64.zip"
-          pwsh -NoProfile -Command "Compress-Archive -Path out/denpa-agent.exe, out/denpa-tray.exe -DestinationPath '$asset'"
+          # Siano のファームウェアはエージェントに埋め込んである。許諾の文面を添える (agent/Denpa.Agent/firmware/README.md)
+          cp agent/Denpa.Agent/firmware/LICENCE.siano out/
+          pwsh -NoProfile -Command "Compress-Archive -Path out/denpa-agent.exe, out/denpa-tray.exe, out/libwdi, out/LICENCE.siano -DestinationPath '$asset'"
           sha256sum "$asset" > "$asset.sha256"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
@@ -405,6 +417,45 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$TAG" dist/denpa-*-darwin-arm64.tar.gz dist/denpa-*-darwin-arm64.tar.gz.sha256 --clobber -R "${{ github.repository }}"
+
+  # **Android のアプリ (arm64) も添える** (`denpa-<バージョン>-android-arm64.apk`。docs/install-android.md)。組み方と署名は android.yml。
+  # 署名の鍵は secrets にあり、ここから android.yml にだけ渡す。Windows・Mac と同じく、リリースを作ったときだけ組む
+  android:
+    if: github.event_name == 'release'
+    uses: ./.github/workflows/android.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+    secrets:
+      DENPA_ANDROID_KEYSTORE_BASE64: ${{ secrets.DENPA_ANDROID_KEYSTORE_BASE64 }}
+      DENPA_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.DENPA_ANDROID_KEYSTORE_PASSWORD }}
+      DENPA_ANDROID_KEY_ALIAS: ${{ secrets.DENPA_ANDROID_KEY_ALIAS }}
+      DENPA_ANDROID_KEY_PASSWORD: ${{ secrets.DENPA_ANDROID_KEY_PASSWORD }}
+
+  android-attach:
+    if: github.event_name == 'release'
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: denpa-android-arm64
+          path: dist
+
+      - name: Attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/denpa-*-android-arm64.apk
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/denpa-*-android-arm64.apk dist/denpa-*-android-arm64.apk.sha256 --clobber -R "${{ github.repository }}"
 
   # **Helm chart もリリースのたびに出す** (README が案内している `oci://ghcr.io/danything/charts/…`)。
   # chart のバージョン (Chart.yaml の version) とアプリのバージョン (appVersion) をリリースの

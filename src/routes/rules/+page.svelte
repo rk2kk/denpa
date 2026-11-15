@@ -133,7 +133,7 @@
     (絞り込み・並び・集計。ドキュメントの目次と同じ行)。スマホの形 (下のタブがある形。`#lib/phone-form.ts`) では、
     絞り込みと並びを細い 1 行にまとめ、画面の下、タブのすぐ上に置く (押すものは指の届く下に)
 -->
-<div class="rules-board">
+<div class="rules-board with-side">
   <div class="rules-list" data-testid="rule-list">
     <!-- スマホの形の集計。広い形ではサイドバーの「集計」 -->
     <p class="narrow-summary small muted" data-testid="rule-summary-narrow">
@@ -149,7 +149,7 @@
         付け替える局を選ばせる。自動では付け替えない (間違えると別の局を録る)
     -->
     {#if data.orphans.length > 0}
-      <div class="notice info remap" data-testid="rule-orphans">
+      <div class="notice info" data-testid="rule-orphans">
         <p class="small">
           選局できなくなった局を指しているルールがあります。このままでは録画しません。付け替える局を選ぶと、その局の番組を録画します
         </p>
@@ -283,8 +283,8 @@
             </div>
           </li>
         {:else}
-          <li class="none small muted" data-testid="rule-none">
-            この絞り込みに当たるルールはありません
+          <li class="empty-state" data-testid="rule-none">
+            <p class="bold">当てはまるものはありません</p>
           </li>
         {/each}
         {#if paged.more}
@@ -298,7 +298,7 @@
 
   <!-- 広い形だけ。絞り込み・並び・集計 (ホームのサイドバーと同じ行) -->
   <aside
-    class="rules-side side-panel"
+    class="rules-side side-panel side-column"
     aria-label="絞り込みと並び"
     data-testid="rule-sidebar"
   >
@@ -340,11 +340,11 @@
     <dl class="side-list stats" data-testid="rule-summary">
       <div class="side-item static">
         <dt>これから 7 日の予約</dt>
-        <dd class="num">{data.summary.weekReservations} 件</dd>
+        <dd class="side-sub num">{data.summary.weekReservations} 件</dd>
       </div>
       <div class="side-item static">
         <dt>この 7 日で録れた</dt>
-        <dd class="num">{data.summary.lastWeekRecordings} 本</dd>
+        <dd class="side-sub num">{data.summary.lastWeekRecordings} 本</dd>
       </div>
     </dl>
     <div class="side-foot">
@@ -412,42 +412,21 @@
      * 浮いたヘッダーの裏を流れる。768px からは左右と下を main の余白の外まで広げ、広い形では右にサイドバーを置いて
      * 窓の右端に付け、ヘッダーの下に貼り付ける (中身があふれたときだけサイドバーの中で巻き取る。`app.css` の `.side-panel`)
      */
-  .rules-board {
-    display: flex;
-    flex-direction: column;
-    gap: var(--dp-space-3);
-  }
   .rules-list {
     min-width: 0;
-  }
-  .rules-side {
-    display: none;
   }
   @media (min-width: 768px) {
     .rules-board {
       margin: 0 calc(-1 * var(--dp-gutter)) calc(-1 * var(--dp-gutter));
-      gap: 0;
     }
     .rules-list {
       padding: 0 var(--dp-gutter) var(--dp-gutter);
     }
   }
-  /* 広い形 (スマホの形でないとき。`#lib/phone-form.ts`)。テーブルトップは 1000px 以上でもスマホの形なので、幅では分けない */
-  :global(:where(html:not([data-phone]))) .rules-board {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 20rem;
-  }
-  :global(:where(html:not([data-phone]))) .rules-side {
-    display: flex;
-  }
+  /* 一覧と右の列の組み方は録画・切り抜きと同じ (`app.css` の `.with-side`)。広い形 (`#lib/phone-form.ts`) ではスマホの形の 1 行と集計を隠す */
   :global(:where(html:not([data-phone]))) .rules-bar,
   :global(:where(html:not([data-phone]))) .narrow-summary {
     display: none;
-  }
-  @media (min-width: 1600px) {
-    :global(:where(html:not([data-phone]))) .rules-board {
-      grid-template-columns: minmax(0, 1fr) 22rem;
-    }
   }
   .stats {
     margin: 0;
@@ -457,9 +436,6 @@
     margin: 0;
     font-weight: var(--dp-weight);
   }
-  .stats dd {
-    color: var(--dp-muted);
-  }
   /*
      * 「ルールを作る」はサイドバーの下端。低い画面でサイドバーの中身があふれても、下に貼り付けて見えたままにする
      * (下の余白はサイドバーの余白 (`--dp-side-pad-end`) を打ち消して自分で持つ。貼り付く位置もその余白の内側から測られるので同じだけ下げる)
@@ -468,7 +444,7 @@
     position: sticky;
     bottom: calc(-1 * var(--dp-side-pad-end));
     margin-bottom: calc(-1 * var(--dp-side-pad-end));
-    padding: 1rem 0.75rem var(--dp-side-pad-end);
+    padding: var(--dp-space-4) var(--dp-space-3) var(--dp-side-pad-end);
     background: var(--dp-bg);
   }
   .side-foot .button {
@@ -482,9 +458,9 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 0.25rem 0.75rem;
+    gap: var(--dp-space-1) var(--dp-space-3);
     min-height: var(--dp-item-h);
-    padding: 0.5rem 0.75rem;
+    padding: var(--dp-space-2) var(--dp-space-3);
   }
   .row-body {
     display: flex;
@@ -498,7 +474,7 @@
   .name {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--dp-space-2);
     min-width: 0;
   }
   .meta {
@@ -507,7 +483,7 @@
     white-space: nowrap;
   }
   .sep {
-    margin-inline: 0.25rem;
+    margin-inline: var(--dp-space-1);
   }
   /* 無効のルールは中身を控えた字にする (印の「無効」と合わせて、色だけに頼らない)。透かすと 4.5:1 を割る */
   .row.off .row-body {
@@ -524,7 +500,6 @@
     margin: 0;
     padding: var(--dp-space-3);
     text-align: center;
-    list-style: none;
   }
   .narrow-summary {
     margin: 0 0 var(--dp-space-2);
@@ -535,7 +510,7 @@
     flex: none;
     width: auto;
     margin: 0;
-    padding-block: 0.25rem;
+    padding-block: var(--dp-space-1);
     border: 0;
     background-color: transparent;
     color: var(--dp-muted);

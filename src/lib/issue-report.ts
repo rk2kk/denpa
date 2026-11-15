@@ -25,7 +25,7 @@ export interface LogLine {
 }
 
 export interface LogSource {
-  /** 見出しに出す名前 (サーバ・エージェント) */
+  /** 見出しに出す名前 (「サーバ」「エージェント「<名前>」」) */
   label: string;
   lines: LogLine[];
   /** `level` が本物か。エージェントのログは字から推し量ったものなので、行に `[warn]` を付けない */
@@ -193,7 +193,7 @@ export function initialLogs(
 }
 
 /**
- * **開く URL。** 確かめる画面で書き足して上限を超えたら、ログの頭 (古いほう) から削り、削った数を頭に書く。
+ * **開く URL。** 確かめる画面で書き足して上限を超えたら、ログの先頭 (古いほう) から削り、削った数を先頭に書く。
  * タイトルと環境が長すぎるときは、それぞれの上限で切る
  */
 export function issueUrl(
@@ -217,7 +217,7 @@ export function issueUrl(
   const room = limit - baseLength(fields);
   let size = lines.reduce((sum, line) => sum + cost(line), 0) - 3; // 最後の行に改行は無い
   let dropped = 0;
-  const note = (count: number) => `(長いので頭の ${count} 行を省きました)`;
+  const note = (count: number) => `(長いので先頭の ${count} 行を省きました)`;
   while (dropped < lines.length && size + cost(note(dropped + 1)) > room) {
     size -= cost(lines[dropped]!);
     dropped += 1;
@@ -225,7 +225,7 @@ export function issueUrl(
   const kept = lines.slice(dropped);
   const logs = [note(dropped), ...kept].join("\n");
   const url = make(logs);
-  // 頭の 1 行も入らない (タイトルが上限まで長いなど) ときは、ログを空にする
+  // 先頭の 1 行も入らない (タイトルが上限まで長いなど) ときは、ログを空にする
   return url.length <= limit
     ? { url, dropped }
     : { url: make(""), dropped: lines.length };
@@ -274,6 +274,7 @@ export const CCID_DRIVER: Record<"apple" | "ifd-ccid", string> = {
 };
 
 const OS_NAME: Record<string, string> = {
+  android: "Android",
   linux: "Linux",
   macos: "macOS",
   windows: "Windows",
@@ -281,7 +282,7 @@ const OS_NAME: Record<string, string> = {
 
 /**
  * denpa とエージェントのバージョンが同じか。**2 つは揃えて使うもの**。
- * 頭の `v` は見ない (`v1.2.3` と `1.2.3` は同じ)。どちらも `dev` (main で組んだもの) なら同じとみる
+ * 先頭の `v` は見ない (`v1.2.3` と `1.2.3` は同じ)。どちらも `dev` (main で組んだもの) なら同じとみる
  */
 export function sameVersion(a: string, b: string): boolean {
   const bare = (version: string) => version.trim().replace(/^v/, "");
@@ -296,31 +297,47 @@ export function agentSystem(about: AgentAbout): string {
   return `${os ?? "—"}${about.arch === null ? "" : ` (${about.arch})`}`;
 }
 
-/** 報告の「環境」の欄。画面の「環境」の節と同じ中身を 1 行に */
+/** 1 台のエージェントのこと。`about` が届く前は undefined */
+export interface AgentEnvironment {
+  /** 画面に出す名前 (`agents.name`) */
+  name: string;
+  about: { about: AgentAbout | null; error: string | null } | undefined;
+}
+
+/** 1 台のエージェントの欄。CCID ドライバは macOS のエージェントだけ */
+function agentParts(denpaVersion: string, agent: AgentEnvironment): string[] {
+  const about = agent.about?.about ?? null;
+  let text = "—";
+  if (about !== null) {
+    const version = about.version ?? "不明";
+    const differs =
+      about.version !== null && !sameVersion(denpaVersion, about.version);
+    text = `${version}${differs ? " (denpa とバージョンが違います)" : ""}・${agentSystem(about)}`;
+  } else if (agent.about?.error) {
+    text = `— (${agent.about.error})`;
+  }
+  return [
+    `エージェント「${agent.name}」: ${text}`,
+    ...(about?.ccidDriver
+      ? [`CCID ドライバ「${agent.name}」: ${CCID_DRIVER[about.ccidDriver]}`]
+      : []),
+  ];
+}
+
+/** 報告の「環境」の欄。画面の「環境」の節と同じ中身を 1 行に。エージェントは 1 台ずつ並べ、1 台も無ければ「—」 */
 export function environmentText(parts: {
   denpaVersion: string;
   server: string;
-  agent: { about: AgentAbout | null; error: string | null } | undefined;
+  agents: readonly AgentEnvironment[];
   tuners: string;
   card: string;
   browser: string;
 }): string {
-  const about = parts.agent?.about ?? null;
-  let agent = "—";
-  if (about !== null) {
-    const version = about.version ?? "不明";
-    const differs =
-      about.version !== null && !sameVersion(parts.denpaVersion, about.version);
-    agent = `${version}${differs ? " (denpa とバージョンが違います)" : ""}・${agentSystem(about)}`;
-  } else if (parts.agent?.error) {
-    agent = `— (${parts.agent.error})`;
-  }
   return [
     `サーバ: ${parts.server}`,
-    `エージェント: ${agent}`,
-    ...(about?.ccidDriver
-      ? [`CCID ドライバ: ${CCID_DRIVER[about.ccidDriver]}`]
-      : []),
+    ...(parts.agents.length === 0
+      ? ["エージェント: —"]
+      : parts.agents.flatMap((agent) => agentParts(parts.denpaVersion, agent))),
     `チューナー: ${parts.tuners}`,
     `カードリーダー: ${parts.card}`,
     `ブラウザ: ${parts.browser}`,

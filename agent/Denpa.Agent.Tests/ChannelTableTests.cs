@@ -23,12 +23,12 @@ public class ChannelTableTests
     [Test]
     public async Task CATV_は地上波と同じ選局で周波数だけが違う()
     {
-        // ミッドバンド C13-C22 (C13 = 111.142857 MHz) とスーパーハイバンド C23-C63 (C23 = 225.142857 MHz)
+        // ミッドバンド C13-C22 (C13 = 111.142857 MHz。C22 だけは 6 MHz おきの並びから 2 MHz 上) とスーパーハイバンド C23-C63 (C23 = 225.142857 MHz)
         var c13 = ChannelTable.Parse("C13")!;
         await Assert.That(c13.Type).IsEqualTo("GR");
         await Assert.That(c13.Delivery).IsEqualTo(ChannelTable.SysIsdbt);
         await Assert.That(c13.Frequency).IsEqualTo(111_142_857u);
-        await Assert.That(ChannelTable.Parse("C22")!.Frequency).IsEqualTo(165_142_857u);
+        await Assert.That(ChannelTable.Parse("C22")!.Frequency).IsEqualTo(167_142_857u);
         await Assert.That(ChannelTable.Parse("C23")!.Frequency).IsEqualTo(225_142_857u);
         await Assert.That(ChannelTable.Parse("C25")!.Frequency).IsEqualTo(237_142_857u);
         await Assert.That(ChannelTable.Parse("C63")!.Frequency).IsEqualTo(465_142_857u);
@@ -72,7 +72,7 @@ public class ChannelTableTests
     [Test]
     public async Task TSID_の無い衛星の名前は中継器の先頭の_TS()
     {
-        // NIT を読む入口。どの TS にもネットワーク全体の NIT が流れているので、選り分けなくてよい
+        // denpa が NIT を読むときに選局する。どの TS にもネットワーク全体の NIT が流れているので、選り分けなくてよい
         var entry = ChannelTable.Parse("BS15")!;
         await Assert.That(entry.Frequency).IsEqualTo(ChannelTable.Parse("BS15:16625")!.Frequency);
         await Assert.That(entry.StreamId).IsEqualTo(ChannelTable.NoStreamId);
@@ -137,7 +137,150 @@ public class ChannelTableTests
     [Arguments("")]
     [Arguments("T")]
     [Arguments("SKY1")]
+    [Arguments("H00")]      // J.83B は H01 から
+    [Arguments("H106")]     // H105 まで
+    [Arguments("H")]
+    [Arguments("H40:1")]
     public async Task 受け取らない名前(string name)
+    {
+        await Assert.That(ChannelTable.Parse(name)).IsNull();
+    }
+
+    [Test]
+    public async Task J83B_は_H01_から_H105_の名前で_SKY_の選局になる()
+    {
+        // 93.25 MHz から 6.5 MHz おきの中心周波数 (CXD2856 の仕様書 7.1)。地上波と同じく Hz で、1/7 MHz はずらさない
+        var h01 = ChannelTable.Parse("H01")!;
+        await Assert.That(h01.Type).IsEqualTo("SKY");
+        await Assert.That(h01.Delivery).IsEqualTo(ChannelTable.SysDvbcAnnexB);
+        await Assert.That(h01.Cable).IsTrue();
+        await Assert.That(h01.Satellite).IsFalse();
+        await Assert.That(h01.StreamId).IsEqualTo(ChannelTable.NoStreamId);
+        await Assert.That(h01.Frequency).IsEqualTo(93_250_000u);
+        await Assert.That(ChannelTable.Parse("H40")!.Frequency).IsEqualTo(346_750_000u);
+        await Assert.That(ChannelTable.Parse("H105")!.Frequency).IsEqualTo(769_250_000u);
+        // 0 詰めは無くてもよい
+        await Assert.That(ChannelTable.Parse("H1")).IsEqualTo(h01);
+        // ずらした周波数を持たないもの
+        await Assert.That(h01.ShiftedFrequency).IsNull();
+        foreach (var name in new[] { "H10", "H13", "H25", "H29", "H43", "H45" })
+            await Assert.That(ChannelTable.Parse(name)!.ShiftedFrequency).IsNull();
+    }
+
+    [Test]
+    [Arguments("H11", 158_250_000u, 159_250_000u)]  // +1 MHz
+    [Arguments("H12", 164_750_000u, 165_750_000u)]
+    [Arguments("H26", 255_750_000u, 259_750_000u)]  // +4 MHz
+    [Arguments("H27", 262_250_000u, 266_250_000u)]
+    [Arguments("H28", 268_750_000u, 272_750_000u)]
+    [Arguments("H44", 372_750_000u, 374_950_000u)]  // +2.2 MHz
+    public async Task 地域によってずらして送られるチャンネルはずらした周波数も持つ(string name, uint frequency, uint shifted)
+    {
+        // CXD2856 の仕様書 7.1。どちらで送られているかは選局してみるまで分からない
+        var tuning = ChannelTable.Parse(name)!;
+        await Assert.That(tuning.Frequency).IsEqualTo(frequency);
+        await Assert.That(tuning.ShiftedFrequency).IsEqualTo(shifted);
+    }
+
+    [Test]
+    [Arguments("QV1", 93_000_000u)]      // VHF 1〜3 は 93 MHz から 6 MHz おき
+    [Arguments("QV3", 105_000_000u)]
+    [Arguments("QC13", 111_000_000u)]    // C13〜C21 は 111 MHz から
+    [Arguments("QC21", 159_000_000u)]
+    [Arguments("QC22", 167_000_000u)]    // C22 と VHF 4〜7 は 6 MHz おきの並びから 2 MHz ずれている
+    [Arguments("QV4", 173_000_000u)]
+    [Arguments("QV7", 191_000_000u)]
+    [Arguments("QV8", 195_000_000u)]     // VHF 8〜12 は 195 MHz から
+    [Arguments("QV12", 219_000_000u)]
+    [Arguments("QC23", 225_000_000u)]    // C23〜C63 は 225 MHz から
+    [Arguments("QC51", 393_000_000u)]
+    [Arguments("QC63", 465_000_000u)]
+    [Arguments("QU13", 473_000_000u)]    // UHF 13〜62 は 473 MHz から
+    [Arguments("QU20", 515_000_000u)]
+    [Arguments("QU62", 767_000_000u)]
+    public async Task ISDB_C_は_QC_QU_QV_の名前で中心周波数の選局になる(string name, uint frequency)
+    {
+        // CXD2856 の仕様書 8.2 の表。地上波や CATV のパススルー (C13〜C63) と違って 1/7 MHz は足さない
+        var tuning = ChannelTable.Parse(name)!;
+        await Assert.That(tuning.Frequency).IsEqualTo(frequency);
+        await Assert.That(tuning.Type).IsEqualTo(ChannelTable.Catv);
+        await Assert.That(tuning.Delivery).IsEqualTo(ChannelTable.SysIsdbc);
+        await Assert.That(tuning.IsdbC).IsTrue();
+        // J.83B とは別の方式として見分ける
+        await Assert.That(tuning.Cable).IsFalse();
+        await Assert.That(tuning.Satellite).IsFalse();
+        await Assert.That(tuning.StreamId).IsEqualTo(ChannelTable.NoStreamId);
+        await Assert.That(tuning.TsmfIndex).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task ISDB_C_の名前の後ろに_TSMF_の何本目の_TS_かを付けられる()
+    {
+        // 有効な TS を相対 TS 番号の小さい順に並べたときの 0〜14 本目 (CXD2856 の仕様書 8.7)
+        var plain = ChannelTable.Parse("QC30")!;
+        var third = ChannelTable.Parse("QC30:2")!;
+        await Assert.That(third.TsmfIndex).IsEqualTo(2);
+        await Assert.That(third.Frequency).IsEqualTo(plain.Frequency);
+        await Assert.That(ChannelTable.Parse("QC30:0")).IsEqualTo(plain);
+        await Assert.That(ChannelTable.Parse("QU13:14")!.TsmfIndex).IsEqualTo(14);
+        // 0 詰めは無くてもよい
+        await Assert.That(ChannelTable.Parse("QV01")).IsEqualTo(ChannelTable.Parse("QV1"));
+        // J.83B と ISDB-T の CATV (C13〜C63) はいままでどおり
+        await Assert.That(ChannelTable.Parse("C30")!.IsdbC).IsFalse();
+        await Assert.That(ChannelTable.Parse("C30")!.Frequency).IsEqualTo(267_142_857u);
+        await Assert.That(ChannelTable.Parse("H40")!.IsdbC).IsFalse();
+    }
+
+    [Test]
+    public async Task ISDB_C_は_QF_と_kHz_で周波数を直に指せる()
+    {
+        // ケーブル局の NIT に、選局表の並びに乗らない周波数が載っていたときに denpa が使う
+        var direct = ChannelTable.Parse("QF246500")!;
+        await Assert.That(direct.Frequency).IsEqualTo(246_500_000u);
+        await Assert.That(direct.IsdbC).IsTrue();
+        await Assert.That(direct.Type).IsEqualTo(ChannelTable.Catv);
+        await Assert.That(direct.ShiftedFrequency).IsNull();
+        await Assert.That(ChannelTable.Parse("QF246500:1")!.TsmfIndex).IsEqualTo(1);
+        // 並びの上と同じ周波数でも、名前が違えば別のもの (ずらした周波数は持たない)
+        await Assert.That(ChannelTable.Parse("QF243000")!.Frequency).IsEqualTo(ChannelTable.Parse("QC26")!.Frequency);
+        await Assert.That(ChannelTable.Parse("QF90000")!.Frequency).IsEqualTo(90_000_000u);
+        await Assert.That(ChannelTable.Parse("QF770000")!.Frequency).IsEqualTo(770_000_000u);
+        // 範囲の外・7 桁・数字でないもの・TSMF の番号が大きすぎるものは受けない
+        foreach (var bad in new[] { "QF89999", "QF770001", "QF1000000", "QF", "QFx", "QF246500:15" })
+            await Assert.That(ChannelTable.Parse(bad)).IsNull();
+    }
+
+    [Test]
+    [Arguments("QC24", 231_000_000u, 233_000_000u)]
+    [Arguments("QC25", 237_000_000u, 239_000_000u)]
+    [Arguments("QC26", 243_000_000u, 245_000_000u)]
+    [Arguments("QC27", 249_000_000u, 251_000_000u)]
+    public async Task ISDB_C_の_C24_から_C27_は_2_MHz_ずらした周波数も持つ(string name, uint frequency, uint shifted)
+    {
+        // どちらで送られているかは確かめられていない (CXD2856 の仕様書 8.2)。表の周波数を先に試す
+        var tuning = ChannelTable.Parse(name)!;
+        await Assert.That(tuning.Frequency).IsEqualTo(frequency);
+        await Assert.That(tuning.ShiftedFrequency).IsEqualTo(shifted);
+        foreach (var other in new[] { "QC22", "QC23", "QC28", "QV4", "QU24" })
+            await Assert.That(ChannelTable.Parse(other)!.ShiftedFrequency).IsNull();
+    }
+
+    [Test]
+    [Arguments("Q")]
+    [Arguments("QC")]
+    [Arguments("QC12")]     // CATV の帯域は C13 から
+    [Arguments("QC64")]     // C63 まで
+    [Arguments("QU12")]     // UHF は 13 から
+    [Arguments("QU63")]     // 62 まで
+    [Arguments("QV0")]      // VHF は 1 から
+    [Arguments("QV13")]     // 12 まで
+    [Arguments("QX30")]
+    [Arguments("QC30:")]
+    [Arguments("QC30:15")]  // TSMF の TS は 0〜14 本目
+    [Arguments("QC30:1x")]
+    [Arguments("QC30:100")]
+    [Arguments("QC30/152")]
+    public async Task ISDB_C_の読めない名前は受け取らない(string name)
     {
         await Assert.That(ChannelTable.Parse(name)).IsNull();
     }

@@ -2,7 +2,7 @@
   /**
    * **一覧の下の細い 1 行** (サイドバーの無いスマホの形だけ。下のタブのすぐ上に貼り付く)。絞り込みのチップ (件数付き。1 回押せば絞れる。
    * 横に流せる) と、見てほしいこと (競合・失敗・録り逃し・CM の判定) のうち件数のあるものを注意の色のチップで。
-   * 右の「⋯」に状態 (エンコード・空き。押せない頭) と表示の切り替え。
+   * 右の「⋯」に状態 (エンコード・空き。押せない先頭) と表示の切り替え。
    * 広い形では同じものをサイドバー (`HomeAside`) に置き、この行は出さない
    */
   import Ellipsis from "~icons/lucide/ellipsis";
@@ -10,7 +10,7 @@
 
   import Menu from "#lib/components/Menu.svelte";
   import Icon from "#lib/components/player/Icon.svelte";
-  import { ATTENTION_FILTERS, FILTERS } from "#lib/timeline.js";
+  import { FILTERS, shownAttention } from "#lib/timeline.js";
 
   import type { HomeControls } from "./context";
   import HomeState from "./HomeState.svelte";
@@ -20,10 +20,8 @@
     $props();
 
   let viewOpen = $state(false);
-  /** 見てほしいことのチップ。件数のあるものだけ (選んでいるものは 0 件でも残す。外せるように) */
-  const attention = $derived(
-    ATTENTION_FILTERS.filter((f) => counts[f.id] > 0 || filter === f.id),
-  );
+  /** 見てほしいことのチップ (`shownAttention`) */
+  const attention = $derived(shownAttention(counts, filter));
 </script>
 
 <div class="t-toolbar dock" data-testid="timeline-toolbar">
@@ -87,7 +85,7 @@
         >
       </button>
     {/snippet}
-    <!-- 状態は押せない頭 (サイドバーの無い幅でも読めるように) -->
+    <!-- 状態は押せない先頭 (サイドバーの無い幅でも読めるように) -->
     {#if encoding.length > 0 || capacity !== null}
       <div class="menu-head">
         <HomeState {encoding} {capacity} where="menu" />

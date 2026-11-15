@@ -3,7 +3,7 @@
  * コマごとに PNG を組み直し ([png.ts](png.ts) の applyClut で CLUT の色を入れる)、動かすのは描く側
  * ([render.ts](render.ts))。
  *
- * 放送の MNG は MNG の一部だけを使う (STD-B24 第二編 8.2.4・付属 2 4.8.5.3)。読むのは:
+ * 放送の MNG は MNG の一部だけを使う (STD-B24 第二編 8.2.4・付属 2 4.8.5.3)。読むのは次のチャンク。
  *
  * - MHDR: 大きさと 1 秒の刻みの数
  * - FRAM: 重ね方 (1・2 は前のコマに重ねる、3・4 は消してから描く) と、コマの間隔 (刻み)
@@ -78,7 +78,7 @@ export function parseMng(data: Uint8Array): Mng | null {
         if (length >= 2) {
           let field = body + 1;
           while (field < body + length && data[field] !== 0) field++;
-          // 名前の終わりの 0 の次から: 間隔を変えるか・時間切れ・切り取り・同期 (各 1)・間隔 (4)
+          // 名前の終わりの 0 の次から、間隔を変えるか・時間切れ・切り取り・同期 (各 1)・間隔 (4)
           const change = data[field + 1];
           if (field + 9 > body + length) break;
           const value = view.getUint32(field + 5);

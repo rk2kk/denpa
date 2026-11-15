@@ -1,4 +1,5 @@
-import { agentFetch } from "./agent-client";
+import { fetchAgent } from "./agent-client";
+import type { Agent } from "./agents";
 import { config } from "./config";
 import { chunks } from "./stream";
 
@@ -15,36 +16,29 @@ import { chunks } from "./stream";
  * | --- | --- |
  * | `tuners` | 設定の「チューナー」を更新し、開いた選局をロゴの取得が共有する |
  * | `channels` | スキャンで局が入れ替わった。取り込み直す |
+ * | `card` | カードが契約の更新 (EMM) を受け入れた。10 秒置いて契約を確かめ直す (runtime.ts) |
  *
  * スキャンの進み具合は流れてこない (走らせているのは denpa 自身。`scan.ts`)。
  */
 
 interface AgentEvent {
   name: string;
-  data: Record<string, unknown>;
 }
 
 /** つなぎ直しの待ち。すぐ繋ぎ直すと、相手が落ちている間に呼び続けることになる */
 const RETRY_MIN = 1000;
 const RETRY_MAX = 60_000;
 
-/** SSE の 1 ブロックを解釈する。`event:` と `data:` だけ見れば足りる */
+/**
+ * SSE の 1 ブロックを解釈する。読むのは `event:` だけ。エージェントの `data:` はいつも `{}` で
+ * (agent の `Events.cs`)、どのイベントも名前だけで足りる
+ */
 export function parseBlock(block: string): AgentEvent | null {
   let name = "";
-  let data = "";
   for (const line of block.split("\n")) {
     if (line.startsWith("event:")) name = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
   }
-  if (name === "") return null;
-  try {
-    return {
-      name,
-      data: data === "" ? {} : (JSON.parse(data) as Record<string, unknown>),
-    };
-  } catch {
-    return { name, data: {} };
-  }
+  return name === "" ? null : { name };
 }
 
 /**
@@ -68,7 +62,19 @@ export async function* blocks(
 }
 
 /**
- * 繋ぎっぱなしにして、届いたものを渡す。切れたら間を置いて繋ぎ直す。
+ * **繋がらないと知らせたエージェントと、繋がらなくなった時刻** (`agents.id` →)。猶予 (`agentDownGrace`) を超えて
+ * 繋がらないと決めたものだけ入れ、繋がったら消す。設定の「エージェント」の 2 段目に出す (`agentDownSince`)
+ */
+const down = new Map<number, number>();
+
+/** 猶予を超えて繋がらないエージェントの、繋がらなくなった時刻。繋がっている・猶予の中なら null */
+export function agentDownSince(agent: number): number | null {
+  return down.get(agent) ?? null;
+}
+
+/**
+ * 1 台のエージェントに繋ぎっぱなしにして、届いたものを渡す。切れたら間を置いて繋ぎ直す。
+ * エージェントごとに 1 つずつ呼ぶ (`runtime.ts` が全部のエージェントに)。
  * 戻り値を呼ぶと止まる。
  *
  * `onReachable` は**繋がる/繋がらないが切り替わったときだけ**呼ぶ。一瞬の切れで
@@ -76,10 +82,15 @@ export async function* blocks(
  * すんなり繋がったときは何も呼ばない (「復帰」ではないため)。`false` を出した
  * あとに繋がったときだけ `true`。エージェントが黙って落ちても、録画が失敗するまで
  * 気付けなかったのを埋める (webhook は `runtime.ts` が繋ぐ)
+ *
+ * `onSubscribe` は購読が始まるたびに (起動時の 1 回目も、切れて繋ぎ直したときも) 呼ぶ。
+ * 起動時に局を読めなかったエージェントを、繋がったところで取り込み直すのに使う (`runtime.ts`)
  */
 export function listen(
+  agent: Agent,
   onEvent: (event: AgentEvent) => void,
   onReachable?: (up: boolean) => void,
+  onSubscribe?: () => void,
 ): () => void {
   let stopped = false;
   const controller = new AbortController();
@@ -92,7 +103,7 @@ export function listen(
   const loop = async () => {
     while (!stopped) {
       try {
-        const res = await agentFetch("/denpa/events", {
+        const res = await fetchAgent(agent, "/denpa/events", {
           signal: controller.signal,
           headers: { Accept: "text/event-stream" },
         });
@@ -103,20 +114,25 @@ export function listen(
         // 1 分待つ、ということにならないように
         retry = RETRY_MIN;
         downSince = null;
+        down.delete(agent.id);
         // 落ちていると知らせたあとに繋がったときだけ「復帰」を鳴らす
         if (reachable === false) onReachable?.(true);
         reachable = true;
-        console.log("[agent] 通知の購読を開始しました");
+        console.log(`[agent] ${agent.name} の通知の購読を開始しました`);
+        onSubscribe?.();
 
         for await (const block of blocks(res.body)) {
           const event = parseBlock(block);
           if (event !== null) onEvent(event);
         }
-        if (!stopped) console.warn("[agent] 通知が途切れました。繋ぎ直します");
+        if (!stopped)
+          console.warn(
+            `[agent] ${agent.name} の通知が途切れました。繋ぎ直します`,
+          );
       } catch (error) {
         if (stopped) return;
         console.warn(
-          `[agent] 通知に繋げません (${Math.round(retry / 1000)} 秒後に再試行): ${error}`,
+          `[agent] ${agent.name} の通知に繋げません (${Math.round(retry / 1000)} 秒後に再試行): ${error}`,
         );
       }
       // 繋がらない状態が猶予を超えて続いたら、一度だけ「落ちている」を鳴らす
@@ -126,6 +142,7 @@ export function listen(
         Date.now() - downSince >= config.agentDownGrace
       ) {
         reachable = false;
+        down.set(agent.id, downSince);
         onReachable?.(false);
       }
       if (stopped) return;
@@ -139,5 +156,6 @@ export function listen(
   return () => {
     stopped = true;
     controller.abort();
+    down.delete(agent.id);
   };
 }

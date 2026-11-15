@@ -5,6 +5,7 @@
   import { onDestroy } from "svelte";
   import ArrowLeft from "~icons/lucide/arrow-left";
 
+  import ChannelAlertDot from "#lib/components/ChannelAlertDot.svelte";
   import { SECTION_ALIASES, SETTINGS_GROUPS } from "#lib/settings-sections.js";
 
   let { children, data } = $props();
@@ -14,6 +15,11 @@
    * 下のタブ・ヘッダーの「設定」の点 (`routes/+layout.svelte` の `fresh`) からここまでをたどれるように
    */
   const freshGroup = $derived(data.update === null ? null : "general");
+  /**
+   * チャンネルのお知らせがあれば、文を出す「受信」(`reception#channels`) に印を付ける (`app.css` の `.alert-dot`)。
+   * 下のタブの「設定」の印 (`routes/+layout.svelte` の `entryMark`) からここまでをたどれるように
+   */
+  const alert = $derived(data.channelAlert);
 
   /** いま開いているグループ (`/settings/reception` なら `reception`)。`/settings` そのものなら null */
   const current = $derived(page.route.id?.split("/")[2] ?? null);
@@ -21,14 +27,14 @@
     SETTINGS_GROUPS.find((g) => g.slug === current) ?? null,
   );
 
-  /** 見えている節 (左の一覧と、狭い画面の上の行で印を付ける) */
+  /** 見えている節 (左の一覧と、狭い画面の節へ飛ぶ行で印を付ける) */
   let active = $state<string | null>(null);
 
   let main = $state<HTMLElement>();
 
   /**
-   * **グループを移ったら頭に戻す。** 巻き取るのはどの幅でも window (`routes/+layout.svelte` の `FILLED` に入れない)。
-   * 頭へは SvelteKit も戻すが、節へ滑らかに巻く設定 (下の `scroll-behavior`) のせいで、前のグループの下から頭まで巻く途中が見える。
+   * **グループを移ったら先頭に戻す。** 巻き取るのはどの幅でも window (`routes/+layout.svelte` の `FILLED` に入れない)。
+   * 先頭へは SvelteKit も戻すが、節へ滑らかに巻く設定 (下の `scroll-behavior`) のせいで、前のグループの下から先頭まで巻く途中が見える。
    * 戻る・進むはブラウザが前の位置へ帰すので触らない。`#<節>` 付きで来たらその節へ (飛ぶ途中を見せても意味が無いので、ここも滑らかにしない)
    */
   afterNavigate(({ from, to, type }) => {
@@ -54,9 +60,9 @@
   });
 
   /**
-   * **飛んだ先に、上の節が育つ間は付いていく。** 相手待ちの節 (チューナー) は骨組みのあとで本物が流れてきて
+   * **上の節の高さが変わる間は、飛んだ先に位置を合わせ直す。** 相手待ちの節 (チューナー) は骨組みのあとで本物が流れてきて
    * 背が変わるので、開いた瞬間に合わせただけでは、流れ終わったころには前の節を見ている。
-   * 自分で巻こうとしたら (ホイール・指・キー・クリック)、そこで手を離す
+   * 自分で巻こうとしたら (ホイール・指・キー・クリック)、そこで合わせ直すのをやめる
    */
   let unpin = () => {};
   const LET_GO = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
@@ -126,7 +132,7 @@
     };
 
     /*
-     * 飛んだ節の頭が止まる所から下を数える。浮いたヘッダー (`html` の `scroll-padding-top` が px で持つ。スマホは 0) と、
+     * 飛んだ節の先頭が止まる所から下を数える。浮いたヘッダー (`html` の `scroll-padding-top` が px で持つ。スマホは 0) と、
      * 節の巻き取りの余白 (スマホの形は上の安全域のぶんも入っている。下の style)。
      * ここより上に残る前の節の終わりは数えない (スマホで節へ飛んだあと、前の節に印が戻っていた)。rootMargin は px か % だけ (rem を渡すと例外になる)
      */
@@ -190,6 +196,9 @@
             data-testid="settings-nav-{g.slug}"
           >
             {g.label}
+            {#if alert !== null && g.slug === "reception"}
+              <ChannelAlertDot kind={alert.kind} />
+            {/if}
             {#if freshGroup === g.slug}
               <span
                 class="fresh-dot"
@@ -302,9 +311,9 @@
   .group-hint {
     display: none;
   }
-  /* 新しいバージョンの点 (上の `freshGroup`)。名前の後ろに並べる */
+  /* 新しいバージョンの点 (上の `freshGroup`)。名前の後ろに、チャンネルのお知らせの印 (`.alert-dot`) と同じ間を空けて並べる */
   .group-link .fresh-dot {
-    margin-inline-start: 0.375rem;
+    margin-inline-start: var(--dp-space-1);
     vertical-align: 0.1em;
   }
   /*
@@ -320,13 +329,13 @@
       display: none;
     }
     .groups {
-      margin-inline: -0.75rem;
+      margin-inline: calc(-1 * var(--dp-space-3));
     }
     /* 行どうしは線で区切らない。見出しの太字も外し、ふつうの行にする (下に中身の 1 行) */
     .group-link {
       display: block;
       margin: 0;
-      padding-block: 0.625rem;
+      padding-block: var(--dp-space-2);
       color: inherit;
       font-size: var(--dp-text-base);
       font-weight: var(--dp-weight);
@@ -433,7 +442,7 @@
     box-sizing: border-box;
     height: var(--jump-h);
     margin: 0;
-    padding: 0.25rem 0.5rem;
+    padding: var(--dp-space-1) var(--dp-space-2);
   }
   :global(:where(html[data-phone])) .main-inner {
     padding-bottom: 3.5rem;
@@ -460,7 +469,7 @@
     align-items: center;
     gap: var(--dp-space-2);
     margin: 0;
-    padding: 0.25rem 0.5rem;
+    padding: var(--dp-space-1) var(--dp-space-2);
     overflow-x: auto;
     scrollbar-width: none;
     white-space: nowrap;

@@ -7,12 +7,13 @@
   import { resolve } from "$app/paths";
 </script>
 
+<svelte:head><title>ログアウトしました - denpa</title></svelte:head>
+
 <div class="solo glow">
   <h1>ログアウトしました</h1>
   <p>
     この端末のログイン情報を消しました。ログイン先 (IdP)
-    からはログアウトしていないので、
-    次はパスワードを聞かれずにログインできることがあります。
+    からはログアウトしていないので、次はパスワードを聞かれずにログインできることがあります。
   </p>
   <div class="actions">
     <a class="button" href={resolve("login")}>もう一度ログイン</a>

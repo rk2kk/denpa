@@ -6,21 +6,21 @@ namespace Denpa.Agent;
 
 /*
  * 富士通 MB86H47A (CECH-ZD1 J の USB ブリッジ)。**機材の事実を書き出した仕様書だけから書いた** (参考の実装のソースは見ていない)。
- * 節の番号 (「4.2」など) はその仕様書のもの。仕様書が「こちらで決めてよい」とした所 (コア 1 への指示の形など) は
- * Mb86h47Programs.cs に書いた形で決めた。
+ * 節の番号 (「4.2」など) はその仕様書のもの。仕様書が「こちらで決めてよい」とした所 (コア 1 への指示の形式など) は
+ * Mb86h47Programs.cs に書いた形式で決めた。
  *
  * ホストはベンダー要求 0xBC (メモリ要求) でブリッジのレジスタを読み書きする。メモリ要求は全部このロックで 1 つずつ通す
  * (カードの UART もメモリ要求なので、チューナーとカードが別のスレッドから呼んでも混ざらない)。
- * TS の EP 0x81 の読みはこの外 (IUsbInStream) で並べる。
+ * TS の EP 0x81 の読み出しはこの外 (IUsbInStream) で並べる。
  *
- * **I2C はコア 1 に任せ、指示は EP 0x02 の bulk の塊で送る (仕様書 5.4・5.5) 形だけ。** 実機で 3 つの形を比べた結果
+ * **I2C はコア 1 に任せ、指示は EP 0x02 の bulk の塊で送る (仕様書 5.4・5.5) 方式だけ。** 実機で 3 つの方式を比べた結果
  * (開く・選局からロック・メモリ要求の回数。ホストから直 (5.3) / コア 1 のメモリ要求のリング / コア 1 の bulk の命令):
  * 開く 385 / 167 / 182ms、ロック 3439 / 2730 / 2570ms、メモリ要求 24664 / 2360 / 1083 回。bulk の命令がいちばん速く、
- * 要求もいちばん少ないので、ほかの 2 つはコードごと外した。コア 1 が起きない・bulk に答えないときは開くのを止める
- * (仕様書 14 章の「コア 1 が動かない → 開けない」。実機では毎回起きていて、代わりの形を残す理由が無い)。
+ * 要求もいちばん少ないので、ほかの 2 つはコードごと外した。コア 1 が起動しない・bulk に応答しないときは開くのを止める
+ * (仕様書 14 章の「コア 1 が動かない → 開けない」。実機では毎回起動していて、代わりの方式を残す理由が無い)。
  */
 
-/// <summary>I2C の相手と話すインターフェース。DiB8096 はこれと待ちと覚えた値だけを受け取る</summary>
+/// <summary>I2C の相手とやり取りするインターフェース。DiB8096 はこれと待ちと保存した値だけを受け取る</summary>
 public interface II2c
 {
     void Write(byte address, ReadOnlySpan<byte> data);
@@ -68,23 +68,6 @@ public sealed class Mb86h47 : II2c
     private const byte CommandIn = 0x83;
     private const int CommandWords = Mb86h47Programs.BulkChunk / 4 - 3;
 
-    // カードの UART (13.1。PIX-DT295 の MB86M01 も同じアドレス)
-    internal const uint CardEnable = 0xFEA000;
-    internal const uint CardLines = 0xFEA004;
-    internal const uint CardBaud = 0xFEA008;
-    internal const uint CardSend = 0xFEA00C;
-    internal const uint CardControl = 0xFEA010;
-    internal const uint CardCount = 0xFEA014;
-    internal const uint CardMask = 0xFEA018;
-    internal const uint CardStatus = 0xFEA01C;
-    internal const uint CardCwt = 0xFEA020;
-    internal const uint CardBwt = 0xFEA024;
-    internal const uint CardTx = 0xFEA028;
-    internal const uint CardRx = 0xFEA02C;
-    internal const uint CardPower = 0xFEA034;
-    internal const uint CardTxLrc = 0xFEA038;
-    internal const uint CardRxLrc = 0xFEA03C;
-
     /// <summary>主 CPU の処理の書き換える 5 語と、電源投入時の値 (4.2)</summary>
     private static readonly uint[] PatchAt = [0xE9AC0, 0xE9AC4, 0xE9E0C, 0xE9E10, 0xE9D94];
 
@@ -102,6 +85,7 @@ public sealed class Mb86h47 : II2c
     private readonly IUsbDevice _usb;
     private readonly Action<string>? _trace;
     private readonly Lock _gate = new();
+    private readonly CardUart _card;
     private readonly byte[] _buffer = new byte[MaxWords * 4];
     private bool _widened;
 
@@ -110,6 +94,9 @@ public sealed class Mb86h47 : II2c
     private uint _chunkSequence;
     private int _chunkSlot;
 
+    /// <summary>bulk の塊の応答が時間内に来なかった。置き場の数がコア 1 とずれたかもしれないので、ボードは開き直す (<see cref="Zd1jBoard.Faulted"/>)</summary>
+    public bool Dead { get; private set; }
+
     // 流し始めの準備 (9.2)。待ちの間に 1 つずつ回す
     private readonly Queue<Action> _prepare = new();
     private bool _prepared;
@@ -117,7 +104,7 @@ public sealed class Mb86h47 : II2c
     /// <summary>メモリ要求の数 (速さを測るため)</summary>
     public long Requests { get; private set; }
 
-    /// <summary>I2C のやり取りの数 (書き込み・読み・読みかえ書きを 1 つずつ)</summary>
+    /// <summary>I2C のやり取りの数 (書き込み・読み出し・リード・モディファイ・ライトを 1 つずつ)</summary>
     public long I2cTransfers { get; private set; }
 
     /// <param name="trace">あれば、起動の様子 (アドレスを広げたか) を渡す (<c>--tune</c> のとき)</param>
@@ -125,6 +112,7 @@ public sealed class Mb86h47 : II2c
     {
         _usb = usb;
         _trace = trace;
+        _card = new CardUart(Read32, Write32);
     }
 
     // ---------------------------------------------------------------------
@@ -190,7 +178,7 @@ public sealed class Mb86h47 : II2c
     // 起動 (4)
     // ---------------------------------------------------------------------
 
-    /// <summary>4.1〜4.5 と、コア 1 と bulk の命令の経路 (5.4・5.5)。どこかで失敗したら投げる (開くのを止める)</summary>
+    /// <summary>4.1〜4.5 と、コア 1 と bulk の命令の経路 (5.4・5.5)。どこかで失敗したら例外を送出する (開くのを止める)</summary>
     /// <param name="stage">いまどこまで進んだか (<see cref="Zd1jBoard.Acquire(string, Func{IUsbDevice})"/> が失敗の記録に出す)</param>
     public void Start(Action<string>? stage = null)
     {
@@ -302,7 +290,7 @@ public sealed class Mb86h47 : II2c
     }
 
     private static IOException Unknown() =>
-        new($"{Zd1j.Model} のブリッジの処理が知らない中身です (仕様書 4.2 の 5 語が電源投入時の値でもこちらの書いた値でもありません)。抜いて挿し直してください");
+        new($"{Zd1j.Model} のブリッジの処理が想定外の中身です (仕様書 4.2 の 5 語が電源投入時の値でもこちらの書いた値でもありません)。抜いて挿し直してください");
 
     /// <summary>4.3 クロックと SDRAM</summary>
     private void Clocks()
@@ -343,7 +331,7 @@ public sealed class Mb86h47 : II2c
         Write32(0xFD80C4, 0);
         Write16(0x90114, 0x8008);
         Write32(0xFD8FF8, 0x06);
-        // 分周 0x08 (0x10 の倍の速さ。0x05 だと DiB8000 の初期化中に読みを落とす)
+        // 分周 0x08 (0x10 の倍の速さ。0x05 だと DiB8000 の初期化中に読み出しを落とす)
         Write32(0xFD8FF4, 0x08);
         Write32(0xFD8FE8, 0x3C);
         Write32(I2cControl, 0x40);
@@ -386,11 +374,11 @@ public sealed class Mb86h47 : II2c
 
     private static uint Box(int offset) => Core1 + Mb86h47Programs.Core1Box + (uint)offset;
 
-    /// <summary>コア 1 を置いて走らせ、生きている印が進むのを見る。進まなければ開かない (仕様書 14 章)</summary>
+    /// <summary>コア 1 を置いて走らせ、生存カウンタが進むのを確かめる。進まなければ開かない (仕様書 14 章)</summary>
     private void StartCore1()
     {
         LoadCore(Core1, Core1Program.Value);
-        // データ RAM は電源投入時の中身が不定。コア 1 が見る所を消してから走らせる
+        // データ RAM は電源投入時の中身が不定。コア 1 が読む所を消してから走らせる
         Write32(Box(Mb86h47Programs.BoxBulkEnable), 0);
         Write32(Core1, CoreRun);
         var first = Read32(Box(Mb86h47Programs.BoxAlive));
@@ -400,7 +388,7 @@ public sealed class Mb86h47 : II2c
         if (first == second) throw new IOException($"{Zd1j.Model} のブリッジのコア 1 が動いていません");
     }
 
-    /// <summary>5.5 の bulk の経路を用意して、空の塊を 1 つ送って答えを確かめる。答えなければ開かない</summary>
+    /// <summary>5.5 の bulk の経路を用意して、空の塊を 1 つ送って応答を確かめる。応答しなければ開かない</summary>
     private void StartCommandChannel()
     {
         Write32(0xFD8300, 1);
@@ -408,13 +396,13 @@ public sealed class Mb86h47 : II2c
         Modify(0xFDBC14, 0, 0x00040000);
         Modify(0xFD80B4, 0, 4);
         Write32(0xFD8510, Mb86h47Programs.BulkChunk);
-        // 置き場の塊の先頭を消す (電源投入時の SDRAM は不定。先頭が 0 の塊は見ない)
+        // 置き場の塊の先頭を消す (電源投入時の SDRAM は不定。先頭が 0 の塊はコア 1 が読み飛ばす)
         for (var slot = 0; slot < Mb86h47Programs.BulkSlots; slot++) Write32(Mb86h47Programs.BulkBuffer + (uint)(slot * Mb86h47Programs.BulkChunk), 0);
         ArmCommandDma();
         Write32(Box(Mb86h47Programs.BoxBulkEnable), Mb86h47Programs.BulkEnable);
-        // 前の会話の答えが残っていれば捨てる (EP 0x83 は 64 バイトずつ。残りは多くても置き場の数まで)
+        // 前のやり取りの応答が残っていれば捨てる (EP 0x83 は 64 バイトずつ。残りは多くても置き場の数まで)
         Span<byte> stale = stackalloc byte[64];
-        for (var i = 0; i < Mb86h47Programs.BulkSlots && _usb.InterruptRead(CommandIn, stale, 10) > 0; i++)
+        for (var i = 0; i < Mb86h47Programs.BulkSlots && _usb.Read(CommandIn, stale, 10) > 0; i++)
         {
         }
         _commands.Clear();
@@ -429,7 +417,7 @@ public sealed class Mb86h47 : II2c
     }
 
     // ---------------------------------------------------------------------
-    // I2C (5)。書き込みと読みかえ書きは 1 つずつ答えを待たずに塊に溜め、読む前と待つ前 (Flush) にまとめて送る
+    // I2C (5)。書き込みとリード・モディファイ・ライトは 1 つずつ応答を待たずに塊に溜め、読む前と待つ前 (Flush) にまとめて送る
     // ---------------------------------------------------------------------
 
     public void Write(byte address, ReadOnlySpan<byte> data)
@@ -446,7 +434,7 @@ public sealed class Mb86h47 : II2c
         lock (_gate)
         {
             I2cTransfers++;
-            if (read.Length > 32) throw new ArgumentOutOfRangeException(nameof(read));
+            if (read.Length > Mb86h47Programs.BulkReplyData) throw new ArgumentOutOfRangeException(nameof(read));
             QueueTransfer(address, write, read.Length);
             SendChunk().AsSpan(0, read.Length).CopyTo(read);
         }
@@ -457,7 +445,7 @@ public sealed class Mb86h47 : II2c
         lock (_gate)
         {
             I2cTransfers++;
-            // 読みかえ書きはコア 1 の上で済ませる (答えを待たない)
+            // リード・モディファイ・ライトはコア 1 の上で済ませる (応答を待たない)
             if (_commands.Count + 2 > CommandWords) SendChunk();
             _commands.Add(0x02000000u | ((uint)address << 16) | register);
             _commands.Add(((uint)keep << 16) | set);
@@ -478,7 +466,7 @@ public sealed class Mb86h47 : II2c
         2 => "I2C のアドレスに ACK がありません",
         3 => "I2C のデータに ACK がありません",
         4 => "I2C が固まりました",
-        _ => $"I2C で知らない誤り {code} です",
+        _ => $"I2C で不明なエラー {code} です",
     });
 
     /// <summary>バイトをビッグエンディアンの語に詰める</summary>
@@ -500,7 +488,7 @@ public sealed class Mb86h47 : II2c
         _commands.AddRange(words);
     }
 
-    /// <summary>溜めた命令を 1 つの塊で送り、答えを待つ。読んだバイトを返す</summary>
+    /// <summary>溜めた命令を 1 つの塊で送り、応答を待つ。読んだバイトを返す</summary>
     private byte[] SendChunk()
     {
         _chunkSequence = _chunkSequence == uint.MaxValue ? 1 : _chunkSequence + 1;
@@ -531,17 +519,22 @@ public sealed class Mb86h47 : II2c
         while (true)
         {
             var left = (int)((deadline - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
-            if (left <= 0) throw new IOException($"{Zd1j.Model} のブリッジのコア 1 が bulk の塊に答えません");
-            var got = _usb.InterruptRead(CommandIn, reply, left);
+            if (left <= 0)
+            {
+                // 応答が来ないと、ホストが数える置き場 (_chunkSlot) とコア 1 の置き場がずれたかもしれない。開き直すまで使わない
+                Dead = true;
+                throw new IOException($"{Zd1j.Model} のブリッジのコア 1 が bulk の塊に応答しません");
+            }
+            var got = _usb.Read(CommandIn, reply, left);
             if (got < 8) continue;
-            // 答えの語の並びは、印 (0xA5) が先頭か終わりかで見分ける (FIFO のバイトの並びは仕様書に無い)
+            // 応答の語の並びは、マーカー (0xA5) が先頭か終わりかで見分ける (FIFO のバイトの並びは仕様書に無い)
             if (reply[0] != Mb86h47Programs.BulkReplyMark && reply[3] == Mb86h47Programs.BulkReplyMark)
             {
                 for (var i = 0; i + 4 <= got; i += 4) reply.AsSpan(i, 4).Reverse();
             }
             if (reply[0] != Mb86h47Programs.BulkReplyMark) continue;
             var head = BinaryPrimitives.ReadUInt32BigEndian(reply);
-            if (((head >> 8) & 0xFFFF) != (sequence & 0xFFFF)) continue;    // 古い答え
+            if (((head >> 8) & 0xFFFF) != (sequence & 0xFFFF)) continue;    // 古い応答
             var info = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4));
             var error = (int)(head & 0xFF);
             _chunkSlot++;
@@ -549,7 +542,7 @@ public sealed class Mb86h47 : II2c
             if (error != 0)
             {
                 throw error == 6
-                    ? new IOException($"{Zd1j.Model} のブリッジのコア 1 が知らない命令を受けました (命令 {info >> 16})")
+                    ? new IOException($"{Zd1j.Model} のブリッジのコア 1 が未対応の命令を受けました (命令 {info >> 16})")
                     : I2cError(error);
             }
             var length = (int)Math.Min(info & 0xFFFF, (uint)Mb86h47Programs.BulkReplyData);
@@ -645,7 +638,7 @@ public sealed class Mb86h47 : II2c
         }
     }
 
-    /// <summary>9.3 流し始め。準備の残りを済ませ、受信側と書き手を動かす。復調器はもう出力していること</summary>
+    /// <summary>9.3 流し始め。準備の残りを済ませ、受信側と書き込み側を動かす。復調器はもう出力していること</summary>
     public void StartStream()
     {
         lock (_gate)
@@ -662,7 +655,7 @@ public sealed class Mb86h47 : II2c
         }
     }
 
-    /// <summary>9.5 流し終わりの 1〜3 (コア 0・受信側・書き手を止める)。出力のハイインピーダンスと読みの取り消しは呼ぶ側</summary>
+    /// <summary>9.5 流し終わりの 1〜3 (コア 0・受信側・書き込み側を止める)。出力のハイインピーダンスと転送要求の取り消しは呼ぶ側</summary>
     public void StopStream()
     {
         lock (_gate)
@@ -683,18 +676,18 @@ public sealed class Mb86h47 : II2c
     /// <summary>13.3 カードが挿さっているか (割り込みの状態のビット 10 が 0)</summary>
     public bool CardPresent()
     {
-        lock (_gate) return (Read32(CardStatus) & (1u << 10)) == 0;
+        lock (_gate) return (Read32(CardUart.Status) & (1u << 10)) == 0;
     }
 
     /// <summary>13.4 カードの電源を切る</summary>
     private void CardOff()
     {
-        Modify(CardLines, 0x4, 0);
-        Write32(CardCount, 0);
-        Modify(CardEnable, 0x4, 0);
-        Modify(CardLines, 0xA, 0);
-        Write32(CardMask, 1);
-        Write32(CardPower, 0);
+        Modify(CardUart.Lines, 0x4, 0);
+        Write32(CardUart.Count, 0);
+        Modify(CardUart.Enable, 0x4, 0);
+        Modify(CardUart.Lines, 0xA, 0);
+        Write32(CardUart.Mask, 1);
+        Write32(CardUart.Power, 0);
     }
 
     /// <summary>13.5 リセット。戻ったらカードが ATR を送ってくる (速さは 9600)</summary>
@@ -704,72 +697,51 @@ public sealed class Mb86h47 : II2c
         Thread.Sleep(10);
         lock (_gate)
         {
-            Write32(CardStatus, 0x3FF);
-            Write32(CardPower, 1);
-            Modify(CardLines, 0x4, 0);
-            Write32(CardCount, 0);
-            Write32(CardEnable, 0);
-            Write32(CardEnable, 7);
-            Modify(CardLines, 0, 0x8);
-            Write32(CardBaud, 0xBA7F);
+            Write32(CardUart.Status, 0x3FF);
+            Write32(CardUart.Power, 1);
+            Modify(CardUart.Lines, 0x4, 0);
+            Write32(CardUart.Count, 0);
+            Write32(CardUart.Enable, 0);
+            Write32(CardUart.Enable, 7);
+            Modify(CardUart.Lines, 0, 0x8);
+            Write32(CardUart.Baud, 0xBA7F);
         }
         Thread.Sleep(2);
         lock (_gate)
         {
-            Modify(CardLines, 0, 0x2);
-            Write32(CardRxLrc, 0x3B);
-            Write32(CardCwt, 9600);
-            Write32(CardBwt, 0);
-            Write32(CardMask, 0x1FF);
+            Modify(CardUart.Lines, 0, 0x2);
+            Write32(CardUart.RxLrc, 0x3B);
+            Write32(CardUart.Cwt, 9600);
+            Write32(CardUart.Bwt, 0);
+            Write32(CardUart.Mask, 0x1FF);
         }
         Thread.Sleep(1);
-        lock (_gate) Modify(CardLines, 0, 0x4);
+        lock (_gate) Modify(CardUart.Lines, 0, 0x4);
     }
 
-    /// <summary>13.2 速さを変える (速さ・制御・CWT・BWT の順に)</summary>
+    /// <summary>13.2 速さを変える (<see cref="CardUart.SetSpeed"/>)</summary>
     public void CardSpeed(uint baud, uint control, uint cwt, uint bwt)
     {
-        lock (_gate)
-        {
-            Write32(CardBaud, baud);
-            Write32(CardControl, control);
-            Write32(CardCwt, cwt);
-            Write32(CardBwt, bwt);
-        }
+        lock (_gate) _card.SetSpeed(baud, control, cwt, bwt);
     }
 
-    /// <summary>13.6 受けて読まれていないバイトを、<paramref name="max"/> まで読む。無ければ空</summary>
+    /// <summary>13.6 受けて読まれていないバイトを、<paramref name="max"/> まで読む。無ければ空 (<see cref="CardUart.Read"/>)</summary>
     public byte[] CardRead(int max)
     {
-        lock (_gate)
-        {
-            var waiting = (int)(Read32(CardCount) >> 16);
-            var count = Math.Min(waiting, Math.Max(0, max));
-            var received = new byte[count];
-            for (var i = 0; i < count; i++) received[i] = (byte)Read32(CardRx);
-            return received;
-        }
+        lock (_gate) return _card.Read(max);
     }
 
-    /// <summary>13.6 T=1 のブロックを LRC まで含めて丸ごと送る</summary>
+    /// <summary>13.6 T=1 のブロックを LRC まで含めて丸ごと送る (<see cref="CardUart.Send"/>)</summary>
     public void CardWrite(ReadOnlySpan<byte> block)
     {
-        lock (_gate)
-        {
-            Write32(CardRxLrc, 0);
-            Write32(CardTxLrc, 0);
-            foreach (var b in block) Write32(CardTx, b);
-            Write32(CardStatus, 0x3FF);
-            Write32(CardControl, block.Length >= 256 ? 0x280u : 0x200u);
-            Write32(CardSend, 1);
-        }
+        lock (_gate) _card.Send(block);
     }
 }
 
 /// <summary>
 /// 9.4 EP 0x81 から来る「4 バイトの到着時刻 + 188 バイトの TS」の 192 バイトの単位から取り出して、188 バイトのパケットにする。
-/// 読みの区切りは単位と揃わないので、TS の先頭 (単位の 5 バイト目) の 0x47 と、192 バイト先の 0x47 の 2 つで揃える
-/// (TS の中の 0x47 は珍しくないので 1 つでは信じない)。揃えたあと先頭が 0x47 でなくなったら揃え直す
+/// 転送要求の区切りは単位と揃わないので、TS の先頭 (単位の 5 バイト目) の 0x47 と、192 バイト先の 0x47 の 2 つで揃える
+/// (TS の中の 0x47 は珍しくないので 1 つだけでは先頭とみなさない)。揃えたあと先頭が 0x47 でなくなったら揃え直す
 /// </summary>
 public sealed class Mb86h47Framer
 {

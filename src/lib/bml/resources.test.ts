@@ -311,7 +311,7 @@ describe("押さえ直し", () => {
   });
 });
 
-describe("PNG・DRCS・深い入れ子 (レビューで足したもの)", () => {
+describe("PNG・DRCS・深い入れ子", () => {
   /** PNG の塊の名前の並び */
   const chunks = (png: Uint8Array): string[] => {
     const names: string[] = [];
@@ -367,6 +367,13 @@ describe("PNG・DRCS・深い入れ子 (レビューで足したもの)", () => 
     ]);
   });
 
+  test("DRCS は 87・88 区の字だけ持つ", () => {
+    const pixels = new Array<number>(64).fill(0);
+    const glyph = (ku: number) => [ku, 0x21, 1, 0x11, 2, 16, 16, ...pixels];
+    const out = parseDrcs(Uint8Array.from([2, ...glyph(0x76), ...glyph(0x77)]));
+    expect(out.map(([unit]) => isDrcs(unit))).toEqual([true]);
+  });
+
   test("DRCS が途中で切れていても投げない", () => {
     expect(() =>
       parseDrcs(Uint8Array.of(2, 0x77, 0x21, 1, 0x11, 2, 16, 16, 0xff)),
@@ -409,7 +416,7 @@ describe("名前の書き方", () => {
     });
   });
 
-  test("規格に無いスキーム (bml:// など) だけを「扱えない」と言う", () => {
+  test("規格に無いスキーム (bml:// など) だけを「扱えない」と知らせる", () => {
     expect(unknownScheme("bml://startup.bml")).toBe("bml");
     expect(unknownScheme("BML://x")).toBe("bml");
     for (const known of [

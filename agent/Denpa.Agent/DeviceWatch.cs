@@ -3,13 +3,7 @@ namespace Denpa.Agent;
 /// <summary>
 /// 機材の抜き差しを受け取って <c>changed</c> を呼ぶ (Program.cs の Rescan)。続けて起きた変化は 2 秒待ってまとめる
 /// (挿してからドライバがデバイスのファイルを作り終えるまでの間)。
-///
-/// <list type="bullet">
-/// <item>Linux: <c>/dev/bus/usb</c> の下にファイルができる・消えるのを inotify で受け取る (<see cref="FileSystemWatcher"/>)。
-/// カーネルの uevent はコンテナのネットワーク名前空間には届かないので、コンテナでも届くファイルの変化を使う</item>
-/// <item>Windows: 挿さっている USB 機材のパス (<see cref="WinUsbDevice.Fingerprint"/>) を 2 秒ごとに見比べる</item>
-/// <item>macOS: 10 秒ごとに呼ぶ (探した結果を前回と比べ、増えた機材だけを足す。Config.Additions)</item>
-/// </list>
+/// 受け取り方は OS ごとで、<see cref="IUsbHost.Watch"/> に任せる (Linux は <c>/dev/bus/usb</c> の inotify、Android はアプリからの attached・detached、Windows は 2 秒ごとの見比べ、macOS は 10 秒ごと)
 /// </summary>
 internal sealed class DeviceWatch : IDisposable
 {
@@ -17,52 +11,34 @@ internal sealed class DeviceWatch : IDisposable
 
     private readonly Action _changed;
     private readonly Timer _settle;
-    private readonly FileSystemWatcher? _files;
-    private readonly Timer? _poll;
+    private readonly IDisposable _watch;
     /// <summary>Rescan を重ねないための印</summary>
     private readonly Lock _gate = new();
-    private readonly Lock _compare = new();
-    private string? _last;
+    private volatile bool _disposed;
 
-    public DeviceWatch(Action changed)
+    public DeviceWatch(IUsbHost host, Action changed)
     {
         _changed = changed;
         _settle = new Timer(_ => Fire(), null, Timeout.Infinite, Timeout.Infinite);
-        if (OperatingSystem.IsLinux())
-        {
-            if (!Directory.Exists("/dev/bus/usb")) return;
-            _files = new FileSystemWatcher("/dev/bus/usb") { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName };
-            _files.Created += (_, _) => Soon();
-            _files.Deleted += (_, _) => Soon();
-            _files.EnableRaisingEvents = true;
-        }
-        else if (OperatingSystem.IsWindows())
-        {
-            _last = WinUsbDevice.Fingerprint();
-            _poll = new Timer(_ => Compare(), null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
-        }
-        else if (OperatingSystem.IsMacOS())
-        {
-            _poll = new Timer(_ => Fire(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
-        }
+        _watch = host.Watch(Soon);
     }
 
-    private void Compare()
+    private void Soon()
     {
-        if (!OperatingSystem.IsWindows()) return;
-        var now = WinUsbDevice.Fingerprint();
-        lock (_compare)
+        if (_disposed) return;
+        try
         {
-            if (now == _last) return;
-            _last = now;
+            _settle.Change(Settle, Timeout.InfiniteTimeSpan);
         }
-        Soon();
+        catch (ObjectDisposedException)
+        {
+            // 止めたのと入れ違いに届いた抜き差しは捨てる (止めたタイマーの Change は例外を送出し、タイマーや監視のスレッドの外へ出るとプロセスが終了する)
+        }
     }
-
-    private void Soon() => _settle.Change(Settle, Timeout.InfiniteTimeSpan);
 
     private void Fire()
     {
+        if (_disposed) return;
         // 探すのは数百 ms かかる。前の回が終わっていなければ重ねず、少し待って探し直す (その間の抜き差しを取りこぼさない)
         if (!_gate.TryEnter())
         {
@@ -85,8 +61,8 @@ internal sealed class DeviceWatch : IDisposable
 
     public void Dispose()
     {
-        _files?.Dispose();
-        _poll?.Dispose();
+        _disposed = true;
+        _watch.Dispose();
         _settle.Dispose();
     }
 }

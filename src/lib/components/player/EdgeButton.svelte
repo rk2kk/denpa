@@ -5,8 +5,7 @@
    * 「今」へ張り付くボタン。ライブの「ライブ」と追っかけの「最新」。
    * 張り付いている間は赤い字と赤い短い線 (`OVERLAY_DANGER`)、離れていれば白い字に赤い点。
    * 張り付いているかは読み上げにも `aria-pressed` で渡す (色だけにしない)。線は「入っている切り替え」の 1 本 (`app.css`)。
-   * 文字は小さくして、幅は詰める (大きい余白のままだと
-   * 操作バーの中でこれだけ太って見えた)
+   * 文字は小さくする (左右の余白は文字のボタンの決まりのまま。`ControlButton`)
    */
   let {
     active,
@@ -35,22 +34,17 @@
 
 <style>
   .edge {
-    gap: 0.25rem;
-    padding: 0 0.75rem;
+    gap: var(--dp-space-1);
   }
   .dot {
     display: inline-block;
     width: 0.5rem;
     height: 0.5rem;
     border-radius: var(--dp-radius-full);
-    background: var(--dp-rec);
+    background: var(--dp-on-video-danger);
   }
   .dot.active {
     background: currentColor;
-  }
-  /* 狭い枠では余白を詰める (押す的の高さは 40px のまま) */
-  :global(.stage[data-compact]) .edge {
-    padding: 0 0.5rem;
   }
   .label {
     font-size: var(--dp-text-xs);

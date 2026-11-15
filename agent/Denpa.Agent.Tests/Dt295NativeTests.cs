@@ -1,7 +1,7 @@
 namespace Denpa.Agent.Tests;
 
 /*
- * 自前方式 (dt295:) の設定・選局の順序を、偽の機材 (Dt295Fake) で確かめる。順序と値は仕様書 (dt295-resident/spec.md) の節のもの。
+ * PIX-DT295 (dt295:) の設定・選局の順序を、偽の機材 (Dt295Fake) で確かめる。順序と値は仕様書 (dt295-resident/spec.md) の節のもの。
  * 実機のレジスタの読み値は偽物が作ったものなので、受信の確認などの分岐の結果は「偽物がそう返した」というだけ。
  */
 public class Dt295NativeTests
@@ -42,6 +42,7 @@ public class Dt295NativeTests
         for (var i = from; i < lines.Count && at < 0; i++) if (lines[i] == line) at = i;
         return at;
     }
+
     [Test]
     public async Task 地上波は_設定_選局_受信の確認_取り込み_受信_後始末の順で進み_TS_が連続して届く()
     {
@@ -57,13 +58,12 @@ public class Dt295NativeTests
         var firstS = Index(i2c, "11 W 0190");
         var closing = Index(i2c, "10 W 4700");
         var tuneHigh = Index(i2c, "10 W FEC01188");      // T25 = 545143 kHz → N = 34889 = 0x8849。上位 0x88 は初期化の 0x76 と違う
-        var tuneN = tuneHigh;
         await Assert.That(firstS).IsGreaterThan(20);
         await Assert.That(closing).IsGreaterThan(firstS);
         await Assert.That(tuneHigh).IsGreaterThan(closing);
         await Assert.That(i2c[tuneHigh - 1]).IsEqualTo("10 W FEC01049");
         // 受信中は 7.2.4 のとおり 0x96、0x80 (2 バイト) を読む
-        await Assert.That(i2c.Skip(tuneN).Any(line => line == "10 R 2")).IsTrue();
+        await Assert.That(i2c.Skip(tuneHigh).Any(line => line == "10 R 2")).IsTrue();
 
         // レジスタの順: チップの設定 (6 章) → USB のレジスタ (8.4) → I2C の準備 (6.4) → 取り込みの設定 (8.1.3) → 端点 (8.3.1) → 取り込み開始 → 停止 → hook を戻す
         var stores = fake.Stores;
@@ -82,7 +82,7 @@ public class Dt295NativeTests
         await Assert.That(start).IsGreaterThan(capture);
         await Assert.That(stop).IsGreaterThan(start);
         await Assert.That(unhook).IsGreaterThan(stop);
-        // hook は自前のものを書いてから、最後に元に戻す
+        // hook は Dt295NativePrograms のものを書いてから、最後に元に戻す
         var hookWrites = stores.Where(s => s.Address == Dt295NativePrograms.Hook).ToList();
         await Assert.That(hookWrites[^1].Value).IsEqualTo(0xC46D02B0u);
         await Assert.That(fake.Get(Dt295NativePrograms.Hook, 4)).IsEqualTo(0xC46D02B0u);
@@ -100,36 +100,36 @@ public class Dt295NativeTests
         // 窓は既定に戻る
         await Assert.That(fake.Get(0xEA3D8, 4)).IsEqualTo(0x00F00000u);
         await Assert.That(fake.Get(0xE9EBC, 4)).IsEqualTo(0x00F00000u);
-        // 地上波側は休ませる (仕様書 9 章)
+        // 地上波側は待機させる (仕様書 9 章)
         await Assert.That(i2c[^5..]).IsEquivalentTo(new[] { "10 W 2500", "10 W 234D", "10 W 0390", "10 W FEC01200", "10 W FEC00B00" });
 
         // TS: 連続性の飛びが無く、同期バイトが全部合っている
         await Assert.That(output).Contains("continuity_counter の飛び: 0 回");
         await Assert.That(output).Contains("(100.00%)");
         await Assert.That(output).Contains("最初の TS:");
-        // 受信中の C/N の生の値 (地上波は 0x8B から 3 バイト。dB には直さない)
+        // 受信中の C/N の生の値 (地上波は 0x8B から 3 バイト) と、TC90522 系の式で直した dB
         await Assert.That(output).Contains("信号 (");
         await Assert.That(output).Contains("地上波 0x8B");
         await Assert.That(output).DoesNotContain("来なかった");
     }
 
     [Test]
-    public async Task 衛星は_T_側を休ませてから周波数と_VCO_帯を書き_TSID_を選んで受信を確認する()
+    public async Task 衛星は_T_側を待機させてから周波数と_VCO_帯を書き_TSID_を選んで受信を確認する()
     {
         var fake = Rig();
         var (code, output, log) = Run(fake, "BS15:16400");
         await Assert.That(log).DoesNotContain("止めました");
         await Assert.That(code).IsEqualTo(0);
         await Assert.That(output).Contains("受信の確認: 受かった");
-        // 受信中の C/N の生の値 (衛星は 0xBC から 2 バイト。dB には直さない)
+        // 受信中の C/N の生の値 (衛星は 0xBC から 2 バイト) と、TC90522 系の式で直した dB
         await Assert.That(output).Contains("衛星 0xBC");
-        await Assert.That(output).Contains("dB には直していません");
+        await Assert.That(output).Contains("TC90522 系の式で");
         var i2c = fake.I2cLog;
         // BS15 の IF = 1318000 kHz → M = 1318 → N = M。reg 00〜04 = 0A 4C 00 00 00、reg 09 = 8C (仕様書 7.3.3)
         var frequency = Index(i2c, "11 W FEC0000A4C000000");
         await Assert.That(frequency).IsGreaterThan(0);
         await Assert.That(Index(i2c, "11 W FEC0098C", frequency)).IsEqualTo(frequency + 1);
-        // 選局の始め: T 側を休ませる (7.3.2 の t=1)
+        // 選局の始め: T 側を待機させる (7.3.2 の t=1)
         var rest = Index(i2c, "10 W 2500", Index(i2c, "10 W 4700"));
         await Assert.That(rest).IsGreaterThan(0);
         await Assert.That(rest).IsLessThan(frequency);
@@ -153,10 +153,10 @@ public class Dt295NativeTests
     }
 
     [Test]
-    public async Task 常駐方式の_hook_が入った機材には何も書かずに断る()
+    public async Task 常駐イメージの_hook_が入った機材には何も書かずに断る()
     {
         var fake = Rig();
-        // 仕様書 3.2 の常駐方式の hook
+        // 仕様書 3.2 の常駐イメージの hook
         byte[] resident = [0x9B, 0xEC, 0x14, 0xF4, 0x97, 0x0C, 0x9F, 0xA0];
         for (var i = 0; i < 8; i++) fake.Bytes[Dt295NativePrograms.Hook + (uint)i] = resident[i];
         var (code, _, log) = Run(fake, "T25");
@@ -219,13 +219,27 @@ public class Dt295NativeTests
         var fake = new Dt295Fake();
         var link = new Dt295NativeLink(fake);
         var i2c = new Dt295NativeI2c(link);
-        Assert.Throws<Dt295NativeException>(() => i2c.Write(0x20, 0x00));
+        Assert.Throws<Dt295NativeException>(() => i2c.Transfer(0x20, [0x00], 0));
         // 失敗のあとも続けて使える
-        i2c.Write(0x10, 0x01, 0x23);
+        i2c.Transfer(0x10, [0x01, 0x23], 0);
         await Assert.That(fake.Terrestrial.Regs[0x01]).IsEqualTo((byte)0x23);
-        i2c.Write(0x10, 0x01);
-        await Assert.That(i2c.Read(0x10, 1)[0]).IsEqualTo((byte)0x23);
+        i2c.Transfer(0x10, [0x01], 0);
+        await Assert.That(i2c.Transfer(0x10, [], 1)[0]).IsEqualTo((byte)0x23);
         await Assert.That(i2c.Transfers).IsEqualTo(4L);
+    }
+
+    [Test]
+    public async Task I2C_はアドレスのバイトが終わらなければ_STOP_を出して失敗にする()
+    {
+        var fake = new Dt295Fake { I2cStuck = true };
+        var i2c = new Dt295NativeI2c(new Dt295NativeLink(fake));
+        Assert.Throws<Dt295NativeException>(() => i2c.Transfer(0x10, [0x01, 0x23], 0));
+        // 開始 (bit4) を立てたままにしない。最後に制御へ書くのは STOP (開始・再スタート・ACK・待つ側の印を落とした値)
+        await Assert.That(fake.Stores.Last(s => s.Address == Dt295NativeI2c.Control).Value & 0x39).IsEqualTo(0u);
+        // 失敗のあとも続けて使える
+        fake.I2cStuck = false;
+        i2c.Transfer(0x10, [0x01, 0x23], 0);
+        await Assert.That(fake.Terrestrial.Regs[0x01]).IsEqualTo((byte)0x23);
     }
 
     [Test]
@@ -296,7 +310,7 @@ public class Dt295NativeTests
     {
         var fake = Rig();
         fake.Put(0x1900020, 4, 0x02000200);
-        var (code, _, log) = Run(fake, "T25");
+        var (code, _, _) = Run(fake, "T25");
         await Assert.That(code).IsEqualTo(0);
         var starts = fake.Stores.Where(s => s.Address == 0x1902010).Select(s => s.Value).ToList();
         await Assert.That(starts).IsEquivalentTo(new[] { 0x02000000u, 0x04000000u });
@@ -308,7 +322,7 @@ public class Dt295NativeTests
     {
         var fake = Rig();
         fake.Put(0xF1001C, 4, 0x7FFD0000);
-        var (code, _, log) = Run(fake, "T25");
+        var (code, _, _) = Run(fake, "T25");
         await Assert.That(code).IsEqualTo(0);
         await Assert.That(fake.Stores.Where(s => s.Address == 0xF1001C).Select(s => s.Value))
             .IsEquivalentTo(new[] { 0x2F7D0000u, 0x2F7F0000u, 0x7FFD0000u });
@@ -380,10 +394,10 @@ public class Dt295NativeTests
     }
 
     [Test]
-    public async Task 自前の_hook_が残った機材は_Linux_ではポートの電源を入れ直してから開き_ほかの_OS_では挿し直しを求めて断る()
+    public async Task 前の実行の_hook_が残った機材は_Linux_ではポートの電源を入れ直してから開き_ほかの_OS_では挿し直しを求めて断る()
     {
         var fake = Rig();
-        // 前の実行が途中で止まった状態: 自前の body と hook が残っている
+        // 前の実行が途中で止まった状態: 機材に置いた body と hook が残っている
         fake.PlaceBody(hook: true);
 
         var refused = Run(fake, "T25");
@@ -431,7 +445,8 @@ public class Dt295NativeTests
         await Assert.That(i2c).Contains("11 W 030002");
         await Assert.That(i2c).Contains("11 W 073311");
         await Assert.That(i2c).Contains("11 W 10B000");
-        await Assert.That(i2c).Contains("11 W 1C59AA2019");    }
+        await Assert.That(i2c).Contains("11 W 1C59AA2019");
+    }
 
     [Test]
     public async Task S_側の初期化は_T_チューナーの_100_ms_の待ちの間に入る()
@@ -442,7 +457,7 @@ public class Dt295NativeTests
         var afterWait = Index(i2c, "10 W FEC00301");          // T チューナーの 03=01。ここから 100 ms の待ち
         var firstS = Index(i2c, "11 W 0190");                  // S 復調の最初の書き込み
         var lastS = Index(i2c, "11 W FEC011C0A7");             // S チューナーの最後の書き込み
-        var resumed = Index(i2c, "10 W FEC00D", afterWait);    // 待ちのあとの T チューナーの 0x0D の読み・変更・書き
+        var resumed = Index(i2c, "10 W FEC00D", afterWait);    // 待ちのあとの T チューナーの 0x0D のリード・モディファイ・ライト
         await Assert.That(afterWait).IsGreaterThan(0);
         await Assert.That(firstS).IsGreaterThan(afterWait);
         await Assert.That(lastS).IsGreaterThan(firstS);
@@ -465,7 +480,7 @@ public class Dt295NativeTests
         // チップの設定の段、I2C の段、各待ち (理由つき)、選局、受信の確認の周回、取り込み、最初の TS
         foreach (var expected in new[]
         {
-            "手順 1〜3", "手順 10〜12", "T 復調の初期値", "T チューナーの初期化", "S 復調の初期値", "待ち 100 ms (この間に別の仕事) (仕様書 7.1.2", "待ち 4 ms (仕様書 7.1.3",
+            "手順 1〜3", "手順 10〜12", "T 復調の初期値", "T チューナーの初期化", "S 復調の初期値", "待ち 100 ms (この間に別の処理) (仕様書 7.1.2", "待ち 4 ms (仕様書 7.1.3",
             "t=23 周波数の設定", "待ち 100 ms (仕様書 7.2.2。t=46", "受信の確認 (地上波)", "取り込みの設定", "取り込みの開始", "最初の TS を待つ", "固定の待ち:",
         })
         {
@@ -478,7 +493,7 @@ public class Dt295NativeTests
         // 待ちの合計は、7.1 の 130 ms と 7.2.2 の 140 ms を含む
         var waits = text.Split('\n').First(line => line.StartsWith("固定の待ち:", StringComparison.Ordinal));
         await Assert.That(waits).Contains("合計");
-        // 受信の平均は、最初の読みから最後の読みまでの秒数で割る (読みが 1 回だけなら求められないと出す)
+        // 受信の平均は、最初の読み出しから最後の読み出しまでの秒数で割る (読み出しが 1 回だけなら求められないと出す)
         await Assert.That(text).Contains("受信の平均:");
     }
 
@@ -489,7 +504,7 @@ public class Dt295NativeTests
         var port = $"test-{Guid.NewGuid():N}";
         var tuner = new Dt295NativeTuner("test", () => Dt295NativeDevice.Acquire(port, () => fake, null, _ => { }, 2000), () => Dt295NativeDevice.CloseIfIdle(port));
         var tuning = ChannelTable.Parse("T25")!;
-        tuner.Tune(tuning, tuning.StreamId);
+        tuner.Tune(tuning);
         // 本番の読み出し (TunerPool.Read) と同じく、Output は 1 回だけ取って DeviceStream として読み続ける
         var ring = (DeviceStream)tuner.Output;
         var reader = Task.Run(() =>
@@ -559,7 +574,7 @@ public class Dt295NativeTests
     }
 
     [Test]
-    public async Task 同じ種別の選局し直しは頭の手順を省き_種別が替わるときは前の側を休ませる()
+    public async Task 同じ種別の選局し直しは先頭の手順を省き_種別が替わるときは前の側を待機させる()
     {
         var fake = Rig();
         var port = $"test-{Guid.NewGuid():N}";
@@ -582,19 +597,19 @@ public class Dt295NativeTests
         await Assert.That(again).Contains("10 W FEC01201");
         await Assert.That(again.Count).IsLessThan(first.Count);
 
-        // 衛星へ: 先に T 側を休ませ (復調 25=00・23=4D・03=90)、TS の出し元を衛星にする (T 復調 0E=77・0F=77)
+        // 衛星へ: 先に T 側を待機させ (復調 25=00・23=4D・03=90)、TS の出し元を衛星にする (T 復調 0E=77・0F=77)
         var toSatellite = Tune(satellite);
         await Assert.That(toSatellite).Contains("10 W 2500");
         await Assert.That(toSatellite).Contains("10 W 0E77");
-        // 続けて衛星: T 側はもう休んでいるので休ませる表は入らない
+        // 続けて衛星: T 側はもう待機しているので待機させる表は入らない
         var satelliteAgain = Tune(satellite);
         await Assert.That(satelliteAgain).DoesNotContain("10 W 2500");
         await Assert.That(satelliteAgain).Contains("10 W 0E77");
 
-        // 地上波へ戻る: 先に S 側を休ませる表 (S 復調 1C=AA ほか。仕様書 7.2.2。推定) が入り、0B=01 も入る
+        // 地上波へ戻る: 先に S 側を待機させる表 (S 復調 1C=AA ほか。仕様書 7.2.2。推定) が入り、0B=01 も入る
         var back = Tune(terrestrial);
         await Assert.That(back).Contains("11 W 1CAA");
-        await Assert.That(back).Contains("11 W 1728".Replace("1728", "1701"));
+        await Assert.That(back).Contains("11 W 1701");
         await Assert.That(back).Contains("10 W FEC00B01");
 
         device.Release();
@@ -656,12 +671,12 @@ public class Dt295NativeTests
         int Writes() => fake.I2cLog.Count(line => line.StartsWith("10 W FEC011"));
         try
         {
-            tuner.Tune(t25, t25.StreamId);
+            tuner.Tune(t25);
             var first = Writes();
             await Assert.That(first).IsGreaterThan(0);
             var starts = fake.Stores.Count(s => s.Address == 0x1902010 && s.Value == 0x02000000);
 
-            tuner.Tune(t25, t25.StreamId);
+            tuner.Tune(t25);
             await Assert.That(Writes()).IsEqualTo(first);
             await Assert.That(fake.Stores.Count(s => s.Address == 0x1902010 && s.Value == 0x02000000)).IsEqualTo(starts + 1);
             var ring = (DeviceStream)tuner.Output;
@@ -678,16 +693,16 @@ public class Dt295NativeTests
             await Assert.That(buffer[0]).IsEqualTo((byte)0x47);
 
             // 別のチャンネルでは周波数を書く
-            tuner.Tune(t26, t26.StreamId);
+            tuner.Tune(t26);
             await Assert.That(Writes()).IsGreaterThan(first);
 
             // 別の手段で復調の周波数が替わっていたら (診断の離れる選局など)、同じチャンネルでも選局し直す
-            tuner.Tune(t25, t25.StreamId);
+            tuner.Tune(t25);
             var settled = Writes();
             tuner.Device!.Frontend.TuneTerrestrial((uint)((t26.Frequency + 500UL) / 1000));
             var away = Writes();
             await Assert.That(away).IsGreaterThan(settled);
-            tuner.Tune(t25, t25.StreamId);
+            tuner.Tune(t25);
             await Assert.That(Writes()).IsGreaterThan(away);
         }
         finally
@@ -707,15 +722,27 @@ public class Dt295NativeTests
         framer.PushRuns(data, run => runs.Add(run.ToArray()));
         await Assert.That(runs.Count).IsEqualTo(1);
         await Assert.That(runs[0].Length).IsEqualTo(188 * 3);
-        // 続きで端数が 1 パケットになる (持ち越しがあるときは 1 パケットずつ)
-        framer.PushRuns(new byte[88].Select(_ => (byte)2).Concat(Packets(1, 3)).ToArray(), run => runs.Add(run.ToArray()));
-        await Assert.That(runs.Sum(r => r.Length)).IsEqualTo(188 * 5);
+        // 続きで端数が 1 パケットになり、そのあとの 3 パケットはまとめて 1 つ
+        framer.PushRuns(new byte[88].Select(_ => (byte)2).Concat(Packets(3, 3)).ToArray(), run => runs.Add(run.ToArray()));
+        await Assert.That(runs.Count).IsEqualTo(3);
+        await Assert.That(runs[1].Length).IsEqualTo(188);
         await Assert.That(runs[1][0]).IsEqualTo((byte)0x47);
+        await Assert.That(runs[1][187]).IsEqualTo((byte)2);
+        await Assert.That(runs[2].Length).IsEqualTo(188 * 3);
         // 同期のずれは 1 バイトずつ捨て、そのあとの範囲を 1 つで渡す
         runs.Clear();
         framer.PushRuns(new byte[] { 0, 0, 0 }.Concat(Packets(2, 4)).ToArray(), run => runs.Add(run.ToArray()));
         await Assert.That(runs.Count).IsEqualTo(1);
         await Assert.That(runs[0].Length).IsEqualTo(188 * 2);
         await Assert.That(framer.Discarded).IsEqualTo(3L);
+        // 端数に足しても 1 パケットにならなければ、足したぶんも持ち越す
+        runs.Clear();
+        var split = Packets(1, 5);
+        framer.PushRuns(split[..100], run => runs.Add(run.ToArray()));
+        framer.PushRuns(split[100..150], run => runs.Add(run.ToArray()));
+        await Assert.That(runs.Count).IsEqualTo(0);
+        framer.PushRuns(split[150..].Concat(Packets(1, 6)).ToArray(), run => runs.Add(run.ToArray()));
+        await Assert.That(runs.Select(run => run.Length)).IsEquivalentTo(new[] { 188, 188 });
+        await Assert.That(runs[0][187]).IsEqualTo((byte)5);
     }
 }

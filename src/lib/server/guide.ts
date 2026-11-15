@@ -13,6 +13,7 @@ import { orm } from "./db";
 import { airing, currentServices, SERVICE_ORDER } from "./epg";
 import {
   latestRecordingId,
+  latestReservationRecordingId,
   programs as programTable,
   recordings,
   reservations,
@@ -54,7 +55,8 @@ export function requestedDay(raw: string | null): number {
 /**
  * 表に出す局と、分割放送のあるサブチャンネル。
  *
- * **放送していない局は出さない** (終わったチャンネル)。放送局ごとに決める。
+ * 出す局はライブの一覧と同じ決め方にする (`epg.airing`)。**終わったチャンネルは出さず**、
+ * 番組がまだ無い本チャンネルは空の列で出す。放送局ごとに決める。
  * どれか 1 つが放送していれば揃って残し、サブの列を立てるかは画面が決める
  * (分割放送のある日だけ。`#lib/subchannels.ts`)。
  *
@@ -67,11 +69,17 @@ export function stationsOf(
   end: number,
 ): { services: Service[]; split: number[] } {
   // テレビと同じ並びにする (SERVICE_ORDER)。
-  // 取り残しの局は出さない (currentServices)。出すと番組表に空の列が並ぶ
+  // 取り残しの局は出さない (currentServices)。出すと番組表に空の列が並ぶ。番組表を読めない局も出さない (番組が来ない。`services.epg_readable`)
   const services: Service[] = orm()
     .select()
     .from(serviceTable)
-    .where(and(eq(serviceTable.type, type), currentServices()))
+    .where(
+      and(
+        eq(serviceTable.type, type),
+        currentServices(),
+        eq(serviceTable.epg_readable, true),
+      ),
+    )
     .orderBy(sql.raw(SERVICE_ORDER))
     .all();
   const slots = orm()
@@ -108,6 +116,7 @@ export function programsOf(
   const p = alias(programTable, "p");
   const r = alias(reservations, "r");
   const rec = alias(recordings, "rec");
+  const done = alias(recordings, "done");
   return (
     orm()
       .select({
@@ -127,7 +136,7 @@ export function programsOf(
          * 出していた頃は、録り終えた番組が「予約済み」のまま並び、
          * 取消ボタンまで出ていた (予約側は録り始めた時刻しか持たないため)
          */
-        reservation_state: sql<ReservationState | null>`CASE WHEN ${r.id} IS NULL THEN NULL ELSE ${reservationState(r, rec)} END`,
+        reservation_state: sql<ReservationState | null>`CASE WHEN ${r.id} IS NULL THEN NULL ELSE ${reservationState(r, done)} END`,
         // 外から使う API (`GET /api/programs`) が予約の中身として返す
         conflict_reason: r.conflict_reason,
         rule_id: r.rule_id,
@@ -141,6 +150,8 @@ export function programsOf(
       .leftJoin(r, and(eq(r.program_id, p.id), ne(r.state, "canceled")))
       // 録り直すと同じ番組に複数ぶら下がる。いちばん新しい現存分だけ見る
       .leftJoin(rec, eq(rec.id, latestRecordingId(p.id)))
+      // 状態はその予約で録れたいちばん新しい録画から決める。消したものも含める (消しても「予約済み」に戻さない)
+      .leftJoin(done, eq(done.id, latestReservationRecordingId(r.id)))
       .where(
         and(
           eq(serviceTable.type, type),
@@ -211,7 +222,7 @@ export function daysOf(type: ChannelType, today: number) {
 }
 
 /** 外から使う番組表 (`GET /api/programs`) の 1 番組。キーは camelCase (docs/api.md) */
-export interface ApiProgram {
+interface ApiProgram {
   id: number;
   name: string;
   startAt: number;
@@ -229,7 +240,7 @@ export interface ApiProgram {
   recordingId: number | null;
 }
 
-export interface ApiGuide {
+interface ApiGuide {
   type: ChannelType;
   from: number;
   to: number;

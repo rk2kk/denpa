@@ -2,15 +2,19 @@
  * **録画の観方の取り決め** (`GET /api/recordings/<id>/playback` と `/stream`)。画面にもサーバにも依らない。
  *
  * 分担: **サーバは「何を出せるか・どの形式で出すか・時刻の物差し」を決める。画面は「どれを使うか」を
- * 決める** (端末で再生できるか、人が選んだコーデック、MPEG-2 をそのまま再生する設定)。決め方は `server/playback.ts`。
+ * 決める** (端末で再生できるか、人が選んだコーデック)。決め方は `server/playback.ts`。
  * テレビのアプリは再生できる形式 (`?playable=`) を送り、サーバが同じ `pickOffer` で選んで `auto` で返す (`autoPick`)
  */
 
 import { codecsFor, type LiveCodec } from "../live";
-import { autoOrder, type LiveFormat } from "../live-choice";
+import {
+  autoOrder,
+  type BroadcastCodec,
+  type LiveFormat,
+} from "../live-choice";
 import type { Ruler } from "./watch";
 
-/** 出せる映像の形式。H.265 はエンコード済みがあるときだけ (ファイルそのままと詰め替え。その場の変換では作らない) */
+/** 出せる映像の形式。H.265 はエンコード済みがあるとき (ファイルそのままと詰め替え) と、4K の局の元の録画 (放送の HEVC の詰め替え) だけ。その場の変換では作らない */
 export type PlayCodec = "h264" | "hevc" | "av1" | "mpeg2";
 
 /**
@@ -69,6 +73,11 @@ export interface PlaybackInfo {
   ruler?: Ruler;
   /** サーバが選んだ観方 (`autoPick`)。**`?playable=` を付けて聞いたときだけ**ある。選べなければ null */
   auto?: AutoPick | null;
+  /**
+   * 放送のままのコーデック。**4K の局の元の録画 (`.mmts`) だけ** `hevc` (放送の HEVC の詰め替え)。省けば MPEG-2。
+   * 録画しか無いときの「自動」の順で、MPEG-2 の場所に HEVC を入れる (`autoOrder`。ライブの 4K の局と同じ)
+   */
+  broadcast?: BroadcastCodec;
 }
 
 /**
@@ -230,23 +239,19 @@ function asPicked(offer: PlayOffer): Picked | null {
  */
 export const ENCODED_ORDER = autoOrder("encoded");
 
-/** その場でエンコードする順 (`autoOrder`。家の中か外か) に並べ替える。並びに無いもの (H.265 の詰め替え) は後ろ */
-function byOnTheFlyOrder(offers: PlayOffer[], indoor: boolean): PlayOffer[] {
-  const order: readonly PlayCodec[] = autoOrder({ indoor, compat: false }).map(
-    (format) => (format === "raw" ? "mpeg2" : format),
-  );
+/** `autoOrder` の形式をコーデックの名前に (放送のままは MPEG-2) */
+function asCodecs(order: readonly LiveFormat[]): PlayCodec[] {
+  return order.map((format) => (format === "raw" ? "mpeg2" : format));
+}
+
+/** `order` の順に並べ替える。並びに無いものは後ろ、同じコーデックの中では元の並びのまま */
+function byOrder(
+  offers: PlayOffer[],
+  order: readonly PlayCodec[],
+): PlayOffer[] {
   const rank = (codec: PlayCodec) => {
     const at = order.indexOf(codec);
     return at === -1 ? order.length : at;
-  };
-  return [...offers].sort((a, b) => rank(a.codec) - rank(b.codec));
-}
-
-/** `ENCODED_ORDER` の順に並べ替える (同じコーデックの中では元の並びのまま) */
-function byEncodedOrder(offers: PlayOffer[]): PlayOffer[] {
-  const rank = (codec: PlayCodec) => {
-    const at = (ENCODED_ORDER as readonly PlayCodec[]).indexOf(codec);
-    return at === -1 ? ENCODED_ORDER.length : at;
   };
   return [...offers].sort((a, b) => rank(a.codec) - rank(b.codec));
 }
@@ -256,12 +261,13 @@ function byEncodedOrder(offers: PlayOffer[]): PlayOffer[] {
  * 観られなければ、または `auto` なら端末に合わせる。
  *
  * **録画しか無い (エンコード済みが無い) ときは、ライブ・追っかけと同じ「その場でエンコード」の順** (`autoOrder`。家の中なら
- * MPEG-2 → H.264 → AV1、外なら AV1 → H.264。H.265 には変換しないので並びから外れる)。エンコード済みがあるときは次の順。
+ * MPEG-2 → H.264 → AV1、外なら AV1 → H.264。`autoOrder` の H.265 は、サーバが H.265 に変換しないので選ばれない)。4K の局の録画
+ * (`broadcast` が `hevc`) は MPEG-2 の場所に放送の HEVC の詰め替えが入る (家の中なら HEVC → H.264 → AV1)。エンコード済みがあるときは次の順。
  *
  * 1. **そのまま読めるファイル** (AV1 → H.265 → H.264。小さいほうが先。同じ画質なら回線もディスクも使わない)
  * 2. MSE が受け取れる**詰め替え** (エンコード済みと同じコーデック。サーバは軽い。並びは 1 と同じ)
  * 3. MSE が受け取れる**変換** (ライブ・追っかけと同じ「その場でエンコード」の順。家の中なら H.264 → AV1、外なら AV1 → H.264。
- *    サーバはその場でエンコードする。H.265 には変換しない)
+ *    サーバはその場でエンコードする。H.265 のストリームは詰め替えだけなので 2 に入る)
  * 4. 中身が分からないファイル (ffprobe が読めなかった) をそのまま渡す。読めなければ観る画面が観られる先を案内する
  *
  * エンコード済みがあるときの自動は MPEG-2 を選ばない (元の TS が残っていれば、選べば観られる)。何も無ければ null
@@ -274,8 +280,9 @@ export function pickOffer(
   choice: CodecChoice | "mpeg2" = "auto",
   indoor = false,
 ): Picked | null {
-  const files = byEncodedOrder(
+  const files = byOrder(
     info.offers.filter((offer) => offer.way === "file"),
+    ENCODED_ORDER,
   );
   const streams = info.offers.filter((offer) => offer.way === "stream");
   const raw = playsRaw(info, can);
@@ -292,7 +299,11 @@ export function pickOffer(
     if (chosen !== undefined) return asPicked(chosen);
   }
   if (files.length === 0) {
-    for (const format of autoOrder({ indoor, compat: false })) {
+    for (const format of autoOrder({
+      indoor,
+      compat: false,
+      ...(info.broadcast === undefined ? {} : { broadcast: info.broadcast }),
+    })) {
       if (format === "raw") {
         if (raw) return RAW;
         continue;
@@ -306,14 +317,15 @@ export function pickOffer(
   }
   const order = [
     ...files.filter((offer) => playsFile(offer, can)),
-    ...byEncodedOrder(
+    ...byOrder(
       streams.filter(
         (offer) => playsStream(offer, can) && hasFile(info, offer.codec),
       ),
+      ENCODED_ORDER,
     ),
-    ...byOnTheFlyOrder(
+    ...byOrder(
       streams.filter((offer) => playsStream(offer, can)),
-      indoor,
+      asCodecs(autoOrder({ indoor, compat: false })),
     ),
     ...files,
   ];
@@ -346,7 +358,7 @@ export function playableAbility(formats: readonly LiveFormat[]): MediaAbility {
 /**
  * **サーバが選ぶ観方** (`playback?playable=` の `auto`)。ブラウザの「自動」と同じ `pickOffer` で選ぶ。
  * `pickOffer` の最後の手 (中身が分からないファイルをそのまま渡す) は、コーデックが並びにあるときだけ使う。
- * 端末が再生できないと言ったものは返さない。選べなければ null
+ * 端末が再生できる形式に無いものは返さない。選べなければ null
  */
 export function autoPick(
   info: PlaybackInfo,
@@ -389,25 +401,25 @@ export const MENU_ORDER: readonly PlayCodec[] = [...ENCODED_ORDER, "mpeg2"];
 
 /**
  * **コーデックのメニューに並べるもの。** この端末で観られる方法があるコーデックを `MENU_ORDER` の順に。
- * H.265 はエンコード済みがある録画にだけある (その場の変換では作らない)。MPEG-2 は元の TS が残っていて、この端末で
- * デコードできるときだけ。`hidden` (世帯の設定。`#lib/live-choice.ts` の `HIDDEN_CODECS`) は並べない。外すのはメニューだけで、
- * 自動 (`pickOffer`) は今までどおり選ぶ
+ * H.265 はエンコード済みがある録画と 4K の局の元の録画にだけある (その場の変換では作らない)。MPEG-2 は元の TS が残っていて、この端末で
+ * デコードできるときだけ。`hidden` は並べない (メニューは `#lib/live-choice.ts` の `WATCH_HIDDEN_CODECS` を渡す。
+ * 混んでいるときに勧めるものは全部から選ぶので渡さない)。外すのはメニューだけで、自動 (`pickOffer`) は今までどおり選ぶ
  */
 export function codecChoices(
   info: PlaybackInfo,
   can: MediaAbility,
   hidden: readonly PlayCodec[] = [],
 ): PlayCodec[] {
-  const encoded = ENCODED_ORDER.filter(
-    (codec) =>
-      !hidden.includes(codec) &&
-      info.offers.some(
-        (offer) =>
-          offer.codec === codec &&
-          (playsFile(offer, can) || playsStream(offer, can)),
-      ),
+  return MENU_ORDER.filter((codec) =>
+    codec === "mpeg2"
+      ? playsRaw(info, can)
+      : !hidden.includes(codec) &&
+        info.offers.some(
+          (offer) =>
+            offer.codec === codec &&
+            (playsFile(offer, can) || playsStream(offer, can)),
+        ),
   );
-  return playsRaw(info, can) ? [...encoded, "mpeg2"] : encoded;
 }
 
 /*
@@ -465,9 +477,7 @@ export function pickCanvas(
     return choice;
   const light = usable.filter((c) => c !== "mpeg2" && hasFile(info, c));
   // 互換モードの順は家の中か外かで変わらない
-  const order = autoOrder({ indoor: false, compat: true }).map((format) =>
-    format === "raw" ? "mpeg2" : format,
-  );
+  const order = asCodecs(autoOrder({ indoor: false, compat: true }));
   const rest = order.filter((c): c is CanvasCodec =>
     usable.includes(c as CanvasCodec),
   );
@@ -489,9 +499,13 @@ export function canvasTranscodes(
   return codec !== "mpeg2" && !hasFile(info, codec);
 }
 
-/** 選んだもので観るとき、サーバがその場でエンコードするか (枠を使う。混んでいると断られる) */
+/**
+ * 選んだもので観るとき、サーバがその場でエンコードするか (枠を使う。混んでいると断られる)。
+ * 4K の局の元の録画の H.265 (`broadcast` が `hevc`) は放送の HEVC の詰め替えで、エンコードしない
+ */
 export function transcodes(info: PlaybackInfo, picked: Picked): boolean {
-  return picked.way === "stream" && !hasFile(info, picked.codec);
+  if (picked.way !== "stream" || hasFile(info, picked.codec)) return false;
+  return !(picked.codec === "hevc" && info.broadcast === "hevc");
 }
 
 /** `TimeRanges` を配列にしたもの (`[始まり, 終わり]` 秒) */
@@ -535,7 +549,7 @@ export function covers(
 ): boolean {
   if (aheadOf(ranges, t) > 0) return true;
   if (from === null || t < from - GAP) return false;
-  // リクエストした位置から伸びている区間の尻。まだ何も届いていなければリクエストした位置
+  // リクエストした位置から伸びている区間の末尾。まだ何も届いていなければリクエストした位置
   let end = from;
   for (const [start, stop] of ranges) {
     if (start <= from + GAP && stop >= from) end = Math.max(end, stop);

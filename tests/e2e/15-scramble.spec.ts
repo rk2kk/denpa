@@ -30,6 +30,8 @@ function scrambledFiles(dir: string): string[] {
  * 電波は二度と戻ってこないので、スクランブルされたままでも録画は止めない。
  * 代わりにエンコードの前に見て、掛かったままならエージェントにリクエストして復号する
  * (カードを読めるのはあちらのコンテナだけ)。
+ *
+ * ライブで局がスクランブルされたまま届いたときは `15-scramble-live` (1 本で CI の組の時間を押し上げていたので分けた)
  */
 test.describe("スクランブルされたまま録れたとき", () => {
   test.afterEach(async ({ request, stack }) => {
@@ -60,7 +62,7 @@ test.describe("スクランブルされたまま録れたとき", () => {
     await page.getByTestId("detail-close").click();
   });
 
-  test("元のTSを残す設定なら、残るのは復号済みのTSだけ", async ({
+  test("元の TS を残す設定なら、残るのは復号済みの TS だけ", async ({
     page,
     request,
     stack,

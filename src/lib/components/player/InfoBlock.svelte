@@ -39,7 +39,7 @@
     <!-- 中黒の両側は同じ空き (`.sep`。文字の空白だと Svelte が `{/if}` の前を詰めた) -->
     <span class="keep">
       {#if range !== null}<span data-testid={rangeTestid}
-          >{time(range.start)} 〜 {time(range.end)}</span
+          >{time(range.start)}〜{time(range.end)}</span
         ><span class="sep">・</span>{/if}<span class="broadcast">{service}</span
       >
     </span>
@@ -62,7 +62,7 @@
   .info {
     min-width: 0;
     flex: 1 1 0;
-    padding: 0 0.5rem;
+    padding: 0 var(--dp-space-2);
     line-height: 1.25;
     color: var(--dp-on-video-soft);
   }
@@ -85,7 +85,7 @@
     margin-inline-start: 0;
   }
   :global(.stage[data-compact]) .info {
-    padding: 0 0.25rem;
+    padding: 0 var(--dp-space-1);
   }
   /* 狭い枠では時間帯・局も縮める (押すものの間の幅しか無い。全画面の縦など、上の段を出すとき) */
   :global(.stage[data-compact]) .keep {
@@ -95,11 +95,11 @@
     text-overflow: ellipsis;
   }
   /*
-     * **狭い枠では読みものを短くする。** 画面側は、省いてよいところ (残り・チャプター名など) を
-     * `.long` で包み、時刻は `.clock` で包む。時刻の「 / 」の空きも詰める
-     * (文字は変えないので、「0:31 / 1:00:00」を読むテストはそのまま)。
-     * 省いたところは読み上げにも出ない (チャプター名はシークバーの読み上げに入っている)
-     */
+   * **狭い枠では読みものを短くする。** 画面側は、省いてよいところ (残り・チャプター名など) を
+   * `.long` で包み、時刻は `.clock` で包む。時刻の「 / 」の空きも詰める
+   * (文字は変えないので、「0:31 / 1:00:00」を読むテストはそのまま)。
+   * 省いたところは読み上げにも出ない (チャプター名はシークバーの読み上げに入っている)
+   */
   :global(.stage[data-compact]) .status :global(.long) {
     display: none;
   }
@@ -107,10 +107,10 @@
     word-spacing: -0.2em;
   }
   /*
-     * 上の段を省くのは、スマホの縦 (舞台の `data-narrow`) だけ。
-     * 低い窓で畳んだとき (高さで `compact`) や縦の全画面では、右の列が映像の横に
-     * あるか見えないので、番組名はここでしか読めない
-     */
+   * 上の段を省くのは、スマホの縦 (舞台の `data-narrow`) だけ。
+   * 低い窓で畳んだとき (高さで `compact`) や縦の全画面では、右の列が映像の横に
+   * あるか見えないので、番組名はここでしか読めない
+   */
   :global(.stage[data-narrow]) .top {
     display: none;
   }

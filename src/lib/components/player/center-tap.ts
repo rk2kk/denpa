@@ -1,8 +1,8 @@
-import { DOUBLE_TAP } from "#lib/ts/watch.js";
+import { DOUBLE_TAP, zoneOf } from "#lib/ts/watch.js";
 
 /**
  * **真ん中あたりを素早く 2 回で再生/一時停止**。
- * ライブだけが使う。録画視聴と追っかけは端の 2 回タップ (10 秒送り) と一体の
+ * ライブだけが使う。観る画面と追っかけは端の 2 回タップ (10 秒送り) と一体の
  * 決まりを持っているので、あちらは `ts/watch.ts` の `tap`。
  *
  * 指だけ。指の 1 回目は操作バーの出し入れで、2 回目で初めて再生に触る。
@@ -19,8 +19,7 @@ export function centerTap(
   return (event) => {
     if (window.matchMedia("(pointer: coarse)").matches) {
       const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-      const ratio = (event.clientX - box.left) / Math.max(1, box.width);
-      const middle = ratio >= 0.3 && ratio <= 0.7;
+      const middle = zoneOf(event.clientX - box.left, box.width) === "center";
       const at = Date.now();
       if (middle && at - last < DOUBLE_TAP) {
         last = 0;

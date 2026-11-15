@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 
 import { eq } from "drizzle-orm";
 
-import { fakeAgentTls, fakeAgentUrl, trustFakeAgent } from "./fake-agent";
+import { fakeAgentTls, fakeAgentUrl } from "./fake-agent";
+import { trustFakeAgent } from "./fake-agent-trust";
 
 /**
  * **外から使う番組表と予約** (`GET /api/programs`・`POST`/`DELETE /api/programs/<id>/record`。docs/api.md)。
@@ -31,7 +32,6 @@ const agent = Bun.serve({
           lnb: null,
           channel: null,
           users: [],
-          pid: null,
         },
       ],
     }),
@@ -48,13 +48,15 @@ config.agentUrl = fakeAgentUrl(agent.port!);
 trustFakeAgent();
 
 const { orm } = await import("./db");
+const { placeServices } = await import("./fake-channels");
 const { programs, recordings, reservations, services } =
   await import("./schema");
 const { broadcastDayStart, guideOf, HOUR, programRange, programsOf } =
   await import("./guide");
-const { cancelProgram, recordedBody, recordProgram } =
+const { cancelProgram, cancelReservation, recordedBody, recordProgram } =
   await import("./reservations");
 const { COPY_NEVER_REASON, NOT_CANCELABLE_REASON } = await import("../format");
+const { undecodableReason } = await import("../types");
 
 const MINUTE = 60_000;
 const NOW = Date.now();
@@ -74,7 +76,6 @@ orm()
       network_id: 32_736,
       name: "NHK総合1",
       type: "GR",
-      channel: "27",
       remote_control_key: 1,
       has_logo: true,
       updated_at: 0,
@@ -85,7 +86,6 @@ orm()
       network_id: 32_736,
       name: "NHK総合2",
       type: "GR",
-      channel: "27",
       remote_control_key: 1,
       updated_at: 0,
     },
@@ -95,12 +95,17 @@ orm()
       network_id: 32_736,
       name: "NHK Eテレ1",
       type: "GR",
-      channel: "26",
       remote_control_key: 2,
       updated_at: 0,
     },
   ])
   .run();
+// NHK総合1・2 は同じチャンネル (同じ TS)
+placeServices([
+  { id: MAIN, channel: "27" },
+  { id: SUB, channel: "27" },
+  { id: OTHER, channel: "26" },
+]);
 
 function program(
   id: number,
@@ -264,8 +269,10 @@ describe("番組表", () => {
     // 名前の無い枠は本チャンネルと同じ番組
     program(11, SUB, NOW - HOUR, NOW + HOUR, { name: "" });
 
+    // 番組の無い本チャンネル (OTHER) は空の列で出る
     expect(guideOf("GR", FROM, TO, true).services.map((s) => s.id)).toEqual([
       MAIN,
+      OTHER,
     ]);
   });
 
@@ -349,6 +356,60 @@ describe("番組表", () => {
     });
     expect(byId.get(5)).toMatchObject({ copyNever: true, reservation: null });
     expect(byId.get(6)).toMatchObject({ reservation: null, recordingId: null });
+  });
+});
+
+/**
+ * 番組表を読めるが復号できない局 (ケーブルの 4K の局。`services.epg_readable`)。番組表には出すが、予約は断る
+ */
+describe("観られない局", () => {
+  const CABLE_4K = (0x10000 + 0x000b) * 100000 + 161;
+  const CABLE_LOCKED = (0x10000 + 0xfff0) * 100000 + 201;
+  orm()
+    .insert(services)
+    .values([
+      {
+        id: CABLE_4K,
+        service_id: 161,
+        network_id: 0x000b,
+        name: "ＢＳでんぱ　４Ｋ",
+        type: "CATV",
+        decodable: false,
+        epg_readable: true,
+        transport: "tlv",
+        updated_at: 0,
+      },
+      // 番組表もスクランブルされている局。番組表に出さない
+      {
+        id: CABLE_LOCKED,
+        service_id: 201,
+        network_id: 0xfff0,
+        name: "ケーブル有料",
+        type: "CATV",
+        decodable: false,
+        epg_readable: false,
+        updated_at: 0,
+      },
+    ])
+    .run();
+
+  test("番組表を読める局は、復号できなくても番組表に出す。読めない局は出さない", () => {
+    reset();
+    program(1, CABLE_4K, NOW - 30 * MINUTE, NOW + 30 * MINUTE);
+    const guide = guideOf("CATV", FROM, TO);
+    expect(guide.services.map((s) => s.id)).toEqual([CABLE_4K]);
+    expect(guide.services[0]?.programs.map((p) => p.id)).toEqual([1]);
+  });
+
+  test("復号できない局の番組は予約しない (400)。わけはライブで断るときと同じ", async () => {
+    reset();
+    program(1, CABLE_4K, NOW + 30 * MINUTE, NOW + 60 * MINUTE);
+    expect(await recordProgram(1)).toEqual({
+      ok: false,
+      status: 400,
+      message: undecodableReason("CATV", "tlv"),
+    });
+    expect(orm().select().from(reservations).all()).toHaveLength(0);
   });
 });
 
@@ -447,5 +508,35 @@ describe("番組を録る・取り消す", () => {
       "skipped",
       "canceled",
     ]);
+  });
+
+  test("ID での取消 (ホームと検索の画面) も同じ決まりで断る", async () => {
+    reset();
+    program(1, MAIN, NOW - 60 * MINUTE, NOW - 30 * MINUTE);
+    program(2, MAIN, NOW - 30 * MINUTE, NOW + 30 * MINUTE);
+    const missed = reservation(1, { state: "missed" });
+    const scheduled = reservation(2);
+    expect(await cancelReservation(missed)).toEqual({
+      ok: false,
+      status: 409,
+      message: NOT_CANCELABLE_REASON,
+    });
+    expect(await cancelReservation(scheduled)).toEqual({
+      ok: true,
+      stopped: false,
+    });
+    expect((await cancelReservation(scheduled)).ok).toBe(false);
+  });
+
+  test("録り終えてから消した録画の予約は、取り消せる予約に戻らない (完了のまま)", async () => {
+    reset();
+    program(1, MAIN, NOW - 30 * MINUTE, NOW + 30 * MINUTE);
+    const id = reservation(1, { started_at: NOW - 30 * MINUTE });
+    recording(id, 1, { finished_at: NOW - MINUTE, deleted_at: NOW });
+    expect(await cancelProgram(1)).toEqual({
+      ok: false,
+      status: 409,
+      message: NOT_CANCELABLE_REASON,
+    });
   });
 });

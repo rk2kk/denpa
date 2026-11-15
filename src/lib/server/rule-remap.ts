@@ -2,8 +2,8 @@
  * **選局できなくなった局を指すルールを、人が選んだ局に付け替える。**
  *
  * ルールは局の ID (ネットワーク ID とサービス ID) で局を指すので、チャンネルの名前や TS が変わっても外れない
- * (`lineup-follow.ts`)。外れるのはサービス ID が変わったとき (局の統合・終了と、別の局の開始。2023-12 の NHK BS、
- * 2027-04 の BS釣りビジョンから BS12 の新しいチャンネル)。そのときは古い局がいまの局の一覧から消え、ルールは録画しなくなる。
+ * (`lineup-follow.ts`)。外れるのはサービス ID が変わったとき (局の統合・終了と、別の局の開始。2023-12 の NHK BS など)。
+ * そのときは古い局がいまの局の一覧から消え、ルールは録画しなくなる。
  *
  * **自動では付け替えない。** 間違えて付け替えると、別の局の番組を録る。候補を出して人が選ぶ。
  * 候補は同じ種別のいまの局 (テレビ) で、古い局と同じチャンネル (TS) の局、同じ名前の局の順に並べる
@@ -11,11 +11,10 @@
 import { eq } from "drizzle-orm";
 
 import { toHalfWidth } from "../fold";
+import { unreceivableService } from "./agent-channels";
 import { orm } from "./db";
 import { currentServices } from "./epg";
-import { unreceivableChannels } from "./reception";
-import { applyRules } from "./rules";
-import { resolveConflicts } from "./scheduler";
+import { reapply } from "./rule-actions";
 import { DIGITAL_TV, rules as ruleTable, services } from "./schema";
 
 /** 候補として並べる数の上限 */
@@ -39,7 +38,8 @@ export function orphanedRules(): Orphan[] {
       id: services.id,
       name: services.name,
       type: services.type,
-      channel: services.channel,
+      network_id: services.network_id,
+      transport_stream_id: services.transport_stream_id,
       service_type: services.service_type,
     })
     .from(services)
@@ -61,7 +61,14 @@ export function orphanedRules(): Orphan[] {
    * 受信できないチャンネルの局 (`reception.ts`) はサービス ID が変わったのではないので出さない。
    * 止めているルールも出さない (付け替えても録らない)
    */
-  const blocked = unreceivableChannels();
+  const blocked = new Set(
+    orm()
+      .select({ id: services.id })
+      .from(services)
+      .where(unreceivableService())
+      .all()
+      .map((row) => row.id),
+  );
   const orphans: Orphan[] = [];
   for (const rule of orm()
     .select()
@@ -74,10 +81,12 @@ export function orphanedRules(): Orphan[] {
       const gone = byId.get(id);
       // 局の行が無い (映像の無い局として消した) ものは、名前も候補も出せない
       if (gone === undefined) continue;
-      if (blocked.has(`${gone.type}:${gone.channel}`)) continue;
+      if (blocked.has(gone.id)) continue;
       const name = toHalfWidth(gone.name);
       const rank = (service: (typeof live)[number]) =>
-        service.channel === gone.channel
+        gone.transport_stream_id !== null &&
+        service.network_id === gone.network_id &&
+        service.transport_stream_id === gone.transport_stream_id
           ? 0
           : toHalfWidth(service.name) === name
             ? 1
@@ -132,7 +141,6 @@ export async function remapRule(
     .where(eq(ruleTable.id, ruleId))
     .run();
   // 外した局はもう選局できないので、引っ込める予約は気にしなくてよい。足すだけなので、そのルールだけ当てれば足りる
-  applyRules({ rule: ruleId });
-  await resolveConflicts();
+  await reapply(ruleId);
   return null;
 }

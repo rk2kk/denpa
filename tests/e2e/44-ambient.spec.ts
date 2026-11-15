@@ -82,6 +82,9 @@ async function press(page: Page, testid: string): Promise<void> {
 }
 
 test.describe("アンビエントモード", () => {
+  // MPEG-2 をデコードできる端末として開く (`stack.ts` の `liveWithoutMpeg2`)
+  test.use({ liveMpeg2: true });
+
   test.beforeEach(async ({ request }) => {
     await syncEpg(request);
   });
@@ -237,7 +240,7 @@ test.describe("アンビエントモード", () => {
   });
 
   // E2E の既定は動かさない設定 (`playwright.config.ts` の `reducedMotion: 'reduce'`)
-  test("動かさない設定の端末では、1枚だけ写して止める", async ({ page }) => {
+  test("動かさない設定の端末では、1 枚だけ写して止める", async ({ page }) => {
     await watchRaw(page);
     const glow = page.getByTestId("live-frame-ambient");
     await expect(glow).toHaveAttribute("data-plan", "hold");
@@ -259,7 +262,7 @@ test.describe("アンビエントモード", () => {
     test.use({ reducedMotion: "no-preference" });
 
     // E2E のブラウザは GPU を切っていて `<html data-lite>` が付く。動かさない設定と同じに、1 秒に 5 回は描き直さない
-    test("動かしてよい設定でも、1枚だけ写して止める", async ({ page }) => {
+    test("動かしてよい設定でも、1 枚だけ写して止める", async ({ page }) => {
       await watchRaw(page);
       await expect(page.locator("html")).toHaveAttribute("data-lite", "");
       const glow = page.getByTestId("live-frame-ambient");

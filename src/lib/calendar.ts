@@ -1,7 +1,7 @@
 /**
  * ホームのサイドバーの**月のカレンダー** (`HomeCalendar.svelte`)。画面に触らない所だけを置く (単体テストで見る)。
  *
- * 日は一覧の日付の見出しと同じ物差し (`#lib/timeline.ts` の `dayStart`。端末の時刻帯の 0 時) で数える。
+ * 日は一覧の日付の見出しと同じ物差し (`#lib/timeline.ts` の `dayStart`。端末のタイムゾーンの 0 時) で数える。
  * 押した日の見出しを `data-day` で探すので、ずれると押しても動かない。
  * 予約・録画中は、一覧と同じく今日より前の日には置かない (始まったのに録画に入っていない予約も今日の見出しの下)
  */
@@ -35,9 +35,9 @@ export function monthOf(at: number): number {
   return d.getFullYear() * 12 + d.getMonth();
 }
 
-/** 月の見出し (「2026年10月」) */
+/** 月の見出し (「2026 年 10 月」) */
 export function monthLabel(month: number): string {
-  return `${Math.floor(month / 12)}年${(month % 12) + 1}月`;
+  return `${Math.floor(month / 12)} 年 ${(month % 12) + 1} 月`;
 }
 
 /** その行が一覧でどの日の見出しの下に入るか。録画中と予約は今日より前に置かない (`timeline.ts` の `byDay`) */
@@ -46,7 +46,7 @@ export function calendarDay(item: CalendarItem, today: number): number {
   return item.zone === "past" ? day : Math.max(day, today);
 }
 
-/** 日ごとの行の数。鍵はその日の 0 時 */
+/** 日ごとの行の数。キーはその日の 0 時 */
 export function markDays(
   items: CalendarItem[],
   today: number,
@@ -110,7 +110,7 @@ export function stepMonth(
   return months.find((month) => month > current) ?? null;
 }
 
-/** 矢印の鍵で動かした先の日 (←→ は 1 日、↑↓ は 1 週)。ほかの鍵なら null */
+/** 矢印キーで動かした先の日 (←→ は 1 日、↑↓ は 1 週)。ほかのキーなら null */
 export function moveDay(day: number, key: string): number | null {
   const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[key];
   if (step === undefined) return null;
@@ -126,7 +126,7 @@ export function dayAriaLabel(
   today: number,
 ): string {
   const d = new Date(day);
-  const name = `${d.getMonth() + 1}月${d.getDate()}日${day === today ? " (今日)" : ""}`;
+  const name = `${d.getMonth() + 1} 月 ${d.getDate()} 日${day === today ? " (今日)" : ""}`;
   const parts: string[] = [];
   if (mark !== undefined) {
     if (mark.recorded > 0) parts.push(`録画 ${mark.recorded} 件`);

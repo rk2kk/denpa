@@ -4,7 +4,7 @@
         <!-- TUnit のテストは自分で実行できるアプリ (Microsoft.Testing.Platform)。
              Microsoft.NET.Test.Sdk は持たない (TUnit の検出を壊す) -->
         <OutputType>Exe</OutputType>
-        <TargetFramework>net10.0</TargetFramework>
+        <TargetFramework>net11.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <IsPackable>false</IsPackable>
@@ -17,6 +17,8 @@
         <Compile Include="*.cs" />
         <Compile Include="../Denpa.Agent/Json.cs" />
         <Compile Include="../Denpa.Agent/AgentTls.cs" />
+        <Compile Include="../Denpa.Agent/Qr.cs" />
+        <Compile Include="../Denpa.Agent/Mdns.cs" />
         <Compile Include="../Denpa.Agent/Config.cs" />
         <Compile Include="../Denpa.Agent/TunerPool.cs" />
         <Compile Include="../Denpa.Agent/TunerSignal.cs" />
@@ -24,20 +26,25 @@
         <Compile Include="../Denpa.Agent/DeviceProbe.cs" />
         <Compile Include="../Denpa.Agent/ChannelTable.cs" />
         <Compile Include="../Denpa.Agent/Tuning.cs" />
-        <Compile Include="../Denpa.Agent/Px4.cs" />
-        <Compile Include="../Denpa.Agent/Px4Firmware.cs" />
+        <Compile Include="../Denpa.Agent/DvbCable.cs" />
+        <Compile Include="../Denpa.Agent/Userland.cs" />
+        <Compile Include="../Denpa.Agent/TunerNotice.cs" />
         <Compile Include="../Denpa.Agent/Siano.cs" />
+        <Compile Include="../Denpa.Agent/SianoDevice.cs" />
+        <Compile Include="../Denpa.Agent/SianoMessage.cs" />
+        <Compile Include="../Denpa.Agent/SianoFirmware.cs" />
+        <Compile Include="../Denpa.Agent/SianoTs.cs" />
         <Compile Include="../Denpa.Agent/Asicen.cs" />
+        <Compile Include="../Denpa.Agent/AsicenUdtv.cs" />
         <Compile Include="../Denpa.Agent/ChildTs.cs" />
         <Compile Include="../Denpa.Agent/Card.cs" />
+        <Compile Include="../Denpa.Agent/RawProbe.cs" />
         <Compile Include="../Denpa.Agent/Shell.cs" />
         <Compile Include="../Denpa.Agent/UsbSysfs.cs" />
         <Compile Include="../Denpa.Agent/CardShare.cs" />
         <Compile Include="../Denpa.Agent/CardLan.cs" />
         <Compile Include="../Denpa.Agent/Cas.cs" />
         <Compile Include="../Denpa.Agent/BCas.cs" />
-        <Compile Include="../Denpa.Agent/Px4Card.cs" />
-        <Compile Include="../Denpa.Agent/Px4Control.cs" />
         <Compile Include="../Denpa.Agent/CardLinks.cs" />
         <Compile Include="../Denpa.Agent/CardChoice.cs" />
         <Compile Include="../Denpa.Agent/UsbFs.cs" />
@@ -47,12 +54,18 @@
         <Compile Include="../Denpa.Agent/Pcsc.cs" />
         <Compile Include="../Denpa.Agent/Multi2.cs" />
         <Compile Include="../Denpa.Agent/B25.cs" />
+        <Compile Include="../Denpa.Agent/PsiMemory.cs" />
+        <Compile Include="../Denpa.Agent/Emm.cs" />
         <Compile Include="../Denpa.Agent/UsbDevice.cs" />
+        <Compile Include="../Denpa.Agent/UsbHost.cs" />
+        <Compile Include="../Denpa.Agent/UsbBroker.cs" />
+        <Compile Include="../Denpa.Agent/CardUart.cs" />
         <Compile Include="../Denpa.Agent/Mb86h47.cs" />
         <Compile Include="../Denpa.Agent/Mb86h47Programs.cs" />
         <Compile Include="../Denpa.Agent/Fr30.cs" />
         <Compile Include="../Denpa.Agent/UsbFsDevice.cs" />
         <Compile Include="../Denpa.Agent/WinUsbDevice.cs" />
+        <Compile Include="../Denpa.Agent/WinUsbTargets.cs" />
         <Compile Include="../Denpa.Agent/IoKitDevice.cs" />
         <Compile Include="../Denpa.Agent/Dib8096.cs" />
         <Compile Include="../Denpa.Agent/Zd1j.cs" />
@@ -68,16 +81,45 @@
         <Compile Include="../Denpa.Agent/Dt295NativeTuner.cs" />
         <Compile Include="../Denpa.Agent/Dt295NativeTimeline.cs" />
         <Compile Include="../Denpa.Agent/Dt295NativeProbe.cs" />
+        <Compile Include="../Denpa.Agent/It930x.cs" />
+        <Compile Include="../Denpa.Agent/It930xFrame.cs" />
+        <Compile Include="../Denpa.Agent/It930xFirmware.cs" />
+        <Compile Include="../Denpa.Agent/It930xBridge.cs" />
+        <Compile Include="../Denpa.Agent/It930xProbe.cs" />
+        <Compile Include="../Denpa.Agent/It930xTs.cs" />
+        <Compile Include="../Denpa.Agent/It930xDevice.cs" />
+        <Compile Include="../Denpa.Agent/It930xCard.cs" />
+        <Compile Include="../Denpa.Agent/It930xSteps.cs" />
+        <Compile Include="../Denpa.Agent/StopSteps.cs" />
+        <Compile Include="../Denpa.Agent/Cxd2856.cs" />
+        <Compile Include="../Denpa.Agent/TmccPresets.cs" />
+        <Compile Include="../Denpa.Agent/Cxd2858.cs" />
+        <Compile Include="../Denpa.Agent/Tc90522.cs" />
+        <Compile Include="../Denpa.Agent/R850.cs" />
+        <Compile Include="../Denpa.Agent/Rt710.cs" />
+        <Compile Include="../Denpa.Agent/Tsmf.cs" />
+        <Compile Include="../Denpa.Agent/SplitTlv.cs" />
         <Compile Include="../Denpa.Agent/ContinuityCount.cs" />
         <Compile Include="../Denpa.Agent/Probe.cs" />
-        <!-- 本体と同じ名前で埋め込む (Px4Firmware.Bundled が読む) -->
+        <Compile Include="../Denpa.Agent/TsObservation.cs" />
+        <Compile Include="../Denpa.Agent/TlvObservation.cs" />
+        <!-- 本体と同じ名前で埋め込む (It930xFirmware.Embedded が読む) -->
         <EmbeddedResource Include="../Denpa.Agent/firmware/it930x-firmware.bin" LogicalName="it930x-firmware.bin" />
+        <!-- 本体と同じ名前で埋め込む (SianoFirmware.Bundled が読む) -->
+        <EmbeddedResource Include="../Denpa.Agent/firmware/isdbt_rio.inp" LogicalName="isdbt_rio.inp" />
+        <!--
+          PX-MLT5PE と J:COM の QC26 (BS4K の再送信) を受けて、TSMF から選んだ分割 TLV の単位 1,082 個 (198 KiB)。
+          中身は放送の信号とスクランブルされたままの映像・音声だけ (SplitTlvTests・TlvObservationTests)
+        -->
+        <EmbeddedResource Include="fixtures/qc26-split-tlv.bin" LogicalName="qc26-split-tlv.bin" />
+        <!-- Android のアプリが挿したときに起こされる機材の表 (AndroidDeviceFilterTests が WinUsbTargets と突き合わせる) -->
+        <EmbeddedResource Include="../../android/app/src/main/res/xml/device_filter.xml" LogicalName="device_filter.xml" />
     </ItemGroup>
 
     <ItemGroup>
         <!-- MTP (global.json の test.runner) で回す (旧 VSTest 系を持たないわけは上)。
              TUnit はソースジェネレータで動くので、本体と同じく Native AOT でも通る -->
-        <PackageReference Include="TUnit" Version="1.81.10" />
+        <PackageReference Include="TUnit" Version="1.85.0" />
     </ItemGroup>
 
 </Project>

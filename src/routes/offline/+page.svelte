@@ -1,4 +1,5 @@
 <script lang="ts">
+  import "@anyblades/blades/components/progress";
   import { onMount, tick } from "svelte";
 
   import { arming } from "#lib/arming.svelte.js";
@@ -84,6 +85,7 @@
     drawnWaiting = false;
     scrub = null;
     problem = null;
+    lastKept = 0;
     if (src !== null) URL.revokeObjectURL(src);
     if (poster !== null) URL.revokeObjectURL(poster);
     src = null;
@@ -249,8 +251,9 @@
 <div class="page">
   <h1>端末に保存した録画</h1>
   <p class="lead small muted">
-    電波の無いところでも観られます。ここで削除すると、
-    <strong>次にオンラインに戻ったとき、サーバの録画も消えます</strong>。
+    電波の無いところでも観られます。ここで削除すると、<strong
+      >次にオンラインに戻ったとき、サーバの録画も消えます</strong
+    >。
   </p>
 
   {#if playing !== null}
@@ -297,7 +300,7 @@
                 scrub = null;
               }}
             />
-            <span class="clock tiny muted">
+            <span class="clock tiny muted num">
               {clock(scrub ?? drawnAt)} / {clock(drawnLength)}
             </span>
             {#if drawnMuted}
@@ -322,9 +325,9 @@
     <p class="muted">読み込んでいます…</p>
   {:else if list.length === 0}
     <div class="empty-state glow">
-      <p class="bold">まだ何も保存していません</p>
+      <p class="bold">端末に保存した録画はまだありません</p>
       <p class="small muted">
-        録画の詳細の「端末に保存」を押すと、オフラインでも観られるようになります。
+        録画の詳細の「端末に保存」を押すと、オフラインでも観られるようになります
       </p>
     </div>
   {:else}
@@ -384,6 +387,17 @@
               {deleting.armed === item.id ? "端末とサーバから削除" : "削除"}
             </button>
           {/if}
+          <!-- 進み具合は件の面の下端いっぱいに敷く (ホームの行と同じ)。取れないときは動いているだけのバー -->
+          {#if item.state === "downloading"}
+            {@const progress = offline.entries[item.id]?.progress ?? null}
+            <progress
+              class="row-bar"
+              class:running={progress !== null}
+              value={progress ?? undefined}
+              max="1"
+              aria-label="端末への保存の進み具合"
+            ></progress>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -402,13 +416,13 @@
     margin: 0 auto;
   }
   h1 {
-    margin-bottom: 0.25rem;
+    margin-bottom: var(--dp-space-1);
   }
   .lead {
-    margin-bottom: 1rem;
+    margin-bottom: var(--dp-space-4);
   }
   .player {
-    margin-bottom: 1rem;
+    margin-bottom: var(--dp-space-4);
   }
   .player video {
     display: block;
@@ -436,8 +450,8 @@
   .controls {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    margin-top: 0.25rem;
+    gap: var(--dp-space-2);
+    margin-top: var(--dp-space-1);
   }
   .controls input[type="range"] {
     min-width: 0;
@@ -446,27 +460,39 @@
   }
   .clock {
     flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
   }
   .problem {
-    margin: 0.25rem 0 0;
+    margin: var(--dp-space-1) 0 0;
   }
   .player-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: 0.25rem;
-  }
-  .name {
-    font-weight: var(--dp-weight);
+    margin-top: var(--dp-space-1);
   }
   /* 1 件ずつ件の面 (`app.css` の `.item`) に乗せ、並べ方は `.item-list` (docs/design.md の「何行かある一覧」。ホームの行と同じ) */
   .row {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: var(--dp-space-3);
     min-height: var(--dp-item-h);
-    padding: 0.5rem 0.75rem;
+    padding: var(--dp-space-2) var(--dp-space-3);
+    /* 下端のバーを面の角で切り落とす */
+    overflow: clip;
+  }
+  /* 進み具合のバー。高さと色はホームの行と同じ (`home.css` の `.row-bar.success`) */
+  .row-bar {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    width: 100%;
+    height: 3px;
+    margin: 0;
+    border-radius: 0;
+    --pico-progress-color: var(--dp-ok);
+    /* 画面の外では描かない (バーの光が回り続けない)。大きさは上で決めてあるので contain-intrinsic-size は要らない */
+    content-visibility: auto;
   }
   .thumb {
     width: 5rem;
@@ -485,6 +511,6 @@
     flex-shrink: 0;
   }
   .pending {
-    margin-top: 0.75rem;
+    margin-top: var(--dp-space-3);
   }
 </style>

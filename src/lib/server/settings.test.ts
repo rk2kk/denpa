@@ -36,6 +36,19 @@ describe("コーデックの選択", () => {
   test("知らない値は捨てる", () => {
     expect(parseCodecs("av1,vp9")).toEqual(["av1"]);
   });
+
+  test("選んだ一覧で書き、主とエンコードするかは読むときに決まる", () => {
+    expect(saveSettings({ codecs: ["av1", "h264"] })).toMatchObject({
+      codec: "av1",
+      codecs: ["av1", "h264"],
+      encode: true,
+    });
+    expect(saveSettings({ codecs: [] })).toMatchObject({
+      codec: "none",
+      codecs: [],
+      encode: false,
+    });
+  });
 });
 
 /*
@@ -108,6 +121,7 @@ describe("録画とライブのエンコーダ", () => {
           qsv: [],
           amf: [],
           videotoolbox: [],
+          mediacodec: [],
         },
       },
     });
@@ -120,6 +134,7 @@ describe("録画とライブのエンコーダ", () => {
           qsv: [],
           amf: [],
           videotoolbox: [],
+          mediacodec: [],
         },
       },
     });
@@ -130,5 +145,38 @@ describe("録画とライブのエンコーダ", () => {
   test("壊れた値は空として読む", () => {
     store("liveHwAllow", "{");
     expect(settings().liveHwAllow).toEqual({});
+  });
+});
+
+/** **`settings()` は設定の表を 1 回のクエリで読む** (`SETTING_KEYS`)。どのキーも書いた値が返り、設定でない控えは混ざらない */
+describe("設定をまとめて読む", () => {
+  test("どのキーも書いた値を読み、設定でない控えは読まない", () => {
+    store("codec", "h264");
+    store("keepOriginal", "true");
+    store("postalCode", "1234567");
+    store("prefecture", "14");
+    store("bmlNetwork", "false");
+    store("transcodeLimit", "3");
+    store("jikkyo", "true");
+    store("jikkyoNg", JSON.stringify(["ネタバレ"]));
+    store("indoorHosts", JSON.stringify(["nas.lan"]));
+    store("recordLogo", "true");
+    // 画面の設定でない控え (`stored` で読むもの)
+    store("satellite-lineup", "BS");
+    expect(settings()).toMatchObject({
+      codec: "h264",
+      codecs: ["h264"],
+      encode: true,
+      keepOriginal: true,
+      postalCode: "1234567",
+      prefecture: 14,
+      bmlNetwork: false,
+      transcodeLimit: 3,
+      jikkyo: true,
+      jikkyoNg: ["ネタバレ"],
+      indoorHosts: ["nas.lan"],
+      recordLogo: true,
+    });
+    expect(Object.keys(settings())).not.toContain("satellite-lineup");
   });
 });

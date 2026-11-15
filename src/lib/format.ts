@@ -1,19 +1,31 @@
 import type { CardReaderState } from "./server/scramble";
 import type { TunerSignal } from "./server/tuner";
+import { origin, type VideoLoss } from "./types";
 
 export const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 
 /**
  * チャンネル種別の見出し。**どれを出すか (並び) は画面ごとに決める**。
- * ここは名前だけ。5 画面が同じ表をコピーしていたのを 1 つに (SKY を選べるのは
- * ルールの条件だけだが、余分に持っていても他画面の表示には出ない)
+ * ここは名前だけ。5 画面が同じ表をコピーしていたのを 1 つに (SKY が並ぶのはルールの条件と、
+ * 受けられる機材があるときの受信の設定だけ。CATV は局があれば番組表とライブにも並ぶ。`types.ts` の `shownTypes`)
  */
 export const SERVICE_TYPE_LABEL: Record<string, string> = {
   GR: "地上波",
   BS: "BS",
   CS: "CS",
-  SKY: "SKY",
+  CATV: "ケーブル",
+  SKY: "スカパー！プレミアム",
 };
+
+/** 種別の並びを画面の名前で (「地上波・BS・CS」)。表に無い種別は符号のまま */
+export function typeNames(types: readonly string[]): string {
+  return types.map((type) => SERVICE_TYPE_LABEL[type] ?? type).join("・");
+}
+
+/** 名前のあとに日本語を続けるときの形。半角で終わる名前 (BS・CS) だけ、あとに空白を入れる (「地上波の」「BS・CS の」) */
+export function beforeJapanese(name: string): string {
+  return /[!-~]$/.test(name) ? `${name} ` : name;
+}
 
 export function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -56,18 +68,18 @@ export function duration(startAt: number, endAt: number): string {
   return durationMs(endAt - startAt);
 }
 
-/** 「いま」の線に添える一言 (`NowLine`)。`short` は狭い幅で代わりに出す形 */
+/** 「いま」の行に添える一言 (`NowMark`)。`short` は狭い幅で代わりに出す形 */
 export interface NowStatus {
   text: string;
   short: string;
 }
 
 /**
- * **「いま」の線に添える一言。** 次の録画 (いまより後に始まる予約のうちいちばん早いもの) までを
+ * **「いま」の行に添える一言。** 次の録画 (いまより後に始まる予約のうちいちばん早いもの) までを
  * 「次の録画まで 3 時間 59 分」と言う。無ければ null (何も添えない)。録画中かどうかは言わない。
- * 録画中の行は線の上にあり、あと何分かは行の 3 段目が言う (`recordingLeft`)。
+ * 録画中の行は「いま」の行の上にあり、あと何分かは行の 3 段目が言う (`recordingLeft`)。
  *
- * 分は切り上げる。線の時刻は分を切り捨てて出すので、22:00 の録画は 18:01 の間ずっと「3 時間 59 分」になり、
+ * 分は切り上げる。「いま」の行の時刻は分を切り捨てて出すので、22:00 の録画は 18:01 の間ずっと「3 時間 59 分」になり、
  * 時刻と食い違わない。1 日より先は日数で
  */
 export function nowStatus(
@@ -139,6 +151,28 @@ export function clipNote(
 }
 
 /**
+ * 一覧に出す、映像が欠けた長さ (`recordings.video_loss`) の最短 (秒)。長さは分で出すので、1 分に満たないと
+ * 「30 分のうち 30 分」になって伝わらない
+ */
+const VIDEO_LOSS_MIN = 60;
+
+/**
+ * **元の TS に映像が無かった所の言い方。** 出すほどでなければ null。
+ * 映像が無いまま録画が終わったら「録画が途中で切れています」、途中だけなら「映像が途中で欠けています」。
+ * どちらも、映像があるはずだった長さのうち、映像が残っている長さを添える (「30 分のうち 19 分」)。
+ * 欠けた理由は書かない (サーバには分からない)
+ */
+export function videoLossNote(
+  loss: VideoLoss | null,
+): { label: string; detail: string } | null {
+  if (loss === null || loss.lost < VIDEO_LOSS_MIN) return null;
+  return {
+    label: loss.tail ? "録画が途中で切れています" : "映像が途中で欠けています",
+    detail: `${durationMs(loss.span * 1000)}のうち ${durationMs((loss.span - loss.lost) * 1000)}`,
+  };
+}
+
+/**
  * 再生位置の表示。**`12:34` / `1:02:03`。**
  *
  * `durationMs` は「27 分」のように読み物の書き方をするもので、動かしている間の
@@ -159,7 +193,7 @@ export function clock(seconds: number): string {
  * 録画の長さ。実際に録れた長さがあればそちらを出す。
  *
  * 番組表の尺 (end_at - start_at) は予定でしかなく、途中で止めたときや
- * CM を切ったときは出来上がりと合わない。取れていない古い行は予定で代用する。
+ * 前のバージョンで CM を切ってエンコードしたときは出来上がりと合わない。取れていない古い行は予定で代用する。
  */
 export function recordedDuration(recording: {
   duration_ms: number | null;
@@ -181,7 +215,7 @@ export function size(bytes: number): string {
 
 /**
  * 進み具合のバー (`JobProgress`) に出す大きさの単位と換算。数百 GB をバイトで並べても読めないので、
- * 合計が 1GB 以上なら GB (小数 1 桁)、それより小さければ MB (引き継ぎ・別の機械へ移す)
+ * 合計が 1 GB 以上なら GB (小数 1 桁)、それより小さければ MB (引き継ぎ・別の機械へ移す)
  */
 export function byteScale(total: number): {
   unit: "GB" | "MB";
@@ -196,11 +230,10 @@ export function byteScale(total: number): {
 }
 
 /**
- * 録画の見出しに添える空きと残り時間 (`disk.capacity`)。「空き 1.2TB」と「約 900 時間」。
- * 分けて返すのは、列が狭いと時間のほうだけ落とすため。目安が無ければ `hours` は null。
+ * 録画の「状態」の「空き」に出す空きと残り時間 (`disk.capacity`)。「1.2 TB」と「約 900 時間」。目安が無ければ `hours` は null。
  *
- * **細かく出さない。** 見出しの脇に小さく置くので短く、また値が少し動くたびに
- * 画面の HTML が変わると指紋 (ETag) が合わなくなるので、サーバでこの粗さに丸めてから渡す。
+ * **細かく出さない。** 小さく置くので短く、また値が少し動くたびに
+ * 画面の HTML が変わると ETag が合わなくなるので、サーバでこの粗さに丸めてから渡す。
  * 時間は桁に合わせて丸める (目安なので 937 と出すほどの精度は無い)
  */
 export function capacityLabel(
@@ -210,15 +243,15 @@ export function capacityLabel(
   const tb = free / 1024 ** 4;
   const space =
     tb >= 1
-      ? `${tb.toFixed(1)}TB`
+      ? `${tb.toFixed(1)} TB`
       : free >= 1024 ** 3
-        ? `${Math.floor(free / 1024 ** 3)}GB`
-        : "1GB 未満";
-  if (hours === null) return { free: `空き ${space}`, hours: null };
-  if (hours < 1) return { free: `空き ${space}`, hours: "1 時間未満" };
+        ? `${Math.floor(free / 1024 ** 3)} GB`
+        : "1 GB 未満";
+  if (hours === null) return { free: space, hours: null };
+  if (hours < 1) return { free: space, hours: "1 時間未満" };
   const step = hours >= 1000 ? 100 : hours >= 100 ? 10 : 1;
   return {
-    free: `空き ${space}`,
+    free: space,
     hours: `約 ${Math.floor(hours / step) * step} 時間`,
   };
 }
@@ -227,7 +260,7 @@ export function capacityLabel(
  * 進み具合。**小数第 1 位まで出す。**
  *
  * 整数だけだと、1 時間かかるエンコードでは同じ数字が 30 秒以上動かない。
- * 動いていないのか止まったのか画面から判らなかったので、1 桁足してある
+ * 動いていないのか止まったのか画面から分からなかったので、1 桁足してある
  */
 export function percent(value: number): string {
   const clamped = Math.min(Math.max(value, 0), 1);
@@ -238,7 +271,7 @@ export function percent(value: number): string {
  * 残り時間の見込み。**秒まで出す。**
  *
  * 分どまりだと終わりぎわの数分が「あと 1 分」で固まってしまい、
- * 見終わるまで待てばいいのか席を立っていいのか判らなかった。
+ * 見終わるまで待てばいいのか席を立っていいのか分からなかった。
  * 秒の桁は多少ふらつくが、動いていることそのものが情報になる
  */
 export function eta(ms: number | null): string {
@@ -271,8 +304,8 @@ export function encodeDetail(
  */
 const PHASE_LABEL: Record<string, string> = {
   descramble: "スクランブル復号中",
+  remux: "MP4 に詰め替え中",
   cm: "CM 検出中",
-  cut: "CM カット中",
   encode: "エンコード中",
 };
 
@@ -290,7 +323,7 @@ function encodeLabel(
  * 一覧の行に出す状態。
  *
  * 録画の状態 (`state`) は録画そのものの話しかしない。エンコードは別の仕事なので、
- * 動いていればその段階を、落ちていれば落ちたことを、こちらで足す。
+ * 動いていればその段階を、失敗していれば失敗したことを、こちらで足す。
  * エンコードの失敗を録画の状態に書き込んでいた頃は、元の TS が無事なのに
  * 「失敗」と出て再生できなくなっていた
  */
@@ -327,12 +360,12 @@ export function rowState(rec: {
 }
 
 /**
- * 状態のラベル(app.css の `.tag`)の色。空は色なし(地の色のラベル)。
+ * 状態のラベル (app.css の `.tag`) の色。空は色なし (地の色のラベル)。
  *
  * **`solid` はいま動いているものの印** (行の段の色を決める。`row-status.ts`)。一覧は 1 画面に何十行も並ぶので、
- * 予約済み(青)・視聴可能(緑)・録画中(赤)を全部塗っていた頃は色の列が 3 本立ち、
+ * 予約済み (青)・視聴可能 (緑)・録画中 (赤) を全部塗っていた頃は色の列が 3 本立ち、
  * どれが急ぐ話なのか分からなくなっていた。**待っているだけの状態は色を付けない**、
- * 済んだものは淡い緑、手を止めてほしいもの(競合・失敗)は淡い赤
+ * 済んだものは淡い緑、手を止めてほしいもの (競合・失敗) は淡い赤
  */
 export function badgeClass(state: string): string {
   switch (state) {
@@ -348,7 +381,7 @@ export function badgeClass(state: string): string {
     case "conflict":
     case "failed":
       return "error";
-    // 予約済み・待ち・取消・削除は「見て欲しいこと」が無いので色を付けない
+    // 予約済み・待ち・取消・削除は「見てほしいこと」が無いので色を付けない
     default:
       return "";
   }
@@ -451,7 +484,7 @@ export const NOT_CANCELABLE_REASON = "放送か録画が終わった予約は取
 
 /**
  * ロゴでの判定が使えなかったときに、CM 検出の覚え書き (`recordings.cm_note`) へ
- * 入れる目印。無音検出に落ちた理由はこの後ろに続く。
+ * 入れる目印。無音だけの判定に切り替えた理由はこの後ろに続く。
  */
 export const LOGO_UNUSABLE = "ロゴは使えず";
 
@@ -460,10 +493,10 @@ export const LOGO_UNUSABLE = "ロゴは使えず";
  * 一覧に出し、観はじめに CM 飛ばしを入れない (`watch.skipCmAtStart`)。
  *
  * **覚え書きから読む。別の列では持たない。** 印を立てていた頃は、後から条件を
- * 広げても既に録ってある分には効かなかった (「結果の 100%が CM 判定だったので捨てた」
+ * 広げても既に録ってある分には効かなかった (「結果の 100% が CM 判定だったので捨てた」
  * ときも出すようにしたのに、実機の 2 本は印が 0 のままで画面に出なかった)。
  *
- * 落ちた理由がロゴとは限らない (無音側の道具が落ちることもある) が、そのときも
+ * ロゴが原因とは限らない (無音検出のツールが失敗することもある) が、そのときも
  * 出しておく。理由は覚え書きに書いてあるし、精度が落ちていることに変わりはない。
  */
 export function logoUnusable(cmNote: string | null): boolean {
@@ -475,7 +508,7 @@ export function logoUnusable(cmNote: string | null): boolean {
  *
  * エージェントは `Gemplus USB SmartCard Reader (usb 4-11)` のように場所を括弧で
  * 後ろに付けて返す。**場所は 2 行目に小さく出す**。1 行に詰めていた頃は列が狭く、
- * 文字の途中で 1 文字ずつ折り返して名前が読めなかった。括弧の無い名前 (px4 の内蔵
+ * 文字の途中で 1 文字ずつ折り返して名前が読めなかった。括弧の無い名前 (asicend の内蔵
  * リーダーなど) はそのまま
  */
 export function splitReaderName(name: string): {
@@ -497,18 +530,23 @@ export const READER_STATE_LABEL: Record<CardReaderState, string> = {
 };
 
 /**
- * 受信の状態と C/N の出し方 (設定の「チューナー」と、チャンネルの受信品質の測定)。
+ * 受信の状態と C/N と強度の出し方 (設定の「チューナー」と、チャンネルの受信品質の測定)。
  * **生の値は dB と読まれないように「(生の値)」を付け、単位を付けない** (機材やドライバが返した値のまま。docs/tuners.md「信号レベル」)。
- * 選局したときに測った値 (px4d) はそう言う
+ * 選局したときに測った値 (asicend) はそう言う。強度は dBm で測れた機材だけ出し、測れない機材では何も添えない
  */
 export function signalText(signal: TunerSignal): string {
-  const state = signal.locked ? "同期しています" : "同期していません";
-  if (signal.cn === null) return state;
-  const cn =
-    signal.unit === "dB"
-      ? `C/N: ${signal.cn.toFixed(1)} dB${signal.atTune ? " (選局したとき)" : ""}`
-      : `C/N (生の値): ${signal.cn.toLocaleString("ja-JP")}`;
-  return `${state}・${cn}`;
+  const parts = [signal.locked ? "同期しています" : "同期していません"];
+  if (signal.strengthDbm !== undefined) {
+    parts.push(`強度: ${signal.strengthDbm.toFixed(1)} dBm`);
+  }
+  if (signal.cn !== null) {
+    parts.push(
+      signal.unit === "dB"
+        ? `C/N: ${signal.cn.toFixed(1)} dB${signal.atTune ? " (選局したとき)" : ""}`
+        : `C/N (生の値): ${signal.cn.toLocaleString("ja-JP")}`,
+    );
+  }
+  return parts.join("・");
 }
 
 /** 生の値の C/N に添える注記。何と比べるものかを言う */
@@ -564,17 +602,21 @@ export function linkify(text: string): TextPart[] {
 }
 
 /**
- * **テレビに出ている番号。** 地上波はリモコン番号、BS/CS はサービス ID がそのまま 3 桁番号
+ * **テレビに出ている番号。** 地上波はリモコン番号、BS・CS はサービス ID がそのまま 3 桁番号
  * (BS朝日1=151)。局名だけだと、テレビで覚えている番号から探せない。
- * 地上波でリモコン番号が分からなければ null (出さない)
+ * ケーブルの局は再送信している元の放送 (`origin`) で決める。
+ * リモコン番号が分からない地上波とケーブルの自主放送は null (出さない。サービス ID はテレビの番号ではない)
  */
 export function channelNumber(service: {
   type: string;
+  network_id: number;
   remote_control_key: number | null;
   service_id: number;
 }): number | null {
+  const kind =
+    service.type === "CATV" ? origin(service.network_id) : service.type;
   return (
     service.remote_control_key ??
-    (service.type === "GR" ? null : service.service_id)
+    (kind === "GR" || kind === "CATV" ? null : service.service_id)
   );
 }

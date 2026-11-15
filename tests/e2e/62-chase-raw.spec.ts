@@ -174,7 +174,7 @@ test.describe("追っかけを MPEG-2 のまま観る", () => {
     const after = await where();
     await expect.poll(where, { timeout: 15_000 }).toBeGreaterThan(after);
 
-    // **H.264 を選ぶとエンコードしたものを `<video>` で観て、速さも出る**
+    // **H.264 を選ぶとエンコードしたものを `<video>` で観て、速さも出る** (GPU が無いので、メニューに並ぶエンコードするものは H.264)
     await wakeControls(page, "chase");
     await pickCodec(page, "chase", "h264");
     await expect(page.getByTestId("live-raw")).toHaveCount(0, {

@@ -2,7 +2,7 @@ using TUnit.Core.Enums;
 
 namespace Denpa.Agent.Tests;
 
-/// <summary>リーダーが返すメッセージの種類 (CCID 1.1 の 6.2)。本体は Seq で答えを見分けるので、偽のリーダーだけが使う</summary>
+/// <summary>リーダーが返すメッセージの種類 (CCID 1.1 の 6.2)。本体は Seq で応答を見分けるので、偽のリーダーだけが使う</summary>
 internal static class CcidAnswer
 {
     public const byte DataBlock = 0x80;
@@ -14,8 +14,8 @@ internal static class CcidAnswer
  * USB の CCID リーダーを直接扱うところ。
  *
  * 本物のリーダーは無い。ディスクリプタは Gemalto (Gemplus) PC Twin Reader (08e6:3437) の
- * 値で組み (CCID ドライバの readers/GemPCTwin.txt)、リーダーはバルク転送の入口ごと偽物にする。
- * 偽物は USB の振る舞い (パケットの倍数で終わるメッセージは ZLP が無いと返らない) も真似る。
+ * 値で組み (CCID ドライバの readers/GemPCTwin.txt)、リーダーはバルク転送のパイプごと偽物にする。
+ * 偽物は USB の振る舞い (パケットの倍数で終わるメッセージは ZLP が無いと返らない) も再現する。
  * 実機で当てるのは Ccid.Describe() (`denpa-agent --card`)。
  */
 public class CcidTests
@@ -23,7 +23,7 @@ public class CcidTests
     private static readonly byte[] BcasAtr = Convert.FromHexString("3BF01200FF9181B17C451F0399");
 
     /// <summary>PC Twin のデバイス + 構成ディスクリプタ (usbfs の fd を読んだときの並び)</summary>
-    private static byte[] TwinDescriptors()
+    internal static byte[] TwinDescriptors()
     {
         var blob = new List<byte>();
         void U16(int v) => blob.AddRange([(byte)v, (byte)(v >> 8)]);
@@ -92,9 +92,9 @@ public class CcidTests
     [Test]
     public async Task ioctl_の番号は_64bit_の構造体の大きさで組む()
     {
-        await Assert.That(UsbFsPipe.Bulk).IsEqualTo(0xC0185502u);
-        await Assert.That(UsbFsPipe.ClaimInterface).IsEqualTo(0x8004550Fu);
-        await Assert.That(UsbFsPipe.ReleaseInterface).IsEqualTo(0x80045510u);
+        await Assert.That(UsbFs.Bulk).IsEqualTo(0xC0185502u);
+        await Assert.That(UsbFs.ClaimInterface).IsEqualTo(0x8004550Fu);
+        await Assert.That(UsbFs.ReleaseInterface).IsEqualTo(0x80045510u);
     }
 
     [Test]
@@ -120,7 +120,7 @@ public class CcidTests
 
     /// <summary>
     /// 偽のリーダー。命令を受けると <c>handler</c> が返す応答を積む。
-    /// 読み方が USB として無理なら (ZLP 無しでは返らない・パケットの途中で切る) その場で落とす
+    /// 読み方が USB として無理なら (ZLP 無しでは返らない・パケットの途中で切る) その場で例外を送出する
     /// </summary>
     private sealed class FakeReader(Func<CcidReply, IEnumerable<byte[]>> handler, int packet = 64) : IBulkPipe
     {
@@ -157,15 +157,15 @@ public class CcidTests
         public void Dispose() => Disposed = true;
     }
 
-    /// <summary>応答の形式は命令と同じ (頭 10 バイトの 8〜10 バイト目が bmStatus / bError / 3 つめ)</summary>
+    /// <summary>応答の形式は命令と同じ (ヘッダ 10 バイトの 8〜10 バイト目が bmStatus / bError / 3 つめ)</summary>
     private static byte[] Reply(byte type, byte seq, byte status, byte error, ReadOnlySpan<byte> data, byte chain = 0) =>
         CcidMessage.Command(type, seq, data, status, error, chain);
 
     private static byte[] Slot(CcidReply command, byte status = 0x01) => Reply(CcidAnswer.SlotStatus, command.Seq, status, 0, []);
 
     /// <summary>
-    /// PC Twin に B-CAS が挿さっているつもりの偽物。カードは I ブロックに <paramref name="answer"/> を返す。
-    /// 返す前に時間延長と、番号の違う (前の誰かが残した) 応答を挟む
+    /// B-CAS が挿さった PC Twin の偽物。カードは I ブロックに <paramref name="answer"/> を返す。
+    /// 返す前に時間延長と、番号の違う (前の命令が残した) 応答を挟む
     /// </summary>
     private static FakeReader TwinWithBcas(byte[] answer)
     {
@@ -183,14 +183,14 @@ public class CcidTests
                     Reply(CcidAnswer.DataBlock, command.Seq, 0x80, 1, []),
                     Reply(CcidAnswer.DataBlock, command.Seq, 0, 0, T1Protocol.Block((byte)(cardNs++ << 6), answer)),
                 ],
-            _ => throw new InvalidOperationException($"思わぬ命令 0x{command.Type:X2}"),
+            _ => throw new InvalidOperationException($"予期しない命令 0x{command.Type:X2}"),
         });
     }
 
     [Test]
     public async Task PC_Twin_と_B_CAS()
     {
-        // 頭 10 + NAD PCB LEN + 50 + LRC = 64 バイト。パケットちょうどで終わる
+        // ヘッダ 10 + NAD PCB LEN + 50 + LRC = 64 バイト。パケットちょうどで終わる
         var answer = Enumerable.Range(0, 48).Select(i => (byte)i).Concat(new byte[] { 0x90, 0x00 }).ToArray();
         var reader = TwinWithBcas(answer);
         var link = new CcidLink("PC Twin", reader, Twin);
@@ -215,7 +215,7 @@ public class CcidTests
     }
 
     [Test]
-    public async Task カードが無ければ投げる()
+    public async Task カードが無ければ例外にする()
     {
         var reader = new FakeReader(command => command.Type == CcidMessage.PowerOn
             ? [Reply(CcidAnswer.SlotStatus, command.Seq, 0x42, CcidMessage.IccMute, [])]
@@ -271,7 +271,7 @@ public class CcidTests
         });
         var link = new CcidLink("APDU", reader, info);
         link.Reset();
-        // 自分で決めるリーダーには SetParameters も S(IFS) も送らない。電圧は自動 (0)
+        // 自動で決めるリーダーには SetParameters も S(IFS) も送らない。電圧は自動 (0)
         await Assert.That(reader.Commands.Any(c => c.Type == CcidMessage.SetParameters)).IsFalse();
         await Assert.That(reader.Commands.Single(c => c.Type == CcidMessage.PowerOn).Status).IsEqualTo((byte)0);
 
@@ -312,7 +312,7 @@ public class CcidTests
             Write("1-2:1.0", "bInterfaceClass", "03");
             Write("1-2:1.0", "bInterfaceNumber", "00");
 
-            var found = Ccid.Find(root, Path.Combine(root, "dev"));
+            var found = Ccid.Find(new SysfsUsbHost(root, Path.Combine(root, "dev")))!;
             await Assert.That(found.Select(c => c.Name)).IsEquivalentTo(["Gemplus USB SmartCard Reader (usb 4-11)"]);
             // 開くのは Open を呼んだときだけ。ここでは /dev/bus/usb/004/007 が無い
             await Assert.That(Assert.Throws<IOException>(() => found[0].Open()).Message).Contains("004/007");

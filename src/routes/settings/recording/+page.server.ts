@@ -13,7 +13,6 @@ import {
   hwUsable,
 } from "#lib/hw.js";
 import { LIVE_CODECS } from "#lib/live.js";
-import { isCmMode } from "#lib/server/cm.js";
 import {
   describeDevice,
   type HwEncode,
@@ -27,7 +26,6 @@ import {
   TRANSCODE_LIMIT_MAX,
 } from "#lib/server/settings.js";
 import { transcodeAuto } from "#lib/server/transcode.js";
-import type { VideoCodec } from "#lib/types.js";
 
 /** 画面に渡す形式。GPU ごとの一言 (`summary`) と、testid に使う GPU の名前 (`port`) を添える */
 function forScreen(hw: HwEncode) {
@@ -61,8 +59,8 @@ export function load() {
 export const actions = {
   /**
    * エンコード。番組ごとに変えたくなることが実際にはほとんど無いので全体で 1 つ。
-   * コーデックごとのエンコーダ (GPU)・その場で変換する本数・元の TS・コマ数も同じ節で受ける。
-   * **節ごとにフォームが分かれている** (視聴・CM は別の action)。ここで受けない値には触らない
+   * コーデックごとのエンコーダ (GPU)・その場で変換する本数・元の TS も同じ節で受ける。
+   * **節ごとにフォームが分かれている** (視聴は別の action)。ここで受けない値には触らない
    */
   saveEncoding: async ({ request }) => {
     const form = await request.formData();
@@ -122,9 +120,8 @@ export const actions = {
     );
     saveSettings({
       // 並びは HW_CODECS のまま (AV1 → H.265 → H.264)
-      codec: (codecs.length > 0 ? codecs.join(",") : "none") as VideoCodec,
+      codecs,
       keepOriginal: form.get("keepOriginal") === "on",
-      fpsDetect: form.get("fpsDetect") === "on",
       hwAllow,
       liveHwAllow,
       ...(transcodeLimit === undefined ? {} : { transcodeLimit }),
@@ -132,28 +129,12 @@ export const actions = {
     return { success: true, saved: true };
   },
 
-  /** CM の扱い (チャプターを打つ・切り取る・何もしない) */
-  saveCm: async ({ request }) => {
-    const cmCut = String((await request.formData()).get("cmCut") ?? "");
-    if (!isCmMode(cmCut)) {
-      return fail(400, { message: "CM の指定が不正です" });
-    }
-    saveSettings({ cmCut });
-    return { success: true, saved: true };
-  },
-
-  /**
-   * 視聴 (世帯の設定)。家の中の名前 (1 行に 1 つ。ライブの「自動」で MPEG-2 を先に選ぶ。`#lib/host.ts`) と、
-   * コーデックのメニューに H.264 と H.265 を出さないか (`#lib/live-choice.ts` の `HIDDEN_CODECS`)
-   */
+  /** 視聴 (世帯の設定)。家の中の名前 (1 行に 1 つ。ライブの「自動」で MPEG-2 を先に選ぶ。`#lib/host.ts`) */
   saveViewing: async ({ request }) => {
     const form = await request.formData();
     const parsed = parseIndoorHosts(String(form.get("indoorHosts") ?? ""));
     if ("error" in parsed) return fail(400, { message: parsed.error });
-    saveSettings({
-      indoorHosts: parsed.hosts,
-      hideH264Hevc: form.get("hideH264Hevc") === "on",
-    });
+    saveSettings({ indoorHosts: parsed.hosts });
     return { success: true, saved: true };
   },
 
