@@ -12,8 +12,8 @@ import { trustFakeAgent } from "./fake-agent-trust";
 /**
  * 局だけの取り込み。
  *
- * どの局があるかを知っているのは**エージェント** (チャンネルスキャンの結果) で、
- * 番組表を集めるのは denpa 自身。集めるほうは 1 チャンネルに数分かかるので、
+ * どの局があるかは**エージェント**の控え (チャンネルスキャンの結果) で決まり、
+ * 番組表を取得するのは denpa 自身。取得するほうは 1 チャンネルに数分かかるので、
  * 局だけ先に取り込めることを確かめる。
  *
  * 環境変数ではなく設定そのものを書き換えている (files.test.ts と同じ理由)。
@@ -27,20 +27,26 @@ config.dataDir = dirname(config.dbPath);
 const asked: string[] = [];
 
 function channel(serviceId: number, name: string, serviceType = 1) {
+  const services: {
+    serviceId: number;
+    serviceType: number;
+    name: string;
+    partialReception?: boolean;
+  }[] = [{ serviceId, serviceType, name }];
   return {
     type: "GR",
     channel: "T16",
     networkId: 32391,
     transportStreamId: 32391,
     remoteControlKeyId: 9,
-    services: [{ serviceId, serviceType, name }],
+    services,
   };
 }
 
 /** エージェントが返すチャンネル。テストの途中で入れ替える */
-let offered = [
+let offered: ReturnType<typeof channel>[] = [
   channel(23608, "ＴＯＫＹＯ　ＭＸ"),
-  // データ放送。映像が入っていないので取り込まない
+  // 部分受信の印の無い控え (印を書く前のスキャン) のデータ放送。ワンセグかもしれないので取り込まない
   channel(700, "ＭＸデータ１", 192),
 ];
 
@@ -117,6 +123,53 @@ describe("syncServicesOnly", () => {
   test("何度呼んでも増えない", async () => {
     syncServicesOnly(await readChannels());
     expect(orm().select({ n: count() }).from(services).get()).toEqual({ n: 1 });
+  });
+
+  test("ラジオと、部分受信でないと控えにあるデータ放送の局を取り込む。ワンセグと、印の無いデータ放送の局は落とす", async () => {
+    const before = offered;
+    const ids = () =>
+      orm()
+        .select({ id: services.id, type: services.service_type })
+        .from(services)
+        .orderBy(services.id)
+        .all();
+    offered = [
+      {
+        ...channel(23608, "ＴＯＫＹＯ　ＭＸ"),
+        services: [
+          { serviceId: 23608, serviceType: 1, name: "ＴＯＫＹＯ　ＭＸ" },
+          { serviceId: 23620, serviceType: 2, name: "ＭＸラジオ" },
+          {
+            serviceId: 23615,
+            serviceType: 192,
+            name: "ＭＸデータ",
+            partialReception: false,
+          },
+          {
+            serviceId: 24136,
+            serviceType: 192,
+            name: "ＭＸワンセグ",
+            partialReception: true,
+          },
+          // スキャンし直す前の控え。ワンセグかもしれないので落とす
+          { serviceId: 700, serviceType: 192, name: "ＭＸデータ１" },
+          // エンジニアリング
+          { serviceId: 23699, serviceType: 0xa4, name: "ＥＮＧ" },
+        ],
+      },
+    ];
+    try {
+      syncServicesOnly(await readChannels());
+      expect(ids()).toEqual([
+        { id: 3239123608, type: 1 },
+        { id: 3239123615, type: 192 },
+        { id: 3239123620, type: 2 },
+      ]);
+    } finally {
+      offered = before;
+      orm().delete(services).run();
+      syncServicesOnly(await readChannels());
+    }
   });
 });
 
@@ -203,8 +256,8 @@ describe("局名の幅", () => {
 /**
  * 選局できなくなった局の片付け。
  *
- * スキャンをやり直すと局は普通に入れ替わる。番組表を置いたままにしていた頃は、
- * もう選局できない局の番組が数万件残り、検索にも引っかかり続けていた。
+ * スキャンをやり直すと局は普通に入れ替わる。番組表を置いたままにすると、
+ * もう選局できない局の番組が残り、検索にも引っかかり続ける。
  */
 describe("消えた局の片付け", () => {
   function seed(serviceId: number): void {
@@ -311,9 +364,9 @@ describe("消えた局の片付け", () => {
   });
 
   /*
-   * **実機で起きたこと。** エージェントからは空だけでなく*欠けた*一覧も返る。
-   * そちらは「1 局も返ってこなかった」の条件に掛からないので、まだ現役の局
-   * (NHK総合1・TOKYO MX1・テレ東…) の予約が 44 件まとめて取り消されていた。
+   * エージェントからは空だけでなく*欠けた*一覧も返る。
+   * そちらは「1 局も返ってこなかった」の条件に掛からないので、すぐ片付けると、まだ現役の局の
+   * 予約がまとめて取り消される (実機で 44 件)。
    * 一覧は 1 分ごとに取り直しているので、1 回ぐらい欠けても待てばいい
    */
   test("1 回見かけなかっただけでは片付けない", async () => {
@@ -351,7 +404,7 @@ describe("消えた局の片付け", () => {
 
   /*
    * 最後の 1 種別を消すとエージェントの一覧が空になり、取り込みは何もしない。
-   * 「いちばん新しい取り込みの時刻」で決めていた頃は、消した局が「いまの局」のまま残っていた
+   * 「いちばん新しい取り込みの時刻」で決めると、消した局が「いまの局」のまま残る
    */
   test("種別を消すと、最後の 1 種別でもその場で一覧から外し、番組表と予約を片付ける", async () => {
     offered = [channel(23608, "ＴＯＫＹＯ　ＭＸ")];
@@ -881,7 +934,7 @@ describe("savePrograms", () => {
       expect(rows).toEqual([{ name: "臨時ニュース" }]);
     });
 
-    test("p/f を写しても、番組表を集めた時刻 (epg_at) は進めない", async () => {
+    test("p/f を写しても、番組表を取得した時刻 (epg_at) は進めない", async () => {
       const base = await fresh();
       orm().update(services).set({ epg_at: null }).run();
       const epgAt = () =>
@@ -932,6 +985,7 @@ describe("番組表に出す局", () => {
       0,
     ),
     type,
+    service_type: 1,
   });
   const program = (serviceId: number, name: string, start = 0, end = 1) => ({
     service_id: serviceId,
@@ -1004,6 +1058,7 @@ describe("番組表に出す局", () => {
         0,
       ),
       type: "BS",
+      service_type: 1,
     });
     const services = [
       // BS朝日1〜3
@@ -1044,13 +1099,23 @@ describe("番組表に出す局", () => {
 
     expect(airing(services, programs).map((s) => s.id)).toEqual([1, 2]);
   });
+
+  test("映像の無い局 (ラジオ・データ放送) は、テレビの局と同じ TS でも束ねない", () => {
+    // データ放送の局 (0) はテレビの局 (1) よりサービス ID が若い。束ねるとテレビの局がサブチャンネルになって消える
+    const data = { ...service(0, "T9"), service_type: 0xc0 };
+    const radio = { ...service(2, "T9"), service_type: 2 };
+    const services = [data, service(1, "T9"), radio];
+    const programs = [program(1, "ニュース"), program(2, "ニュース")];
+
+    expect(airing(services, programs).map((s) => s.id)).toEqual([0, 1, 2]);
+  });
 });
 
 /**
  * 局の並び。**テレビと同じ順にする。**
  *
  * リモコン番号を持つのは地上波だけで、BS と CS はサービス ID がそのまま
- * テレビの 3 桁番号にあたる。物理チャンネル順に並べていた頃は実機と食い違っていた。
+ * テレビの 3 桁番号にあたる。物理チャンネル順ではテレビと食い違う。
  */
 describe("SERVICE_ORDER", () => {
   function put(
@@ -1338,6 +1403,8 @@ describe("読めなかったエージェントの取り込み直し", () => {
     // denpa とエージェントを同時に入れ替えると、起動直後の取り込みはエージェントに繋がらない
     const { listAgents } = await import("./agents");
     const agent = listAgents()[0]!;
+    // --isolate を付けずに動かすと、前のファイルで読めなかったエージェントの印が残っている。読める間に取り込んで消しておく
+    await sync(agent);
     expect(syncPending(agent.id)).toBe(false);
 
     starting = true;

@@ -23,6 +23,7 @@ import type {
 
 import {
   type AudioTrack,
+  type Fmp4Segment,
   initSegment,
   mediaSegment,
   type Mp4Sample,
@@ -32,12 +33,6 @@ import { hvcC, NAL_PPS, NAL_SPS, NAL_VPS, nalType, parseSps } from "./hevc";
 
 const VIDEO_TRACK = 1;
 const AUDIO_TRACK = 2;
-
-/** 出すもの (`ts/fmp4.ts` の `Fmp4Splitter` が出すものと同じ形) */
-export interface Fmp4Segment {
-  kind: "init" | "media";
-  data: Uint8Array;
-}
 
 /** 長さ (4 バイト) を前に付けて並べる (MP4 のサンプルの形) */
 function sampleData(nals: readonly Uint8Array[]): Uint8Array {
@@ -102,7 +97,7 @@ interface Pending<T> {
  * 字幕は受けない (`ttml.ts` で文字の配置にして別に送る。時刻は `origin` からの差にする)
  */
 export class MmtFmp4 {
-  /** 時刻 0 に当たる放送の時刻 (90 kHz)。初期化セグメントを出すまでは null */
+  /** 時刻 0 に当たる放送の時刻 (90 kHz)。最初の頭出しできるコマ (映像が無ければ最初の音声) を受けるまでは null。設定がそろう前に映像の MPU が終わると null に戻す */
   origin: number | null = null;
   private readonly hasVideo: boolean;
   private readonly hasAudio: boolean;
@@ -130,7 +125,7 @@ export class MmtFmp4 {
     this.hasAudio = assets.some((a) => a.kind === "audio");
   }
 
-  /** 出す時刻の 0 に当たる放送の時刻 (90 kHz)。`base` か、無ければ `origin`。init を出すまでは `base` だけ */
+  /** 出す時刻の 0 に当たる放送の時刻 (90 kHz)。`base` か、無ければ `origin` */
   get zero(): number | null {
     return this.base ?? this.origin;
   }

@@ -98,7 +98,7 @@ describe("fileMemo", () => {
  * 覚えはしないので、終わったあとに求められたら作り直す
  */
 describe("sharing", () => {
-  test("同じ鍵で同時に求められたら 1 回だけ作り、終わったら作り直す", async () => {
+  test("同じキーで同時に求められたら 1 回だけ作り、終わったら作り直す", async () => {
     const share = sharing<number>();
     let made = 0;
     let finish: (value: number) => void = () => undefined;
@@ -117,7 +117,7 @@ describe("sharing", () => {
     expect(made).toBe(2);
   });
 
-  test("鍵が違えば別々に作る", async () => {
+  test("キーが違えば別々に作る", async () => {
     const share = sharing<string>();
     const [a, b] = await Promise.all([
       share("1", () => Promise.resolve("a")),
@@ -136,11 +136,11 @@ describe("sharing", () => {
     };
     const first = share("1", make);
     const second = share("1", make);
-    fail(new Error("降りた"));
+    fail(new Error("失敗した"));
     const settled = await Promise.allSettled([first, second]);
     expect(
       settled.map((r) => r.status === "rejected" && String(r.reason)),
-    ).toEqual(["Error: 降りた", "Error: 降りた"]);
+    ).toEqual(["Error: 失敗した", "Error: 失敗した"]);
     expect(made).toBe(1);
     expect(await share("1", () => Promise.resolve(3))).toBe(3);
   });

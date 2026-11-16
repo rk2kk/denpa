@@ -40,7 +40,7 @@
    * - 写す繰り返しと前の色からの入れ替えは、テーブルトップの反射 (`FoldReflection`) と同じ部品 (`glow-loop.svelte.ts`)。
    *   入れ替えは CSS の `opacity` の transition (下の style)
    * - 色は枠に重ならない 4 本の帯 (`.band`) にだけ描く (`strips`)。枠の後ろに敷くと映像のコマごとに合成し直す
-   * - ブラウザの枠の色 (`theme-color`) もページの上の端の色にする (`washTop`)
+   * - ブラウザの枠の色 (`theme-color`) もページの上端の色にする (`washTop`)
    * - 写さないときは `ambient.ts` の `plan`。映像の上には何も重ねない
    */
   let {
@@ -107,7 +107,7 @@
     toneFrame(frame, dark ? "dark" : "light", WASH_LUMINANCE);
     const pixels = glowPixels(frame, GLANCE.width, GLANCE.height, at);
     context.putImageData(new ImageData(pixels, at.width, at.height), 0, 0);
-    // ページの上の端の色をブラウザの枠の色にする (`washTop`)。描いたときだけ測るので、毎フレームの手間は無い
+    // ページ上端の色を、ブラウザの枠に塗る (`washTop`)。描いたときだけ測るので、毎フレームの手間は無い
     const background = fromHex(themeBackground());
     if (background === null) return;
     const next = washTop(pixels, at.width, background, dark ? "dark" : "light");

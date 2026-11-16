@@ -12,11 +12,15 @@ import {
   bxmlDescriptor,
   ddbSection,
   diiSection,
+  eventMessageDescriptor,
   multipartModule as multipart,
+  nptReferenceDescriptor,
   packetize,
   patSection,
+  pcrPacket,
   programMap,
   stream,
+  streamDescriptorSection,
   tdtPacket,
   withCrc,
 } from "./synth.js";
@@ -154,7 +158,7 @@ describe("moduleFiles", () => {
     expect(files[1]!.contentType.type).toBe("image");
   });
 
-  /** 中身が 1 つのモジュールは包まれていない。置き場所は BML 側が知っている */
+  /** 中身が 1 つのモジュールは包まれていない。置き場所は BML の文書側で決まる */
   test("multipart でなければ丸ごと 1 ファイル", () => {
     const files = moduleFiles(new TextEncoder().encode("PNG"), "image/png");
     expect(files).toHaveLength(1);
@@ -175,8 +179,8 @@ describe("inflate", () => {
     expect(inflate(squeezed, { type: 0 })).toEqual(original);
   });
 
-  /** 知らない縮め方は諦める。**壊れたものを配るより出さないほうがいい** */
-  test("知らない縮め方は null", () => {
+  /** 対応していない圧縮方式は諦める。**壊れたものを配るより出さないほうがいい** */
+  test("対応していない圧縮方式は null", () => {
     expect(inflate(new Uint8Array(4), { type: 9 })).toBeNull();
   });
 
@@ -212,6 +216,28 @@ describe("BmlDecoder", () => {
     expect(
       pmt.components.find((component) => component.componentId === 0)?.bxmlInfo,
     ).toBeUndefined();
+  });
+
+  test("PMT の音声は、部品タグの無い ES も PMT の順に null で並べる (audios。components には出ない)", () => {
+    const pmt = programMap(SERVICE, VIDEO_PID, [
+      [0x02, VIDEO_PID, [0x52, 0x01, 0x00]],
+      // 部品タグの無い AAC が先に並ぶ
+      [0x0f, 0x111],
+      [0x0f, 0x112, [0x52, 0x01, 0x10]],
+      [0x0d, BML_PID, [0x52, 0x01, COMPONENT_TAG, ...bxmlDescriptor()]],
+    ]);
+    const out = decode(
+      packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+      packetize(PMT_PID, pmt),
+    );
+    const message = out.find((item) => item.type === "pmt");
+    if (message?.type !== "pmt") throw new Error("pmt が出ていない");
+    expect(message.audios).toEqual([null, 0x10]);
+    expect(
+      message.components
+        .filter((component) => component.streamType === 0x0f)
+        .map((component) => component.pid),
+    ).toEqual([0x112]);
   });
 
   /** 放送は同じ表を何度も送る。そのまま通すと受け側が画面を組み直し続ける */
@@ -517,6 +543,132 @@ describe("BmlDecoder", () => {
       packetize(BML_PID, diiSection(DOWNLOAD_ID, 4066, modules)),
     );
     expect(lists(out)).toEqual([[1, 2, 3, 4]]);
+  });
+});
+
+describe("イベントメッセージ (ストリーム記述子)", () => {
+  /** イベントメッセージだけを運ぶ ES。BML の符号化方式は付いていない */
+  const EVENT_PID = 0x0801;
+  const EVENT_TAG = 0x41;
+  const eventHead = () => [
+    packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+    packetize(
+      PMT_PID,
+      programMap(SERVICE, VIDEO_PID, [
+        [0x02, VIDEO_PID, [0x52, 0x01, 0x00]],
+        [0x0d, BML_PID, [0x52, 0x01, COMPONENT_TAG, ...bxmlDescriptor()]],
+        [0x0d, EVENT_PID, [0x52, 0x01, EVENT_TAG]],
+      ]),
+    ),
+  ];
+  const events = (out: ResponseMessage[]) =>
+    out.flatMap((message) =>
+      message.type === "esEventUpdated" ? [message] : [],
+    );
+
+  test("BML の符号化方式が付いていない DSM-CC の ES のものも、部品タグを付けて配る", () => {
+    const out = decode(
+      ...eventHead(),
+      packetize(
+        EVENT_PID,
+        streamDescriptorSection(
+          [eventMessageDescriptor({ id: 3, version: 2, data: [0x41] })],
+          1,
+        ),
+      ),
+    );
+    expect(events(out)).toEqual([
+      {
+        type: "esEventUpdated",
+        componentId: EVENT_TAG,
+        dataEventId: 1,
+        events: [
+          {
+            type: "immediateEvent",
+            eventMessageGroupId: 0,
+            timeMode: 0,
+            eventMessageType: 0,
+            eventMessageId: 0x0302,
+            privateDataByte: [0x41],
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("イベントメッセージだけの ES では、カルーセルを組み立てない", () => {
+    const module = multipart([["/startup.bml", "text/X-arib-bml", "<bml/>"]]);
+    const out = decode(
+      ...eventHead(),
+      packetize(
+        EVENT_PID,
+        diiSection(DOWNLOAD_ID, 4066, {
+          moduleId: 1,
+          moduleSize: module.length,
+          moduleVersion: 1,
+          contentType: "multipart/mixed",
+        }),
+      ),
+    );
+    expect(out.some((message) => message.type === "moduleListUpdated")).toBe(
+      false,
+    );
+  });
+
+  test("時刻指定のものは、NPT がその時刻に達してから届いた回で、すぐ起きるものとして配る", () => {
+    // STC 10 秒で NPT 0。イベントは NPT 1 秒
+    const section = packetize(
+      EVENT_PID,
+      streamDescriptorSection([
+        nptReferenceDescriptor(10 * 90_000, 0),
+        eventMessageDescriptor({ id: 5, npt: 90_000 }),
+      ]),
+    );
+    const out = decode(
+      ...eventHead(),
+      pcrPacket(VIDEO_PID, 10.5),
+      section,
+      pcrPacket(VIDEO_PID, 11.5),
+      section,
+    );
+    expect(events(out).map((message) => message.events[1]?.type)).toEqual([
+      "nptEvent",
+      "immediateEvent",
+    ]);
+    expect(events(out)[1]?.events[1]).toMatchObject({
+      timeMode: 0,
+      eventMessageId: 0x0501,
+    });
+  });
+
+  test("STC が NPT 参照の時刻に達する前は、その参照を使わない", () => {
+    // 参照は STC 20 秒から。PCR は 10 秒なので、NPT はまだ分からない
+    const out = decode(
+      ...eventHead(),
+      pcrPacket(VIDEO_PID, 10),
+      packetize(
+        EVENT_PID,
+        streamDescriptorSection([
+          nptReferenceDescriptor(20 * 90_000, 0),
+          eventMessageDescriptor({ id: 5, npt: 0 }),
+        ]),
+      ),
+    );
+    expect(events(out)[0]?.events[1]?.type).toBe("nptEvent");
+  });
+
+  test("PCR を読む前は、時刻指定のまま配る", () => {
+    const out = decode(
+      ...eventHead(),
+      packetize(
+        EVENT_PID,
+        streamDescriptorSection([
+          nptReferenceDescriptor(0, 0),
+          eventMessageDescriptor({ id: 5, npt: 0 }),
+        ]),
+      ),
+    );
+    expect(events(out)[0]?.events[1]?.type).toBe("nptEvent");
   });
 });
 

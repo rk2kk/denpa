@@ -112,7 +112,7 @@ export interface HwDevice {
   qsvSystem: HwCodec[];
   /**
    * VA-API のうち、**放送の MPEG-2 を GPU でデコードして、GPU でインタレ解除してエンコードできる**と
-   * 確かめられたコーデック (`probeFull`)。ライブはこれなら CPU にフレームを降ろさない (`liveHwArgs`)
+   * 確かめられたコーデック (`probeFull`)。ライブはこれなら CPU へフレームを移さない (`liveHwArgs`)
    */
   full: HwCodec[];
 }
@@ -247,14 +247,14 @@ function wayOf(device: HwDevice, kind: HwKind, codec: HwCodec): HwWay {
  * (vaapi_encode.c の `vaapi_encode_init_quality`)。B フレームを持たないドライバでは `-bf` を捨てて I と P だけにし、
  * `-b_depth` は B の枚数から決まる深さで頭打ちにする (hw_base_encode.c の `ff_hw_base_init_gop_structure`)。
  * 落ちうるのは段の問い合わせ (`vaGetConfigAttributes`) そのものが失敗したときだけで、同じ問い合わせは
- * レート制御を決めるときにも行うので、それが通るドライバなら通る。
+ * レート制御を決めるときにもするので、それが通るドライバなら通る。
  *
  * ## ICQ を持たないドライバの AV1 は CQP で指定する
  *
  * **i965 (Gemini Lake などの古い Intel)・Mesa (AMD) は ICQ を持たない。** ICQ で試すと落ちて
  * 「エンコードできない」に見えていた (issue #417)。AV1 は ICQ が落ちたら CQP でも試し (`probeOnce`)、
  * 通ればそちらでエンコードする (`HwWay.cqp`)。H.264・H.265 は初めから CQP なので落ちない。
- * **av1_vaapi は `-qp` を受けず、`-global_quality` で量子化の値 (0〜255) を受ける。** `-qp` は黙って無視され、
+ * **av1_vaapi は `-qp` を受けず、`-global_quality` で量子化の値 (0〜255) を受ける。** `-qp` はエラーにならずに無視され、
  * 既定の値で 9〜12 Mbps も出ていた (前の `-qp 120` がそれ。HuC の無い A310 の録画が 2.5GB になった)。
  * 値は **75** (`AV1_CQP`)。
  *
@@ -278,7 +278,7 @@ function wayOf(device: HwDevice, kind: HwKind, codec: HwCodec): HwWay {
  * NVENC は `-global_quality` (ICQ) を受けない (FFmpeg の nvenc.c が断る)。Rockchip MPP と同じ表のビットレートを
  * **VBR** で渡す (`vbrRate`)。GPU は番号 (`-gpu`) で選び、デバイスは開かない。CPU で作ったフレームを nv12 で
  * 渡すのも、`-g 250` も MPP と同じ。`-preset p4` は 7 段 (p1〜p7) の真ん中。遅い段は録画の時間が延びるので、
- * p7 などへ変えるなら実機で測ってから別の変更で行う。**実機では測っていない** (手元に NVIDIA の GPU が無い)
+ * p7 などへ変えるなら実機で測ってから別の変更にする。**実機では測っていない** (手元に NVIDIA の GPU が無い)
  *
  * ## Windows の Intel (QSV) は ICQ で指定する
  *
@@ -315,7 +315,7 @@ function wayOf(device: HwDevice, kind: HwKind, codec: HwCodec): HwWay {
  * (同じビットレートで画質が上がる。FFmpeg は枚数を渡さず、使うかどうかだけを VideoToolbox に渡す。既定の 0 では使わない)。
  * **ハードウェアでだけエンコードする。** FFmpeg の videotoolboxenc.c は `-allow_sw` を渡さなければ
  * ハードウェアのエンコーダを求め (`RequireHardwareAcceleratedVideoEncoder`)、無ければ開けずに落ちる。
- * Apple のソフトウェアのエンコーダに黙って倒れず、試しのエンコードが落ちて x264 に戻る。
+ * Apple のソフトウェアのエンコーダには切り替わらず、試しのエンコードが落ちて x264 に戻る。
  * デバイスは開かない (VideoToolbox が自分でメディアエンジンを選ぶ)。CPU で作ったフレームを nv12 で渡す。
  * `-g 250` は同じ。**画質と大きさは測っていない** (CI の Mac のランナーで試しのエンコードが通り、放送に似せた素材をエンコードできるところまで見ている)
  *
@@ -512,7 +512,7 @@ function vaapiQuality(
   qp: Record<Exclude<HwCodec, "av1">, number>,
 ): string[] {
   if (codec !== "av1") return ["-rc_mode", "CQP", "-qp", String(qp[codec])];
-  // AV1 は `-qp` を受けない (黙って無視される)。量子化の値は `-global_quality` で渡す
+  // AV1 は `-qp` を受けない (エラーにならずに無視される)。量子化の値は `-global_quality` で渡す
   return way.cqp === true
     ? ["-rc_mode", "CQP", "-global_quality:v", String(AV1_CQP)]
     : ["-rc_mode", "ICQ", "-global_quality:v", String(AV1_ICQ)];
@@ -663,7 +663,7 @@ function highProfile(codec: HwCodec): string[] {
 }
 
 /**
- * MediaCodec のエンコーダを名前で開く引数 (`hwArgs` の説明)。**名前が無ければ投げる。** 名前を渡さないと FFmpeg は
+ * MediaCodec のエンコーダを名前で開く引数 (`hwArgs` の説明)。**名前が無ければ例外にする。** 名前を渡さないと FFmpeg は
  * MIME の種類で選び、ソフトウェアのエンコーダを開くことがあるため。名前は `probeAndroid` と `wayOf` が付ける
  */
 function mediacodecName(way: HwWay): string[] {
@@ -674,7 +674,7 @@ function mediacodecName(way: HwWay): string[] {
 
 /**
  * **アプリが渡した MediaCodec のエンコーダの名前を読む** (`config.mediacodecEncoders`。`h264=c2.qti.avc.encoder,hevc=…`)。
- * 知らないコーデックと、名前に使わない文字 (英数字・`.`・`_`・`-` のほか) を含むものは捨てる。同じコーデックが 2 つあれば先のもの
+ * `HW_CODECS` に無いコーデックと、名前に使わない文字 (英数字・`.`・`_`・`-` のほか) を含むものは捨てる。同じコーデックが 2 つあれば先のもの
  * (アプリは `MediaCodecList` の並び、つまり端末が勧める順で先のものを書く)
  */
 export function parseMediacodecEncoders(
@@ -703,7 +703,7 @@ function vtRate(bps: number, peak = bps * 2): string[] {
 }
 
 /**
- * **NVENC が同時に開けるエンコードの数を超えて降りたか** (ffmpeg の標準エラーの全文か 1 行)。
+ * **NVENC が同時に開けるエンコードの数を超えて失敗したか** (ffmpeg の標準エラーの全文か 1 行)。
  *
  * 消費者向けの GeForce は、システム全体で同時に開けるエンコードの数に上限がある (いまの NVIDIA の
  * 一覧では 12)。超えるとドライバはエンコードを開くところ (`nvEncOpenEncodeSessionEx`) で断り、FFmpeg の
@@ -712,8 +712,8 @@ function vtRate(bps: number, peak = bps * 2): string[] {
  * (NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY) を返す。本当に GPU のメモリが尽きたときも前者になるが、
  * どちらも「空けば通る」ので同じに扱ってよい。
  *
- * **これで降りたものは GPU の故障ではない。** その 1 本だけソフトウェアでエンコードし、
- * 方式を覚えて外すことはしない (`live.ts` の `blameLiveHw`)。録画は今までどおり次の方式へ倒れるだけ
+ * **これで失敗したものは GPU の故障ではない。** その 1 本だけソフトウェアでエンコードし、
+ * 方式を覚えて外すことはしない (`live.ts` の `blameLiveHw`)。録画は今までどおり次の方式へ切り替えるだけ
  * (`encoder.ts` は落ちた方式を覚えない)。**実機の上限で確かめてはいない** (手元に NVIDIA の GPU が無い)
  */
 export function nvencBusy(stderr: string): boolean {
@@ -767,10 +767,10 @@ export function liveHw(
  *
  * **Rockchip MPP は録画と同じ AVBR を、いちばん重い映像の値で** (`LARGEST`。ライブはコマ数と
  * 大きさが映像の来る前に決まらない)。`-async_depth` は持たない (渡すと使われない引数として
- * ffmpeg が降りる)。MPP の H.264 は B フレームを作らないので `-bf` も要らない。
+ * ffmpeg が失敗する)。MPP の H.264 は B フレームを作らないので `-bf` も要らない。
  *
  * **NVENC も同じ表の、いちばん重い映像の値を VBR で。** 遅れを作らない引数は NVENC の引数で渡す。
- * `-async_depth` は持たず (渡すと降りる)、代わりに `-delay 0` (出来たコマを溜めずにすぐ出す。既定は
+ * `-async_depth` は持たず (渡すと失敗する)、代わりに `-delay 0` (出来たコマを溜めずにすぐ出す。既定は
  * 作業用の面の数 − 1 コマぶん溜める)。`-tune ll` (低遅延向けの調整)、`-zerolatency 1` (並べ替えの待ちを作らない)、
  * `-bf 0`。preset は `p2` (7 段の速いほうから 2 つ目)。**どれも実機では見ていない**。
  * デコードとインタレ解除を GPU に寄せる (`full`) のは VA-API だけで、NVENC は実機で確かめてから
@@ -793,7 +793,7 @@ export function liveHw(
  * `-hwaccel vaapi -hwaccel_output_format vaapi` で放送の MPEG-2 を GPU でデコードし、フレームを GPU に
  * 置いたまま `deinterlace_vaapi=rate=field` (フィールドごとに 1 コマ。bwdif の既定と同じ
  * 59.94p) に通して、そのままエンコードする。**CPU のフィルタは 1 つも挟めない。** 挟むなら
- * `hwdownload` が要り、降ろしたぶんだけ遅くなる。ライブの映像のフィルタはインタレ解除だけ
+ * `hwdownload` が要り、CPU へ移したぶんだけ遅くなる。ライブの映像のフィルタはインタレ解除だけ
  * なので挟むものは無い (`-fpsmax` はコマを間引くだけでフィルタではなく、字幕と音声は
  * 別のストリーム)。インタレ解除の映像は bwdif と変わる (**まだ見比べていない**)。
  *
@@ -813,7 +813,7 @@ export function liveHw(
  * - VA-API は CQP をやめて **VBR で上限を決める** (`-b:v` と `-maxrate:v` に同じ値)。CQP は量を場面に任せるので、回線に収まる保証が無い
  * - VideoToolbox も `-b:v` と `-maxrate` に段の値を渡す
  * - MediaCodec は上限を持たないので、CBR で段の値を渡す
- * - `full` なら GPU の上でインタレ解除して 30 コマにし (`rate=frame`)、そのまま `scale_vaapi` で縮める。フレームを CPU に降ろさない。
+ * - `full` なら GPU の上でインタレ解除して 30 コマにし (`rate=frame`)、そのまま `scale_vaapi` で縮める。フレームを CPU へ移さない。
  *   `full` でなければ、縮めるのは呼ぶ側の CPU の `scale` (`live.ts` の `rungVideo`)
  *
  * `half` はエンコードが遅れたときの 30 コマ (`live.ts` の `videoArgs`)。`full` なら GPU のインタレ解除を `rate=frame` にする
@@ -970,33 +970,139 @@ interface RungCap {
 }
 
 /**
+ * 試しのエンコードの結果。`missing` と `rate` は VA-API のドライバの返事から分かる、決まった理由で使えないもの。
+ *
+ * - `missing` … ドライバにそのコーデックのエンコードが無い (Arc より前の Intel の AV1 など)
+ * - `rate` … ドライバにそのレート制御が無い (i965・Mesa の ICQ)
+ * - `failed` … それ以外で落ちた
+ */
+type Trial = "ok" | "missing" | "rate" | "failed";
+
+/** 1 本だけ試しにエンコードして、通ったかを返す (`trial`) */
+async function tryEncode(args: string[], label: string): Promise<boolean> {
+  return (await trial(args, label)) === "ok";
+}
+
+/**
  * 1 本だけ試しにエンコードする。**時間で切る。** ドライバが固まって返ってこないとき
  * (実機で見たことはないが) に起動が止まらないように。
  *
- * **落ちたら ffmpeg のエラーの最後の数行をログに出す** (`label` はエンコーダとデバイス)。何が原因で
- * 落ちたか (ドライバが無い・オプションを受け付けない・時間切れ) を、報告のログから読めるように
+ * **落ちたら ffmpeg のエラーの行をログに出す** (`label` はエンコーダとデバイス)。何が原因で
+ * 落ちたか (ドライバが無い・オプションを受け付けない・時間切れ) を、報告のログから読めるように。
+ * ffmpeg は `-v repeat+level+verbose` で起動し、行ごとの段 (`[error]` など) からエラーの行を選ぶ (`readTrialLog`)。
+ * verbose にするのは、VA-API のドライバの名前 (`VAAPI driver: …`) を添えるため。`repeat` は、段の印の付かない
+ * `Last message repeated` を出させないため。
+ *
+ * **決まった理由で使えないもの (`missing`・`rate`) は警告にしない。** GPU の世代で決まっていて、
+ * 起動のたびに同じ警告が出るだけになるため
  */
-async function tryEncode(args: string[], label: string): Promise<boolean> {
+async function trial(args: string[], label: string): Promise<Trial> {
   const result = await run(
-    [config.ffmpeg, "-v", "error", "-nostdin", ...args, "-f", "null", "-"],
+    [
+      config.ffmpeg,
+      "-v",
+      "repeat+level+verbose",
+      "-nostdin",
+      ...args,
+      "-f",
+      "null",
+      "-",
+    ],
     { timeoutMs: config.hwProbeTimeout, stderr: true },
   );
-  if (result.code === 0) return true;
+  if (result.code === 0) return "ok";
+  const log = readTrialLog(result.stderr);
+  const driver = log.driver === null ? "" : ` (ドライバ: ${log.driver})`;
+  const missing = log.errors.find((line) => VAAPI_MISSING.test(line));
+  if (missing !== undefined) {
+    console.log(
+      `[hwenc] ${label} は使えません。ドライバにこのコーデックのエンコードがありません: ${missing}${driver}`,
+    );
+    return "missing";
+  }
+  const rate = log.errors.find((line) => VAAPI_RATE.test(line));
+  if (rate !== undefined) {
+    console.log(
+      `[hwenc] ${label} は使えません。ドライバにこのレート制御がありません: ${rate}${driver}`,
+    );
+    return "rate";
+  }
   console.warn(
-    `[hwenc] ${label} の試しのエンコードが落ちました (終了コード ${result.code}): ${errorTail(result.stderr)}`,
+    `[hwenc] ${label} の試しのエンコードが落ちました (終了コード ${result.code}): ${errorTail(log.errors)}${driver}`,
   );
-  return false;
+  return "failed";
+}
+
+/**
+ * VA-API のドライバにそのコーデックのエンコードが無いときの FFmpeg のエラー (vaapi_encode.c の
+ * `vaapi_encode_profile_entrypoint`。どちらも ENOSYS で開けない)
+ */
+const VAAPI_MISSING = /No usable encoding (profile|entrypoint) found/;
+
+/**
+ * VA-API のドライバに指定したレート制御が無いときの FFmpeg のエラー (vaapi_encode.c の
+ * `vaapi_encode_init_rate_control`。ドライバが持つものを `supported modes: …` に並べる)
+ */
+const VAAPI_RATE = /Driver does not support (\S+|any) RC mode/;
+
+/**
+ * 原因を持たない ffmpeg の行。エンコーダを開けないと ffmpeg 9 はこう並べ、最後の数行がこれで埋まる。
+ * フィルタの側で開けずに落ちたあと、エンコードの側は開いていないまま終わりを受け取って EINVAL で終わる
+ * (fftools の ffmpeg_enc.c の `Could not open encoder before EOF`)。そのため最後の行は、開けなかった本当の理由に
+ * かかわらず `-22 (Invalid argument)` になる
+ */
+const GENERIC_ERRORS = [
+  /Task finished with error code/,
+  /Terminating thread with return code/,
+  /Nothing was written into output file/,
+  /Could not open encoder before EOF/,
+  /Error while opening encoder - maybe incorrect parameters/,
+  /^Conversion failed!$/,
+];
+
+/** 試しのエンコードの標準エラーから読んだもの */
+interface TrialLog {
+  /** エラーの段の行 (段の印は外す)。段の印の無い行もエラーとして扱う */
+  errors: string[];
+  /** VA-API のドライバの名前 (`VAAPI driver: …` の行)。無ければ null */
+  driver: string | null;
+}
+
+/** `[ctx @ 0x…] [error] message` の段の印 */
+const LEVEL_TAG = /\[(trace|debug|verbose|info|warning|error|fatal|panic)\] /;
+
+/** 試しのエンコードの標準エラー (`-v repeat+level+verbose`) を読む */
+function readTrialLog(stderr: string): TrialLog {
+  const errors: string[] = [];
+  let driver: string | null = null;
+  for (const raw of stderr.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const tag = LEVEL_TAG.exec(line);
+    const text =
+      tag === null
+        ? line
+        : `${line.slice(0, tag.index)}${line.slice(tag.index + tag[0].length)}`;
+    const named = /VAAPI driver: (.*?)\.?$/.exec(text);
+    if (named !== null) driver = named[1] ?? null;
+    if (tag === null || ["error", "fatal", "panic"].includes(tag[1] ?? ""))
+      errors.push(text);
+  }
+  return { errors, driver };
 }
 
 /** ログに出す ffmpeg のエラーの行数 */
 const ERROR_LINES = 3;
 
-/** ffmpeg のエラーの最後の数行を 1 行にまとめる。何も出していなければそう書く */
-function errorTail(stderr: string): string {
-  const lines = stderr
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+/**
+ * ffmpeg のエラーの最後の数行を 1 行にまとめる。原因を持たない行 (`GENERIC_ERRORS`) は外し、
+ * 外して何も残らなければ外さずに使う。何も出していなければそう書く
+ */
+function errorTail(errors: string[]): string {
+  const telling = errors.filter(
+    (line) => !GENERIC_ERRORS.some((generic) => generic.test(line)),
+  );
+  const lines = telling.length > 0 ? telling : errors;
   return lines.length === 0
     ? "(エラーの出力はありません)"
     : lines.slice(-ERROR_LINES).join(" / ");
@@ -1089,9 +1195,9 @@ export function probe(): Promise<HwEncode> {
 
 /**
  * **一度は確かめ終わった見立て。** まだなら (起動した直後) 確かめ終わるのを待つ。確かめ終わっていれば探し直さない。
- * 録画のエンコードはこれを待ってからコーデックと方式を決める (`encoder.ts`)。待たずに決めていた頃は、
- * 起動した直後に溜まっていたジョブが確かめの終わる前に始まり、GPU が無いものとして H.265 を黙って飛ばし、
- * H.264 を CPU でエンコードしていた (起動は確かめを待たずに進む。`runtime.ts`)
+ * 録画のエンコードはこれを待ってからコーデックと方式を決める (`encoder.ts`)。待たずに決めると、
+ * 起動した直後に溜まっていたジョブが確かめ終わる前に始まり、GPU が無いものとして H.265 を飛ばし、
+ * H.264 を CPU でエンコードしてしまう (起動は確かめを待たずに進む。`runtime.ts`)
  */
 export function hwReady(): Promise<HwEncode> {
   return state.probed ? Promise.resolve(state) : probe();
@@ -1272,13 +1378,18 @@ async function probeLinux(): Promise<HwDevice[]> {
     const device = emptyDevice(path, labelOf(path));
     for (const codec of HW_CODECS) {
       // H.264・H.265 は初めから CQP で、AV1 は ICQ で試す (`hwArgs` の説明)
-      if (await tryWay({ device: path, kind: "vaapi" }, codec)) {
+      const first = await tryWayFor({ device: path, kind: "vaapi" }, codec);
+      if (first === "ok") {
         device.vaapi.push(codec);
-      } else if (
-        codec === "av1" &&
-        (await tryWay({ device: path, kind: "vaapi", cqp: true }, codec))
-      ) {
+        continue;
+      }
+      // ドライバに AV1 のエンコードが無ければ (Arc より前の Intel など)、CQP でも開けないので試さない
+      if (codec !== "av1" || first === "missing") continue;
+      if (await tryWay({ device: path, kind: "vaapi", cqp: true }, codec)) {
         // ICQ を持たないドライバ (i965・Mesa)。AV1 を CQP でエンコードする
+        console.log(
+          `[hwenc] av1_vaapi (${path}) は CQP でエンコードできました。CQP で使います`,
+        );
         device.vaapi.push(codec);
         device.cqp.push(codec);
       }
@@ -1318,10 +1429,15 @@ async function probeLinux(): Promise<HwDevice[]> {
   return devices;
 }
 
-/** 録画と同じ引数で 1 コマエンコードしてみる */
-function tryWay(way: HwWay, codec: HwCodec): Promise<boolean> {
+/** 録画と同じ引数で 1 コマエンコードしてみて、通ったかを返す */
+async function tryWay(way: HwWay, codec: HwCodec): Promise<boolean> {
+  return (await tryWayFor(way, codec)) === "ok";
+}
+
+/** 録画と同じ引数で 1 コマエンコードしてみる。落ちた理由も返す (`Trial`) */
+function tryWayFor(way: HwWay, codec: HwCodec): Promise<Trial> {
   const hw = hwArgs(way, codec);
-  return tryEncode(
+  return trial(
     [
       ...hw.device,
       ...SOURCE,
@@ -1350,8 +1466,8 @@ function wayNote(way: HwWay): string {
  * `mpeg2video` で。一時ファイルに置くのは、`run` が標準入力を渡さないため)。
  * それをライブと同じ引数 (`liveHwArgs` の `full`) でデコードして、インタレ解除して、エンコードする。
  *
- * **GPU でデコードできなかったら必ず落ちる。** ffmpeg は `-hwaccel` が使えないと黙って CPU で
- * デコードするが、そのフレームは GPU に無いので `deinterlace_vaapi` が受け取れずに降りる。
+ * **GPU でデコードできなかったら必ず落ちる。** ffmpeg は `-hwaccel` が使えないとエラーにせず CPU で
+ * デコードするが、そのフレームは GPU に無いので `deinterlace_vaapi` が受け取れずに失敗する。
  * 「通った = GPU でデコードできた」と読んでよい
  */
 async function probeFull(devices: HwDevice[]): Promise<void> {

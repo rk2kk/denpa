@@ -69,7 +69,7 @@ const ROOT = resolve(import.meta.dir, "..");
  * 地上波のチューナーは**1 台だけ**にしてある。
  *
  * 偽の放送にある地上波は T16 と T21 の 2 つしかないので、チューナーが 2 台あると
- * 「空きが無い」も「優先度の低い相手に譲らせる」も作れない。総当たりが少し遅くなるだけで
+ * 「空きが無い」も「後に回る相手に譲らせる」も作れない。総当たりが少し遅くなるだけで
  * 済むほうを取る。
  *
  * 選局は `FAKE_TUNE` で偽物に差し替える (エージェントが `<種別> <チャンネル>` を足して起動する)。
@@ -424,7 +424,7 @@ beforeAll(async () => {
  * わざと離さない作りで、次に開く人はその選局を共有するのが正しい。
  */
 afterEach(async () => {
-  // 途中で落ちたテストの開きっぱなしも畳む
+  // 途中で落ちたテストの開きっぱなしも閉じる
   for (const close of [...opened]) close();
 
   const until = Date.now() + 10_000;
@@ -708,7 +708,7 @@ describe("チューナー", () => {
     }
   });
 
-  test("用途と優先度がそのまま見える", async () => {
+  test("用途と取り合いの順 (priority) がそのまま見える", async () => {
     const stream = await open("type=GR&channel=T16&use=rec%2012&priority=10");
     await stream.reader?.read();
 
@@ -742,26 +742,26 @@ describe("チューナー", () => {
    * ここで大事なのは「エラーとして伝わること」ではなく **「勝手には終わらない
    * ものが終わった」こと**。HTTP を 1 枚挟むと、送っている途中の
    * ReadableStream を `error()` にしても向こうには**正常終了として届く**
-   * (Bun は残りの chunk を打ち切って畳むだけで、接続を壊さない)。
+   * (Bun は残りの chunk を打ち切って閉じるだけで、接続を壊さない)。
    *
    * なので API の約束はこうする。**選局は利用者が切るまで終わらない。**
    * 向こうから終わったなら、それは失敗である。読む側 (denpa) は EOF を
    * 「録り終えた」と読んではいけない。この約束なら .NET でも成り立つ
    */
-  test("空きが無ければ優先度の低い相手に譲らせる。譲った側はそこで読めなくなる", async () => {
-    const weak = await open("type=GR&channel=T16&use=logo&priority=1");
-    await weak.reader?.read();
-    const ended = drain(weak.reader as ReadableStreamDefaultReader);
+  test("空きが無ければ取り合いで後に回る相手に譲らせる。譲った側はそこで読めなくなる", async () => {
+    const low = await open("type=GR&channel=T16&use=logo&priority=1");
+    await low.reader?.read();
+    const ended = drain(low.reader as ReadableStreamDefaultReader);
 
-    const strong = await open("type=GR&channel=T21&use=rec%201&priority=10");
-    await strong.reader?.read();
+    const high = await open("type=GR&channel=T21&use=rec%201&priority=10");
+    await high.reader?.read();
     expect((await tuners())[0].channel).toEqual({ type: "GR", channel: "T21" });
 
     // 読めなくなること自体が合図。理由が付いていればなお良い
     const result = await Promise.race([ended, sleep(5000).then(() => null)]);
     expect(result).not.toBeNull();
 
-    strong.close();
+    high.close();
   });
 
   /**
@@ -786,14 +786,14 @@ describe("チューナー", () => {
     expect(body.error ?? "").toContain("no signal");
   });
 
-  test("自分より優先度の高い相手しかいなければ 409 で断る", async () => {
-    const strong = await open("type=GR&channel=T16&use=rec%201&priority=10");
-    await strong.reader?.read();
+  test("取り合いで自分より先になる相手しかいなければ 409 で断る", async () => {
+    const high = await open("type=GR&channel=T16&use=rec%201&priority=10");
+    await high.reader?.read();
 
-    const weak = await open("type=GR&channel=T21&use=epg&priority=3");
-    expect(weak.status).toBe(409);
+    const low = await open("type=GR&channel=T21&use=epg&priority=3");
+    expect(low.status).toBe(409);
 
-    strong.close();
+    high.close();
   });
 
   test("無効にしたチューナーは使わない", async () => {
@@ -1470,7 +1470,7 @@ describe("機材の定義", () => {
 });
 
 /**
- * **止められても、録画 (`use=rec`) の選局が終わるまで畳まない。** ライブ視聴などほかの利用者は待たない
+ * **止められても、録画 (`use=rec`) の選局が終わるまで終了しない。** ライブ視聴などほかの利用者は待たない
  *
  * ここが既定 (30 秒) のままだった頃は、Pod を入れ替えるだけで TS が切れ、
  * 始まって 10 秒の 30 分番組が丸ごと失敗した (実機)。denpa 側は録画が終わるまで
@@ -1526,7 +1526,7 @@ describe("止まれの合図を受けたとき", () => {
       const still = await rec.reader.read();
       expect(still.done).toBe(false);
 
-      // 離せばそこで畳む
+      // 離せばそこで終了する
       rec.abort();
       expect(await exitsWithin(other, 15_000)).toBe(true);
     } finally {
@@ -1585,7 +1585,7 @@ describe("止まれの合図を受けたとき", () => {
       expect(other.exitCode).toBeNull();
       expect((await second.reader.read()).done).toBe(false);
 
-      // 録画が終われば、ライブが開いていても待たずに畳む (ライブは一緒に切れる)
+      // 録画が終われば、ライブが開いていても待たずに終了する (ライブは一緒に切れる)
       second.abort();
       expect(await exitsWithin(other, 10_000)).toBe(true);
       // 残りを読み切れば終わる (接続ごと壊れて終わってもよい)。流れ続けることはない
@@ -1616,7 +1616,7 @@ describe("止まれの合図を受けたとき", () => {
       );
 
       other.kill("SIGTERM");
-      // 30 秒より十分短く。偽の選局を畳む間だけ待つ
+      // 30 秒より十分短く。偽の選局を終える間だけ待つ
       expect(await exitsWithin(other, 10_000)).toBe(true);
 
       aborter.abort();
@@ -1687,7 +1687,7 @@ describe("チューナーの名指し", () => {
     }
   });
 
-  test("指定のチューナーを同じか優先度の高い相手が使っていれば、空きがあっても 409 で断る", async () => {
+  test("指定のチューナーを取り合いで同じか先になる相手が使っていれば、空きがあっても 409 で断る", async () => {
     const holder = await open(
       "type=BS&channel=BS11:18000&use=rec%209&priority=10&tuner=bs1",
     );
@@ -1701,7 +1701,7 @@ describe("チューナーの名指し", () => {
     holder.close();
   });
 
-  test("同じチューナーを名指しして同じチャンネルを見る 2 台目は、優先度が低くても選局を共有する", async () => {
+  test("同じチューナーを名指しして同じチャンネルを見る 2 台目は、取り合いで後に回っても選局を共有する", async () => {
     const a = await open(
       "type=BS&channel=BS11:18000&use=pin%206&priority=10&tuner=bs1",
     );
@@ -1727,7 +1727,7 @@ describe("定義の書き換えと選局", () => {
     { name: "off0", types: ["GR"], disabled: true },
   ];
 
-  test("名前を変えずに無効にしたチューナーの選局は畳み、利用者を残さない", async () => {
+  test("名前を変えずに無効にしたチューナーの選局は終え、利用者を残さない", async () => {
     expect(
       (await request("PUT", "/denpa/tuners", { tuners: FOUR })).status,
     ).toBe(200);
@@ -1742,7 +1742,7 @@ describe("定義の書き換えと選局", () => {
       expect(
         (await request("PUT", "/denpa/tuners", { tuners: off })).status,
       ).toBe(200);
-      // 畳まれたので読めなくなる。読めなくなること自体が合図
+      // 選局が終わったので読めなくなる。読めなくなること自体が合図
       const ended = await Promise.race([
         drain(stream.reader as ReadableStreamDefaultReader),
         sleep(5000).then(() => null),

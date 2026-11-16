@@ -241,7 +241,7 @@ describe("ロゴで決める", () => {
   });
 
   test("CM の並びの外にある、番組が戻る直前の 10 秒は提供", () => {
-    // CM 600〜645、7 秒の局の告知、652〜662 は CM の並びに乗らない 10 秒、662 でロゴが戻る
+    // CM 600〜645、7 秒の局の告知、652〜662 は CM の並びに入らない 10 秒、662 でロゴが戻る
     const credits = [10, ...every15(600, 645), 652, 662, 1790, 1805];
     const lit = [logo[0]!, { start: 662.3, end: 1789.7 }];
     expect(round(decideCm(recording(1800, credits, lit)))[1]).toEqual({
@@ -251,7 +251,7 @@ describe("ロゴで決める", () => {
   });
 
   test("本編の中でロゴが数秒だけ途切れても、前後 10 秒の境目を提供とみて CM にしない", () => {
-    // 実機のフジテレビのアニメの形: 本編の 300 でロゴが途切れ、無音と切れ目で戻る。
+    // 実機で見たフジテレビのアニメの並び。本編の 300 でロゴが途切れ、無音と切れ目で戻る。
     // 途切れの 10 秒前か、戻った所の 10 秒先にも無音と切れ目がある (ロゴは出ている)
     for (const gap of [2.5, 4.3, 10.8]) {
       const broken = [
@@ -664,7 +664,7 @@ test("CM の尺は 15 秒の倍数 (15〜180 秒)", () => {
   expect(isCmLength(90)).toBe(true);
   expect(isCmLength(22)).toBe(false);
   expect(isCmLength(14.3)).toBe(false);
-  // 本編は 15 の倍数に乗っても長すぎるので弾く
+  // 本編は 15 の倍数に合っても長すぎるので弾く
   expect(isCmLength(600)).toBe(false);
 });
 
@@ -848,7 +848,7 @@ describe("実機の並び (点数で比べる)", () => {
 describe("ロゴの区間の末尾の、見えないまま持ち越された所", () => {
   /**
    * ロゴの区間 (`logo`) と、そのうちロゴが見えなかった所 (`dark`。点が 0) から材料を組む。
-   * ロゴの判定は、ロゴが溶けて見えない後ろでは直前の判断を持ち越す (`logo-detect.logoSpans`)
+   * ロゴの判定は、ロゴが溶けて見えない後ろでは直前の判断を持ち越す (`logo-detect.readLogo`)
    */
   function held(
     duration: number,
@@ -929,6 +929,116 @@ describe("ロゴの区間の末尾の、見えないまま持ち越された所"
     expect(round(decideCm(input))).toEqual([
       { start: 0, end: 10 },
       { start: 183.4, end: 243.4 },
+    ]);
+  });
+});
+
+describe("ロゴの区間の外で判断できなかった所", () => {
+  /*
+   * 本番のテレ東のアニメ (録画 592) の並び。前の番組の CM のあと 5.5 秒から番組で、冒頭は「解説放送」「字幕」の案内、
+   * 12.7 秒から白い背景の場面が 2 分近く続いてロゴが溶けて見えず、ロゴの区間は 127.7 秒から。
+   * 冒頭の無音の切れ目が 15 秒の倍数に近く並ぶと、ロゴの無い秒の減点で 120 秒の CM になっていた
+   */
+  const joints = [7.4, ...every15(22.4, 127.4), ...every15(255.7, 315.7)];
+  const logo = [
+    { start: 127.7, end: 255.5 },
+    { start: 315.9, end: 600 },
+  ];
+  const span = { programLength: 1800, programStart: 4.9 };
+  const blind = [
+    { start: 12.7, end: 78.8 },
+    { start: 79.9, end: 127.7 },
+  ];
+
+  test("録画 592: 冒頭の白い場面が CM 1 本より長く判断できなければ、15 秒の倍数に並んでも番組", () => {
+    const before = round(decideCm(recording(600, joints, logo, span)));
+    expect(before[0]).toEqual({ start: 0, end: 127.4 });
+    const cm = round(
+      decideCm(recording(600, joints, logo, { ...span, logoBlind: blind })),
+    );
+    expect(cm).toEqual([
+      { start: 0, end: 7.4 },
+      { start: 255.7, end: 315.7 },
+    ]);
+  });
+
+  test("CM 1 本までの判断できなかった所は、尺が合えば CM のまま", () => {
+    // CM 255.7〜315.7 のうち 2 本目 (270.7〜285.7) が白い後ろで判断できなかった
+    const input = recording(
+      600,
+      [7.4, ...every15(255.7, 315.7)],
+      [{ start: 7.7, end: 255.5 }, logo[1]!],
+      { ...span, logoBlind: [{ start: 270.7, end: 285.7 }] },
+    );
+    expect(round(decideCm(input))).toEqual([
+      { start: 0, end: 7.4 },
+      { start: 255.7, end: 315.7 },
+    ]);
+  });
+
+  test("番組の直後の CM 1 本がまるごと判断できなくても、尺が合えば CM のまま", () => {
+    /*
+     * 番組のロゴが黒い切れ目で消えて区間が終わり、続く 1 本目の CM (255.7〜270.7) が白い背景で判断できなかった。
+     * CM の中のちょうど 5 秒の所に強い切れ目があると、260.7〜270.7 を「CM の前の提供」とみる分け方ができる。
+     * 判断できなかった秒を番組に半分の点で数えると、その分け方が CM 1 本を上回っていた
+     */
+    const breaks = [7.4, ...every15(255.7, 315.7)];
+    const material = frames(600, breaks);
+    material.cuts[Math.round(260.7 * FPS)] = 20;
+    const input: CmInput = {
+      duration: 600,
+      silences: silencesAt(breaks),
+      ...material,
+      logo: [{ start: 7.7, end: 255.5 }, logo[1]!],
+      ...span,
+      logoBlind: [{ start: 255.8, end: 270.6 }],
+    };
+    expect(round(decideCm(input))).toEqual([
+      { start: 0, end: 7.4 },
+      { start: 255.7, end: 315.7 },
+    ]);
+  });
+
+  test("録画 590: CM の先頭が判断できなくても、後ろでロゴが無いのが見えれば CM のまま", () => {
+    /*
+     * 本番の TBS のアニメ (録画 590) の控えで、休みの最初の CM に判断できない所を置くと番組になった並び。
+     * 番組の終わりの 250.7 秒に無音と切れ目があり、そこから 10 秒の 260.7 秒にも強い切れ目がある。ロゴは CM に 1.3 秒残って
+     * 257 秒で消え、1 本目の CM (255.7〜270.7) の残りが白い背景で判断できなかった。判断できなかった秒を数えないと、
+     * 255.7〜260.7 をロゴの無い秒の減点の無い番組、260.7〜270.7 を「CM の前の提供」とみる分け方が CM 1 本を上回る。
+     * すぐ後ろでロゴが出ないので、持ち越した「消えた」のままロゴの無い秒に数える
+     */
+    const breaks = [7.4, 250.7, ...every15(255.7, 315.7)];
+    const material = frames(600, breaks);
+    material.cuts[Math.round(260.7 * FPS)] = 20;
+    const input: CmInput = {
+      duration: 600,
+      silences: silencesAt(breaks),
+      ...material,
+      logo: [{ start: 7.7, end: 257 }, logo[1]!],
+      ...span,
+      logoBlind: [{ start: 257, end: 270.6 }],
+    };
+    expect(round(decideCm(input))).toEqual([
+      { start: 0, end: 7.4 },
+      { start: 255.7, end: 315.7 },
+    ]);
+  });
+
+  test("番組表どおりの始まりより前の、判断できなかった所は録画の先頭の CM のまま", () => {
+    // 前の番組の終わりの白い場面 (2〜28 秒)。番組は 30 秒から
+    const input = recording(
+      600,
+      [30, ...every15(255.7, 315.7)],
+      [{ start: 30.3, end: 255.5 }, logo[1]!],
+      {
+        programLength: 1800,
+        programStart: 30,
+        logoBlind: [{ start: 2, end: 28 }],
+      },
+    );
+    expect(round(decideCm(input))).toEqual([
+      { start: 0, end: 30 },
+      { start: 255.7, end: 315.7 },
     ]);
   });
 });

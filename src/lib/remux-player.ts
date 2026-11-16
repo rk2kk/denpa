@@ -11,8 +11,8 @@
  *   `currentTime` で引いているので、そのまま合う
  * - 溜めるのは先 `AHEAD` 秒まで、後ろは `BEHIND` 秒まで。iPhone は溜められる量が小さい
  * - `ManagedMediaSource` (iPhone) は**送り込んでよい間をブラウザが知らせる** (`startstreaming`・`endstreaming`)。止められている間は読まない
- * - 切れたら観ていた位置からリクエストし直す (1 秒→2 秒→…10 秒で頭打ち、続けて 8 回で打ち切る)。
- *   観る画面の繋ぎ直し (`recover`) と同じ数
+ * - 切れたら、溜まっているぶんの続きからリクエストし直す (1 秒→2 秒→…10 秒で頭打ち、続けて 8 回で打ち切る)。
+ *   観る画面の繋ぎ直し (`recover`) と同じ数。溜まっているぶんは捨てずに再生し続け、継ぎ方は段の切り替え (`switchTo`) と同じ
  * - **サーバが混んでいて断られたら (503) リクエストし直さない** (`busy`)。その場の変換の枠が埋まっている
  *   (`server/transcode.ts`)。待っても空くとは限らないので、画面がほかの形式を勧める
  * - **受け取りの速さを測る** (`ts/meter.ts`)。読んでいる間だけ数える。先が埋まったままだと測れないので、
@@ -29,12 +29,14 @@ import {
   busyAnswer,
   CODEC_HEADER,
   covers,
+  failureText,
   PACE_HEADER,
   type Ranges,
   retryable,
-  retryWait,
   RUNG_HEADER,
-  STREAM_RETRIES,
+  type StreamCause,
+  streamOrigin,
+  StreamRetry,
   type StreamState,
   switchPoint,
   typeOfCodec,
@@ -80,8 +82,8 @@ interface RemuxOptions {
   start: number;
   /** どの音声で始めるか */
   audio: string;
-  /** 繋ぎ直している・打ち切った・戻った・混んでいて断られた */
-  state(state: StreamState): void;
+  /** 繋ぎ直している・打ち切った・戻った・混んでいて断られた。打ち切ったときは理由 (`failureText`) を添える */
+  state(state: StreamState, reason?: string): void;
   /** 応答を受けるたびに呼ぶ */
   heard?(stream: StreamHeard): void;
 }
@@ -98,9 +100,11 @@ export interface RemuxPlayer {
    * **映像の有無は替えられない** (MSE は SourceBuffer の中のトラックの数を変えられない)。音声だけとの行き来は作り直す
    */
   switchTo(codecs: string | null, url: StreamUrl): Promise<SwitchResult>;
+  /** 最後にリクエストしたきっかけと位置、いまの再生位置 (幕に添える 1 文。`ts/playback.ts` の `streamOrigin`) */
+  origin(): string;
   /** 受け取りの速さ (bit/s。`ts/meter.ts`)。まだ測れていなければ null */
   throughput(): number | null;
-  /** 畳む。読んでいるストリームを切る (サーバの ffmpeg も止まる) */
+  /** 閉じる。読んでいるストリームを切る (サーバの ffmpeg も止まる) */
   destroy(): void;
 }
 
@@ -139,9 +143,11 @@ export function remuxPlayer(
   let pendingSwitch: AbortController | null = null;
   /** 読んでいるストリームのリクエストした位置。読んでいなければ null */
   let loadingFrom: number | null = null;
+  /** 最後にリクエストしたきっかけと位置 (`origin`) */
+  let cause: StreamCause = "open";
+  let causeFrom = options.start;
   let audio = options.audio;
-  let retries = 0;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  const retry = new StreamRetry((state) => options.state(state));
   let closed = false;
   /** MediaSource が開いたか (`sourceopen`)。開く前の位置の変更は、開いてから始める位置に入る */
   let opened = false;
@@ -278,16 +284,26 @@ export function remuxPlayer(
   }
 
   /** 新しいストリームを読み始める。前のストリームを止めて、`from` から読んでいることにする */
-  function begin(from: number, abort: AbortController): number {
+  function begin(
+    from: number,
+    abort: AbortController,
+    why: StreamCause,
+  ): number {
     const mine = ++run;
     controller?.abort();
     controller = abort;
     nudge();
-    if (retryTimer !== null) clearTimeout(retryTimer);
-    retryTimer = null;
+    retry.cancel();
     loadingFrom = from;
+    cause = why;
+    causeFrom = from;
     meter.pause();
     return mine;
+  }
+
+  /** 最後にリクエストしたきっかけと位置、いまの再生位置 (`RemuxPlayer.origin`) */
+  function origin(): string {
+    return streamOrigin(cause, causeFrom, video.currentTime);
   }
 
   /** 前のストリームの読みかけを落とし、`from` 秒から先を捨てる (0 なら全部) */
@@ -343,10 +359,7 @@ export function remuxPlayer(
       if (done) break;
       meter.add(value.byteLength, asked, performance.now());
       await append(value, mine);
-      if (retries > 0) {
-        retries = 0;
-        options.state("flowing");
-      }
+      retry.flowing();
       // 後ろを捨てるのは足したついでに。捨てる長さが溜まってから (毎回は削らない)
       if (
         video.currentTime - (buffered()[0]?.[0] ?? video.currentTime) >
@@ -368,20 +381,38 @@ export function remuxPlayer(
     // 切れた (繋がらない・途中で落ちた・サーバの 5xx) ならリクエストし直す。読めない中身
     // (SourceBuffer が断った) と 4xx は何度やっても同じ。画面が観られる先の案内を出す
     if (video.error !== null || !retryable(error)) {
-      console.warn("[remux] 流せませんでした", error);
-      options.state("failed");
+      const reason = [failureText(video.error, error), origin()]
+        .filter((part) => part !== "")
+        .join("。");
+      console.warn(`[remux] 流せませんでした: ${reason}`, error);
+      options.state("failed", reason);
       return;
     }
-    retry();
+    /*
+     * 倍々に待って、溜まっているぶんの続きからリクエストし直す。溜まっているぶんは捨てずに再生し続け、
+     * 使い切るまでは「繋ぎ直しています」を出さない (`onWaiting`)。継ぎ方は段の切り替え (`switchTo`) と同じ
+     */
+    retry.schedule(
+      () =>
+        void load(switchPoint(buffered(), video.currentTime), "retry", true),
+      aheadOf(buffered(), video.currentTime) > 0,
+    );
   }
 
-  /** `from` 秒からリクエストし直す。溜まっていたものは捨てる */
-  async function load(from: number): Promise<void> {
+  /**
+   * `from` 秒からリクエストし直す。溜まっていたものは捨てる。`keep` なら `from` より前に溜まっているものは残す
+   * (切れたあとに続きをリクエストするとき)
+   */
+  async function load(
+    from: number,
+    why: StreamCause,
+    keep = false,
+  ): Promise<void> {
     pendingSwitch?.abort();
     const abort = new AbortController();
-    const mine = begin(from, abort);
+    const mine = begin(from, abort, why);
     try {
-      await cut(0, mine);
+      await cut(keep ? from : 0, mine);
       if (mine !== run) return;
       const response = await fetch(url(from, audio), {
         signal: abort.signal,
@@ -424,7 +455,7 @@ export function remuxPlayer(
     } finally {
       if (pendingSwitch === asking) pendingSwitch = null;
     }
-    // 待っている間に飛んだ・畳んだ。飛んだ先は前の段のまま読んでいる
+    // 待っている間に飛んだ・閉じた。飛んだ先は前の段のまま読んでいる
     if (before !== run || closed || asking.signal.aborted) {
       asking.abort();
       return "failed";
@@ -435,7 +466,7 @@ export function remuxPlayer(
       return "failed";
     }
     // 切り替える。前のストリームを止めて、`at` から先を新しいストリームで埋める
-    const mine = begin(at, asking);
+    const mine = begin(at, asking, "switch");
     url = next;
     wanted = codecs;
     void (async () => {
@@ -452,27 +483,12 @@ export function remuxPlayer(
     return "switched";
   }
 
-  /** 切れた。倍々に待って、観ていた位置からリクエストし直す */
-  function retry(): void {
-    if (retries >= STREAM_RETRIES) {
-      options.state("failed");
-      return;
-    }
-    const wait = retryWait(retries);
-    retries++;
-    options.state("retrying");
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      void load(video.currentTime);
-    }, wait);
-  }
-
   /** 飛んだ先が溜まっておらず、待っても届かないなら、そこからリクエストし直す */
   const onSeeking = (): void => {
     nudge();
-    if (!opened || retryTimer !== null) return;
+    if (!opened || retry.waiting) return;
     if (!covers(buffered(), video.currentTime, loadingFrom, SLACK))
-      void load(video.currentTime);
+      void load(video.currentTime, "seek");
   };
   /**
    * 詰まった。読み終えたあとに戻った・ブラウザが捨てた (`ManagedMediaSource`) で
@@ -480,9 +496,11 @@ export function remuxPlayer(
    */
   const onWaiting = (): void => {
     nudge();
-    if (buffer === null || retryTimer !== null || loadingFrom !== null) return;
+    // 続きを待ちながら溜まっているぶんを再生していて、使い切った。ここから「繋ぎ直しています」を出す
+    retry.starved();
+    if (buffer === null || retry.waiting || loadingFrom !== null) return;
     if (aheadOf(buffered(), video.currentTime) === 0)
-      void load(video.currentTime);
+      void load(video.currentTime, "stall");
   };
 
   video.addEventListener("seeking", onSeeking);
@@ -515,7 +533,7 @@ export function remuxPlayer(
         Math.max(0, options.duration - 1),
       );
       if (start > 0) video.currentTime = start;
-      void load(start);
+      void load(start, "open");
     },
     { once: true },
   );
@@ -524,9 +542,10 @@ export function remuxPlayer(
     setAudio(id: string): void {
       if (id === audio) return;
       audio = id;
-      void load(video.currentTime);
+      void load(video.currentTime, "audio");
     },
     switchTo,
+    origin,
     throughput: () => meter.bps(),
     destroy(): void {
       closed = true;
@@ -534,12 +553,12 @@ export function remuxPlayer(
       controller?.abort();
       pendingSwitch?.abort();
       nudge();
-      if (retryTimer !== null) clearTimeout(retryTimer);
+      retry.cancel();
       video.removeEventListener("seeking", onSeeking);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("timeupdate", nudge);
       media.removeEventListener("startstreaming", nudge);
-      // sourceopen が来る前に畳むと、そこで解放しないまま残る (2 回解放しても害は無い)
+      // sourceopen が来る前に閉じると、そこで解放しないまま残る (2 回解放しても害は無い)
       URL.revokeObjectURL(objectUrl);
     },
   };

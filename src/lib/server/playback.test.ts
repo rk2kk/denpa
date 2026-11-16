@@ -25,6 +25,7 @@ import { eq } from "drizzle-orm";
 
 import {
   CODEC_HEADER,
+  OFFSET_HEADER,
   ORIGIN_HEADER,
   PACE_HEADER,
   RUNG_HEADER,
@@ -50,7 +51,7 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** 偽 ffprobe。ファイル名に h264 / av1 / hevc があればその中身を、無ければ読めない (1 で降りる) */
+/** 偽 ffprobe。ファイル名に h264 / av1 / hevc があればその中身を、無ければ読めない (終了コード 1 で終わる) */
 const PROBE = join(dir, "ffprobe");
 writeFileSync(
   PROBE,
@@ -82,6 +83,7 @@ const {
   mmtsTranscodeArgs,
   playbackPlan,
   presented,
+  rawOffset,
   rulerOf,
   streamResponse,
   transcodeBody,
@@ -588,6 +590,58 @@ describe("流す (streamResponse)", () => {
     expect(sinceHead(pts, origin)).toBeCloseTo(19, 1);
   });
 
+  test("MPEG-2: 流し始めたバイト位置を返し、offset ならその位置からちょうど続きを流す (パケットの途中でも)", async () => {
+    const rec = seed({ library_path: h264, ts_path: ts, encode_skip: 0.5 });
+    const first = await streamResponse(
+      rec,
+      new URLSearchParams({ codec: "mpeg2", from: "20" }),
+    );
+    const start = Number(first.headers.get(OFFSET_HEADER));
+    expect(start % PACKET).toBe(0);
+    const whole = new Uint8Array(await first.arrayBuffer());
+    // 1000 バイト受け取ったところで切れた (パケットの切れ目ではない)
+    const cut = 1000;
+    const next = await streamResponse(
+      rec,
+      // `from` は効かない
+      new URLSearchParams({
+        codec: "mpeg2",
+        from: "3",
+        offset: String(start + cut),
+      }),
+    );
+    expect(next.headers.get(OFFSET_HEADER)).toBe(String(start + cut));
+    expect(next.headers.get(ORIGIN_HEADER)).toBe(
+      first.headers.get(ORIGIN_HEADER),
+    );
+    const rest = new Uint8Array(await next.arrayBuffer());
+    expect(concatBytes([whole.subarray(0, cut), rest])).toEqual(whole);
+  });
+
+  test("MPEG-2: offset が末尾なら空、整数でない・末尾より先なら 400", async () => {
+    const rec = seed({ library_path: h264, ts_path: ts, encode_skip: 0.5 });
+    const size = Bun.file(ts).size;
+    const end = await streamResponse(
+      rec,
+      new URLSearchParams({ codec: "mpeg2", offset: String(size) }),
+    );
+    expect((await end.arrayBuffer()).byteLength).toBe(0);
+    for (const offset of [String(size + 1), "-1", "1.5", "x", ""])
+      await expect(
+        streamResponse(rec, new URLSearchParams({ codec: "mpeg2", offset })),
+      ).rejects.toMatchObject({ status: 400 });
+  });
+
+  test("rawOffset は 0 から大きさまでの整数だけを読む", () => {
+    expect(rawOffset("0", 10)).toBe(0);
+    expect(rawOffset("10", 10)).toBe(10);
+    expect(rawOffset("11", 10)).toBeUndefined();
+    expect(rawOffset("1e3", 10_000)).toBeUndefined();
+    expect(rawOffset("99999999999999999999", Number.MAX_SAFE_INTEGER)).toBe(
+      undefined,
+    );
+  });
+
   test("出せない形式は 404", async () => {
     const rec = seed({ library_path: h264 });
     await expect(
@@ -667,7 +721,12 @@ describe("流す (streamResponse)", () => {
     expect(res.headers.get(CODEC_HEADER)).toBe("h264");
     expect(res.headers.get(RUNG_HEADER)).toBe("1");
     const pace = res.headers.get(PACE_HEADER)!;
-    expect(readPace(pace)).toEqual({ backlog: 0, dropped: 0, speed: null });
+    expect(readPace(pace)).toEqual({
+      backlog: 0,
+      dropped: 0,
+      speed: null,
+      wait: null,
+    });
     // 変換なので枠を使う
     expect(transcodesInUse()).toBe(1);
     await res.body?.cancel();
@@ -751,12 +810,12 @@ describe("流す (streamResponse)", () => {
 });
 
 describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
-  test("1 バイトも出さずに降りたら次の手で起こし直し、次で出せたら前のせいだったと覚える", async () => {
+  test("1 バイトも出さずに終了したら次の手で起こし直し、次で出せたら前のせいだったと覚える", async () => {
     const blamed: string[] = [];
     let done = 0;
     const body = transcodeBody(
       [
-        // 降りた理由の行は最後の 3 行に入るとは限らない。全文を渡す (覚えるかを理由で決める。`hwenc.nvencBusy`)
+        // 失敗した理由の行は最後の 3 行に入るとは限らない。全文を渡す (覚えるかを理由で決める。`hwenc.nvencBusy`)
         {
           argv: [
             "sh",
@@ -786,7 +845,7 @@ describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
     expect(await new Response(body).text()).toBe("流し込んだもの");
   });
 
-  /** 畳まれるまで待つ (上限を超えてから定期チェックが畳むまでの間がある) */
+  /** 止められるまで待つ (上限を超えてから定期チェックが止めるまでの間がある) */
   const until = async (ok: () => boolean) => {
     for (let i = 0; i < 500 && !ok(); i++) await Bun.sleep(10);
   };
@@ -796,7 +855,7 @@ describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
    * 上限より遅いと、待っている相手を `idle` で切っていた (CI で `sh` の起動が 50ms に
    * 間に合わなかった回に、下の「読まれない」のテストが最初の読みで落ちた)
    */
-  test("ffmpeg の出だしが上限より短く遅れただけなら畳まない", async () => {
+  test("ffmpeg の出だしが上限より短く遅れただけなら止めない", async () => {
     let done = 0;
     const body = transcodeBody(
       [{ argv: ["sh", "-c", "sleep 0.3; printf ok"] }],
@@ -811,7 +870,7 @@ describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
     expect(done).toBe(1);
   });
 
-  test("待っている間に ffmpeg が何も出さないまま上限を超えたら畳む", async () => {
+  test("待っている間に ffmpeg が何も出さないまま上限を超えたら止める", async () => {
     let done = 0;
     const body = transcodeBody(
       [{ argv: ["sh", "-c", "exec sleep 30"] }],
@@ -826,7 +885,7 @@ describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
     expect(done).toBe(1);
   });
 
-  test("読まれないまま置かれたら畳む", async () => {
+  test("読まれないまま置かれたら止める", async () => {
     let done = 0;
     // 上限は `sh` の起動より十分長く (最初の読みが「何も出さない」で切られないように)
     const body = transcodeBody(
@@ -852,7 +911,7 @@ describe("ffmpeg の出力を本文にする (transcodeBody)", () => {
 
 /**
  * 録画ファイルの音声だけ (`file?audio=only`)。前は ffmpeg の出力をそのまま本文にしていて、何も出さずに固まった ffmpeg は
- * 相手が切るまで残っていた。観る画面の変換と同じ `transcodeBody` で畳む
+ * 相手が切るまで残っていた。観る画面の変換と同じ `transcodeBody` で止める
  */
 describe("録画ファイルの音声だけ (fileAudioBody)", () => {
   test("主音声を AAC の ADTS にする ffmpeg を起こし、出したものを本文にする", async () => {
@@ -876,7 +935,7 @@ describe("録画ファイルの音声だけ (fileAudioBody)", () => {
     expect(argv).not.toContain(mmts);
   });
 
-  test("ffmpeg が何も出さないまま上限を超えたら畳む", async () => {
+  test("ffmpeg が何も出さないまま上限を超えたら止める", async () => {
     const stuck = join(dir, "stuck-ffmpeg");
     writeFileSync(stuck, "#!/bin/sh\nexec sleep 30\n");
     chmodSync(stuck, 0o755);
@@ -945,7 +1004,7 @@ describe("ffprobe の読み (mediaInfo)", () => {
     expect(hevc("Main")).toBe("hvc1.1.6.L120.90");
   });
 
-  test("知らない形式・読めない出力は null (判断に使わない)", () => {
+  test("H.264・H.265・AV1 のほかの形式・読めない出力は null (判断に使わない)", () => {
     expect(
       mediaInfo(
         "encoded",

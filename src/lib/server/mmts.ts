@@ -20,8 +20,10 @@ import {
 } from "@danything/arib/mmt-media";
 import { ttmlPages } from "@danything/arib/ttml";
 
-import { type Fmp4Segment, MmtFmp4 } from "#lib/mp4/mmt.js";
+import type { Fmp4Segment } from "#lib/mp4/fmp4.js";
+import { MmtFmp4 } from "#lib/mp4/mmt.js";
 
+import { keepNewest } from "./expiring";
 import { readRecording, recordingStream } from "./recording-io";
 import { chunks } from "./stream";
 
@@ -162,9 +164,7 @@ export async function probeMmts(
       duration: span !== null && span > 0 ? span : null,
     };
   }
-  probed.delete(path);
-  probed.set(path, { key, file });
-  if (probed.size > PROBED_MOST) probed.delete(probed.keys().next().value!);
+  keepNewest(probed, path, { key, file }, PROBED_MOST);
   return file;
 }
 

@@ -26,7 +26,7 @@ import {
   type ServiceTable,
 } from "@danything/arib/psi";
 
-import { DIGITAL_TV } from "./schema";
+import { IMPORTED_SERVICE_TYPES } from "./schema";
 import { readUntil } from "./stream";
 import type { AgentChannel } from "./tuner";
 
@@ -157,6 +157,8 @@ export function lineupFrom(
               ) ??
               known.get(serviceKeyOf(network.networkId, service.serviceId)) ??
               `${type} ${service.serviceId}`,
+            // 衛星に部分受信 (ワンセグ) は無い
+            partialReception: false,
           }))
           .sort((a, b) => a.serviceId - b.serviceId),
       });
@@ -173,7 +175,7 @@ export function lineupFrom(
 const nameKey = (onid: number, tsid: number, sid: number) =>
   `${onid}:${tsid}:${sid}`;
 
-/** 前の控えの局名を引く鍵 (`lineupFrom` の `known`) */
+/** 前の控えの局名を引くキー (`lineupFrom` の `known`) */
 const serviceKeyOf = (networkId: number, serviceId: number) =>
   `${networkId}:${serviceId}`;
 
@@ -205,11 +207,11 @@ interface TableRead {
 }
 
 /**
- * 流れてくる TS から NIT と SDT を読む。**自分のネットワークの NIT がそろい、そこに載っているテレビの局の
+ * 流れてくる TS から NIT と SDT を読む。**自分のネットワークの NIT がそろい、そこに載っている取り込む種別の局 (テレビ・ラジオ・データ放送) の
  * 名前が SDT でそろったら打ち切る。** そろわなくても `timeout` で打ち切る (名前は欠けたまま返す)
  *
  * `other` を渡すと、それに当てはまる NIT[other] がそろうまでも待つ。CS はこれでもう片方のネットワークの
- * 中継器を知る。NIT[actual] と NIT[other] は別々に流れてくるので、actual と局名だけで打ち切ると other を読み落とす
+ * 中継器が分かる。NIT[actual] と NIT[other] は別々に流れてくるので、actual と局名だけで打ち切ると other を読み落とす
  */
 export async function readTables(
   stream: ReadableStream<Uint8Array>,
@@ -238,7 +240,7 @@ export async function readTables(
   return { nit, sdt, signal, error };
 }
 
-/** 自分のネットワークの NIT がそろい、テレビの局の名前が全部そろったか (`other` があれば、その NIT[other] も) */
+/** 自分のネットワークの NIT がそろい、取り込む種別の局 (テレビ・ラジオ・データ放送) の名前が全部そろったか (`other` があれば、その NIT[other] も) */
 function settled(
   nit: NitReader,
   sdt: SdtReader,
@@ -266,7 +268,7 @@ function settled(
   }
   return network.transportStreams.every((ts) =>
     ts.services
-      .filter((service) => service.serviceType === DIGITAL_TV)
+      .filter((service) => IMPORTED_SERVICE_TYPES.has(service.serviceType))
       .every((service) =>
         named.has(
           nameKey(

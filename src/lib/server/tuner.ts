@@ -71,6 +71,11 @@ const AGENT_CHANNEL = object({
       serviceType: number,
       name: string,
       /**
+       * 部分受信の局 (ワンセグ) か。スキャンが NIT の部分受信記述子から書く (`psi.FoundService`)。
+       * 書く前の控えには無い。取り込みは、無い控えのデータ放送 (0xC0) の局を、ワンセグかもしれないので落とす (`schema.importedService`)
+       */
+      partialReception: optional(boolean),
+      /**
        * PMT の CA 記述子にあった CA_system_id (`ca-observe.ts`)。TLV なら MPT のアクセス制御記述子のもの (`TlvServiceReader`)。
        * スキャンで PMT か MPT を読む CATV の局だけが持つ。CA 記述子が無ければ空。復号できるかはこれで決める (`types.decodableService`)
        */
@@ -251,7 +256,7 @@ export async function getChannels(agent: Agent): Promise<AgentChannel[]> {
 /**
  * チャンネルスキャンの結果を預ける。
  *
- * **見つけたのは denpa** (総当たりの選局はエージェントに任せるが、NIT と SDT を
+ * **見つけたのは denpa** (選局はエージェントに任せるが、NIT と SDT を
  * 読むのはこちら)。それでも控えはエージェントが持つ。
  * アンテナに何が映るかは機材ごとに違い、エージェントを増やせば顔ぶれも変わるため。
  *
@@ -369,7 +374,7 @@ async function askAll(wait?: number): Promise<Asked[]> {
 
 /**
  * 全部のエージェントのチューナーを、エージェントの並びの順につなげたもの。**返さなかったエージェントのものは入れない。**
- * どのエージェントも返さなければ reject する (エージェントが 1 台のときは、今までどおりそのエージェントの失敗)
+ * どのエージェントも返さなければ、先頭のエージェントの失敗で reject する
  */
 export async function getTuners(): Promise<AgentTuner[]> {
   const asked = await askAll();
@@ -529,6 +534,12 @@ export class TuneError extends Error {
   }
 }
 
+/**
+ * **エージェントが「選んだチューナーは電源を入れ直すまで使えない」と返した** (503。IT930x のブリッジの溢れ。docs/agent.md)。
+ * チャンネルではなく機材の問題なので、スキャンはこのチャンネルを落とさず、そのチューナーぶんの並びを止める (`scan.ts`)
+ */
+export class TunerUnusableError extends TuneError {}
+
 /** エージェントの失敗の本文 (`{ "error": "…" }`) から理由を読む。形が違えば null */
 function agentReason(detail: string): string | null {
   try {
@@ -602,7 +613,7 @@ const TSMF_STREAMS = "X-Denpa-Tsmf-Streams";
  * 答えが来たあとのストリームには効かない
  *
  * **どのエージェントに送るかはここで決める** (`route`)。`places` は局を受けられる所 (エージェントとそのチャンネル。
- * `agent-channels.servicePlaces`)。エージェントの中のどのチューナーかは、今までどおりエージェントが決める。
+ * `agent-channels.servicePlaces`)。エージェントの中のどのチューナーかは、エージェントが決める。
  * 送った所は `place` で返す
  *
  * `keyed` は、復号して使う局 (`services.id`)。録画とライブが渡す。渡すと、局を受けられるエージェントのうち、
@@ -675,7 +686,8 @@ export async function openChannel(
         `チューナーに空きがありません ${detail}`,
         reason,
       );
-    throw new TuneError(
+    const Failure = res.status === 503 ? TunerUnusableError : TuneError;
+    throw new Failure(
       `選局できません (${res.status}) ${detail}`,
       reason,
       place,
@@ -798,7 +810,7 @@ export interface RouteRequest {
   keyed: number | null;
 }
 
-/** そのチューナーを使ってよいか。空いている (余韻だけ) か、引き継ぐ利用者と自分より優先度の低い利用者しかいない (約束の 2・4) */
+/** そのチューナーを使ってよいか。空いている (余韻だけ) か、引き継ぐ利用者と取り合いで自分より後に回る利用者しかいない (約束の 2・4) */
 function usable(
   tuner: RoutedTuner,
   priority: number,
@@ -852,7 +864,7 @@ export async function pinGone(named: string): Promise<boolean> {
  * 1. 局を受けられて、一覧を返したエージェントに絞る。名指し (`pin`) なら、そのチューナーのあるエージェントに送る (無ければ絞った所の先頭)。
  *    復号して使う局 (`keys` を渡したとき) なら、さらにその局を復号できる見込みのいちばん高いカードのエージェントに絞る
  *    (`agent-cards.cardRanks`。契約を確かめたカード、確かめていないカード、未契約のカード、カード無しの順)
- * 2. 同じチャンネルを、自分と同じか優先度の高い利用者が読んでいるエージェントがあれば、そこで共有する (約束の 3)
+ * 2. 同じチャンネルを、取り合いで自分と同じか先になる利用者が読んでいるエージェントがあれば、そこで共有する (約束の 3)
  * 3. 選ぶ順に組を見て、その種別を受けられ、使ってよいチューナー (`usable`) のある最初のエージェント (約束の 2)
  * 4. どこにも無ければ、1 で絞った所の先頭 (`places` の順) に送る (エージェントが 409 で断り、呼んだ側が空き待ちで掛け直す)
  *
@@ -959,7 +971,7 @@ function withPending(
       .sort((a, b) => a.rank! - b.rank!)[0];
     if (free === undefined) continue;
     free.channel = { type: entry.type as ChannelType, channel: entry.channel };
-    // 取り上げた相手 (優先度の低い利用者・引き継いだ利用者) はいなくなる
+    // 取り上げた相手 (後に回る利用者・引き継いだ利用者) はいなくなる
     free.users.splice(0, free.users.length, user);
   }
   return copies;
@@ -1022,7 +1034,7 @@ export class TransportChangedError extends Error {
 }
 
 /**
- * 開いたストリームの形式が `expected` と同じか確かめる。同じならストリームを返し、違えばストリームを閉じて `TransportChangedError` を投げる
+ * 開いたストリームの形式が `expected` と同じか確かめる。同じならストリームを返し、違えばストリームを閉じて `TransportChangedError` を送出する
  */
 export async function expectTransport(
   opened: { stream: ReadableStream<Uint8Array>; transport: Transport },

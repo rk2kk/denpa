@@ -1,5 +1,5 @@
 /**
- * 番組表を集める。
+ * 番組表を取得する。
  *
  * やり方は 3 つとも「denpa が番組表を全部持っている」ことから来ている。
  *
@@ -8,14 +8,14 @@
  * - **録画と同居できる。** 録画で開いているチャンネルなら、エージェントが
  *   選局を共有させるのでチューナーは増えない。番組表はただで手に入る
  *
- * 集め終わりは時間ではなく **EIT 自身が言っている**ところで決める
+ * 取得の終わりは時間ではなく **EIT の中身**で決める
  * (`packages/arib/src/eit.ts` の ScheduleProgress)。揃えばすぐ離すので、次のチャンネルへ回せる。
  */
 
 import { EpgReader } from "@danything/arib/eit";
 import { MmtEpgReader } from "@danything/arib/mh-eit";
 import { type MhSdt, TlvServiceReader } from "@danything/arib/mmt-si";
-import { ServiceReader } from "@danything/arib/psi";
+import { ServiceReader, type TransportInfo } from "@danything/arib/psi";
 import { max } from "drizzle-orm";
 
 import { isSatellite } from "../types";
@@ -53,26 +53,21 @@ import {
 } from "./tuner";
 
 /**
- * 集めに行った時刻 (`type:channel` ごと)。番組が 0 件だった回も「行った」と覚えるため。
+ * 取得した時刻 (`type:channel` ごと)。番組が 0 件だった回も「行った」と覚えるため。
  * 再起動をまたぐぶんは局の行から数える (`lastCollected`)
  */
 const collected = new Map<string, number>();
 
 /**
- * その物理チャンネルを最後に集めた時刻。**局の行の `epg_at` から数える。**
+ * その物理チャンネルを最後に取得した時刻。**局の行の `epg_at` から数える。**
  *
  * **DB から起こす。** 覚えているだけだと Pod が入れ替わるたびに「1 度も行って
- * いない」に戻り、番組表が 7 日先まで埋まっているのに全チャンネルを回し直して
- * いた (実機で、入れ替えのたびに 46 チャンネルぶん)。`epg_at` は番組表 (EIT の schedule) を
- * 書いたときだけ進む (`epg.savePrograms`。録画とスキャンが読んだぶんも入る)。番組の行の `updated_at` で
- * 数えると、ライブが p/f を写しただけで「集めたばかり」になり、2 時間は行き直さなかった。
+ * いない」に戻り、番組表が 7 日先まで埋まっているのに全チャンネルを回し直す。
+ * `epg_at` は番組表 (EIT の schedule) を書いたときだけ進む (`epg.savePrograms`。録画とスキャンが読んだぶんも入る)。
+ * 番組の行の `updated_at` で数えると、ライブが p/f を写しただけで「取得したばかり」になる。
  *
- * **数えるキーは局**で、チャンネルの名前では数えない。局に物理チャンネルを 1 つだけ持っていた頃
- * (`services.channel`) は、そこに「最後に取り込んだときの枠の名前」しか入らず、**同じ TS を指す枠が
- * 2 つあると片方が必ず「一度も集めていない」ことになっていた**。実機の BS が
- * まさにそれで、9 枠が永久に「まっさら」に見えて周回のたびに開かれていた。
- *
- * 局で引けば、どの枠から開いても同じ時刻が出る。
+ * **数えるキーは局**で、チャンネルの名前では数えない。同じ TS を指す枠が 2 つあっても (実機の BS)、
+ * 局で引けばどの枠から開いても同じ時刻が出る。
  */
 function lastCollected(channels: AgentChannel[]): Map<string, number> {
   const perService = new Map<number, number>();
@@ -96,7 +91,7 @@ function lastCollected(channels: AgentChannel[]): Map<string, number> {
 }
 
 /**
- * そのチャンネルを最後に集めた時刻。**入っている局のうちいちばん新しいもの。**
+ * そのチャンネルを最後に取得した時刻。**入っている局のうちいちばん新しいもの。**
  *
  * 1 本開けば入っている局が全部まとめて埋まるので、どれか 1 つでも新しければ
  * そのチャンネルは行ったばかり。一度も入っていなければ 0 (まっさら)。
@@ -195,13 +190,13 @@ interface Work {
  * 入っている局のうち**いちばん薄いもの**に合わせる。1 本開けば入っている局が
  * 全部まとめて埋まるので、1 局でも薄ければ行く値打ちがある。
  *
- * **番組表に出てこない局は数えない。** 数えていた頃は、その局を「0 まで
- * 埋まっている = いちばん薄い」と読んで、**毎周回そのチャンネルを選び直して
- * いた**。実機で番組表の取得が止まらなかった原因は次の局だった。
+ * **番組表に出てこない局は数えない。** 数えると、その局を「0 まで
+ * 埋まっている = いちばん薄い」と読んで、**毎周回そのチャンネルを選び直す**。
+ * 番組表に出てこない局は次のもの。
  *
- * - **データ放送・ワンセグ。** エージェントは TS にある全部の局を返すが、
- *   denpa は映像の入っていない局を落とす (`epg.syncServices`)。地上波は
- *   ほぼ全局がこれを積んでいるので、**地上波が丸ごと毎回対象になっていた**
+ * - **ワンセグ。** エージェントは TS にある全部の局を返すが、
+ *   denpa は部分受信の局を取り込まない (`schema.importedService`)。地上波は
+ *   ほぼ全局がこれを積んでいるので、数えると**地上波が丸ごと毎回対象になる**
  * - **放送を終えた枠と、受信できない局。** BS103 や、実機に残っている CS 24 局
  *
  * 番組表に出てこない局を外した結果、1 局も残らないチャンネルは 0 (まっさら) のままにする。
@@ -218,7 +213,7 @@ export function reachOf(
 /**
  * この周回で回すチャンネルを選ぶ。
  *
- * 集め直すのは「しばらく行っていない」か「番組表が薄い」チャンネル。
+ * 取得し直すのは「しばらく行っていない」か「番組表が薄い」チャンネル。
  * **薄いほうから先に**行く。スキャンの直後や初回起動では全部が空なので、
  * ここが効いて画面に番組が出るまでが早くなる。
  *
@@ -253,7 +248,8 @@ export function pickChannels(
  *
  * - `read`: 開けて読んだ。揃った・上限で切った・受信できなかった (`failed`) のどれも入る
  * - `busy`: チューナーに空きが無かった (409)。チューナーは使っていない
- * - `cut`: 開けたが、こちらが閉じる前にストリームが切れた (優先度の高い要求に譲った・エージェントが切断した)
+ * - `cut`: 開けたが、こちらが閉じる前にストリームが切れた (取り合いで先になる要求に譲った・エージェントが切断した)。
+ *   揃う前に例外無く終わった回も入る (`endedEarly`)
  * - `untuned`: エージェントが「選局できない」と返した (`TuneError`。同期しない・デバイスが無い)
  */
 export type Outcome = "read" | "busy" | "cut" | "untuned";
@@ -261,7 +257,7 @@ export type Outcome = "read" | "busy" | "cut" | "untuned";
 /**
  * 1 チャンネル開いて、番組表が揃うまで読む。
  *
- * `whole` のときは**ほかの TS の局の番組表も読む** (`firstSweeps`)。
+ * `whole` のときは**ほかの TS にある局の番組表も読む** (`firstSweeps`)。
  *
  * `last` が false の回は、選局できなくても受信できなかったと数えない。この周回で読み直すため (`drain`)
  */
@@ -327,6 +323,8 @@ async function collectChannel(
   let sentTo: Place | null = null;
   /** 仮の名前の局がある TLV のチャンネルで受信した MH-SDT[actual] (`tlv-names.ts`) */
   let named: MhSdt | null = null;
+  /** 仮の名前の局がある TS のチャンネルで受信した SDT[actual] (`tlv-names.ts`) */
+  let sdtNamed: TransportInfo | null = null;
   /*
    * **読みながら少しずつ保存する。** 揃うまで待ってからまとめて書くと、全局読みの
    * 数分のあいだ画面に何も出ない。今日・明日の番組は先に流れてくるので、開いて
@@ -364,7 +362,7 @@ async function collectChannel(
           places,
           controller.signal,
           `epg ${channel.channel}`,
-          // 押されている間は、開くたびに高い優先度で取る
+          // 押されている間は、開くたびに取り合いで先になる順で取る
           boosted ? config.priority.epgNow : config.priority.epg,
         ),
       () => controller.signal.aborted,
@@ -406,6 +404,8 @@ async function collectChannel(
         if (sdt.transport === null && sdtBytes > SDT_LIMIT) {
           sdt = null;
         } else if (sdt.transport !== null) {
+          // 仮の名前の局があるチャンネル (ロックしなかった TS を NIT から入れた) なら、あとで局名を書き換える (`tlv-names.ts`)
+          if (hasUnnamed(channel)) sdtNamed = sdt.transport;
           try {
             widenServices(
               sdt.transport.originalNetworkId,
@@ -422,11 +422,20 @@ async function collectChannel(
       if (reader.feed(chunk) && reader.complete) break;
       if (Date.now() - flushedAt >= FLUSH_EVERY) flush();
     }
+    cut = endedEarly({
+      opened,
+      aborted: controller.signal.aborted,
+      complete: reader.complete,
+    });
+    if (cut)
+      console.warn(
+        `[epg] ${label}: 揃う前にエージェントがストリームを閉じました`,
+      );
   } catch (error) {
     // 使えなかった・途中で切れた。**読めたところまでは取り込む。**
     // 電波が弱い局で 1 件も入らないより、半分でも埋まっているほうがいい
     if (!controller.signal.aborted) {
-      console.warn(`[epg] ${label} を集められませんでした: ${error}`);
+      console.warn(`[epg] ${label} の番組表を取得できませんでした: ${error}`);
     }
     refused = error instanceof TuneError;
     if (error instanceof TuneError) sentTo ??= error.place;
@@ -454,6 +463,28 @@ async function collectChannel(
       if (renamed > 0)
         console.log(
           `[epg] ${label}: MH-SDT で ${renamed} 局の局名を受信したので、仮の名前から書き換えました`,
+        );
+    } catch (error) {
+      console.warn(`[epg] ${label} の局名を書けませんでした: ${error}`);
+    }
+  }
+
+  // ロックしなかった TS を NIT から入れたチャンネルの SDT[actual] なら、仮の局名を放送の局名にする (`tlv-names.ts`)
+  if (
+    sdtNamed !== null &&
+    sdtNamed.originalNetworkId === channel.networkId &&
+    sdtNamed.transportStreamId === channel.transportStreamId
+  ) {
+    try {
+      const renamed = await nameTlvServices(
+        sdtNamed.originalNetworkId,
+        sdtNamed.transportStreamId,
+        sdtNamed.services,
+        "ts",
+      );
+      if (renamed > 0)
+        console.log(
+          `[epg] ${label}: SDT で ${renamed} 局の局名を受信したので、仮の名前から書き換えました`,
         );
     } catch (error) {
       console.warn(`[epg] ${label} の局名を書けませんでした: ${error}`);
@@ -494,13 +525,12 @@ async function collectChannel(
    *
    * 揃えば早く離すのは denpa だけがやっていることなので (よそは時間で
    * 打ち切る)、そこが効いていないと**何も出力せずに 1 台 10 分ずつ占有し続ける**。
-   * 実測でチューナーを 1 台 600 秒 (上限ちょうど) 使っているのを見つけたが、
-   * 揃わなかったのか電波が欠けていたのかは記録が無くて追えなかった。
+   * 上限まで使ったとき、揃わなかったのか電波が欠けていたのかを記録から追えるようにする。
    */
   if (opened) {
     /*
-     * **1 件も取れなくても「行った」と覚える。** 番組の行から数え直すだけだった頃は、
-     * EIT が来ない局の `last` が永久に 0 のままで、周回のたびに選ばれ続けていた
+     * **1 件も取れなくても「行った」と覚える。** 番組の行から数え直すだけだと、
+     * EIT が来ない局の `last` が永久に 0 のままで、周回のたびに選ばれ続ける
      */
     collected.set(key(channel), Date.now());
     const secs = Math.round((Date.now() - startedAt) / 1000);
@@ -523,6 +553,21 @@ async function collectChannel(
     failed,
     outcome: busy ? "busy" : cut ? "cut" : refused ? "untuned" : "read",
   };
+}
+
+/**
+ * 開けたストリームが、揃う前に例外を投げずに終わったとき、途中で切れた (`cut`) と数えるか。
+ * エージェントがストリームをきれいに閉じるのは、引き継ぎ (`after`) で正常に終わらせた利用者だけで
+ * (docs/agent.md「選ぶ順の約束」の 4)、番組表の取得は `after` に入らない。取り上げられたときは接続を壊すので例外になる。
+ * それでも例外無く終わったなら、間の経路が接続を閉じたなどで読み終えたのではないので、揃っていなければ
+ * 途中で切れた回と同じく列へ戻して読み直す (`drain`)。こちらが閉じた (上限・止めた) 回は数えない
+ */
+export function endedEarly(read: {
+  opened: boolean;
+  aborted: boolean;
+  complete: boolean;
+}): boolean {
+  return read.opened && !read.aborted && !read.complete;
 }
 
 /**
@@ -568,13 +613,13 @@ export function collectOnce(): Promise<number> {
 }
 
 /**
- * **いますぐ、全チューナーで、最優先で集める。**
+ * **いますぐ、全チューナーで、最優先で取得する。**
  *
  * 入れたばかりのときのためのもの。普段の周回 (`collectOnce`) は録画・ライブ・
- * スキャン・衛星のロゴの当たりの中継 (`config.priority.carousel`) に譲るので、他が動いていると番組表がなかなか埋まらない。
+ * スキャン・衛星のロゴを積んだ中継 (`config.priority.carousel`) に譲るので、他が動いていると番組表がなかなか埋まらない。
  * 押されている間は**録画とライブ以外には全部譲らせて**取得する (`config.priority.epgNow`)。
  *
- * **既に回っている最中なら、その回の優先度を上げる。** 開くのは 1 チャンネルずつなので、
+ * **既に回っている最中なら、その回を取り合いで先にする。** 開くのは 1 チャンネルずつなので、
  * 次に開くところから効く (待たせて仕切り直すより早い)。
  */
 export function collectNow(): Promise<number> {
@@ -660,8 +705,8 @@ export function networkSweeps(
  * 全局読みで開く中継の順。**受信できるかをいちばん長く確かめていない中継から** (一度も確かめていないものが先)。
  *
  * 番組の行の時刻では選べない。1 中継の全局読みでネットワークの全局の番組が新しくなるので、
- * どの中継も同じ時刻になり、いつも先頭の中継 (CS02・CS04) ばかり開いていた。受信できたかは
- * 開いた中継にしか残らないので、ほかの中継がずっと「確認中」のままだった (`reception.ts`)
+ * どの中継も同じ時刻になり、いつも先頭の中継 (CS02・CS04) ばかり開く。受信できたかは
+ * 開いた中継にしか残らないので、ほかの中継がずっと「確認中」のままになる (`reception.ts`)
  */
 export function sweepOrder(
   channels: AgentChannel[],
@@ -694,7 +739,7 @@ export function replacement(
 /**
  * 読み終えた 1 本が、初回の全局読み (`first`) の 1 つを終えたか。画面の「詳細はあとで足す」は、これが
  * `first` の数だけ来たら消す。**列へ戻した読み直し (`whole: null`) は数えない。** 同じ中継の全局読みを
- * 数え終えたあとなので、数えるとほかの全局読みが終わる前に 0 になり、二重に減らしていた
+ * 数え終えたあとなので、数えると二重に減り、ほかの全局読みが終わる前に 0 になる
  */
 export function firstSweepDone(
   job: { channel: AgentChannel; whole: number[] | null },
@@ -706,10 +751,9 @@ export function firstSweepDone(
 /**
  * **並べる処理の数と、それぞれが引く種別。** 番組表の取得がいま使えるチューナー 1 台につき 1 つ。
  *
- * 使えるのは、無効でなく (`rank` がある)、**自分と同じか優先度の高い利用者がいない**チューナー
+ * 使えるのは、無効でなく (`rank` がある)、**取り合いで自分と同じか先になる利用者がいない**チューナー
  * (エージェントの選び方と同じ。docs/agent.md「選ぶ順の約束」の 2)。ライブや録画が使っているチューナーまで
- * 数えていた頃は、溢れた処理がエージェントに 409 で断られ続け、断られるたびにすぐ次のチャンネルを取って
- * 落としていた (実機で、ライブを見ながら「いますぐ集める」を押すと 50 チャンネルのうち 4 つしか読めなかった)
+ * 数えると、溢れた処理がエージェントに 409 で断られ続ける
  */
 export function laneTypes(
   tuners: readonly Pick<AgentTuner, "disabled" | "rank" | "types" | "users">[],
@@ -855,7 +899,7 @@ export async function drain<J extends { channel: { type: string } }>(
   /*
    * **列にある種別は、どれも少なくとも 1 つの処理が引く。** チューナーが塞がっている種別は `laneTypes` に入らないので、
    * その種別を 1 つの処理にまとめて引かせる。塞がっていれば上の決まりどおり待ち、待ちきれなければ記録して落とす
-   * (`dropped`)。並びに入れなかった頃は、その種別が記録も無く抜けていた
+   * (`dropped`)。その種別が記録も無く抜けないようにする
    */
   const covered = new Set(lanes.flat());
   const orphans = [...new Set(queue.map((job) => job.channel.type))].filter(
@@ -960,8 +1004,8 @@ async function run(): Promise<number> {
    * 押されたときは**選り好みしない。**
    *
    * 普段は「薄い」か「しばらく行っていない」チャンネルだけ回るので、
-   * さっき集め終えたところで押すと 1 本も回らず、何も起きていないように見える。
-   * 押した人は「いま集め直したい」なので、全部回って薄いほうから行く
+   * 取得し終えた直後に押すと 1 つも回らず、何も起きていないように見える。
+   * 押した人は「いま取得し直したい」なので、全部回って薄いほうから行く
    */
   const targets = boosted
     ? [...channels].sort((a, b) => thinnest(a) - thinnest(b))
@@ -983,7 +1027,7 @@ async function run(): Promise<number> {
   if (total === 0) return 0;
 
   /*
-   * 全局読みで来るはずの局。**DB にある局だけ** (映像の無い局は入れていない)。
+   * 全局読みで来るはずの局。**DB にある局だけ** (ワンセグなどの取り込まない局は入っていない)。
    * 全部見えて揃えばすぐ閉じる
    */
   const known = new Set(
@@ -1002,7 +1046,7 @@ async function run(): Promise<number> {
         known.has(serviceKey(sweep.networkId, serviceId, sweep.type)),
       );
 
-  // 押されている間は高い優先度で開く (`collectChannel`)。並べる数も、その優先度で使えるチューナーで数える
+  // 押されている間は取り合いで先になる順で開く (`collectChannel`)。並べる数も、その順で使えるチューナーで数える
   const lanes = laneTypes(
     await getTuners().catch(() => []),
     boosted ? config.priority.epgNow : config.priority.epg,
@@ -1021,10 +1065,9 @@ async function run(): Promise<number> {
   let programs = 0;
   try {
     /*
-     * **1 台に 1 つの処理。** 種別ごとに「その種別のチューナー台数」だけ並べていた頃は、
-     * BS と CS を同時に集めると衛星の台数を二重に数えていた (同じ 2 台が
-     * BS でも CS でも 1 台ぶんに見える)。溢れたぶんは 409 で弾かれ、その回は
-     * 集められないまま落ちる。1 つの列を全チューナーで引けば数は合う。
+     * **1 台に 1 つの処理。** 種別ごとに「その種別のチューナー台数」だけ並べると、
+     * BS と CS を同時に取得するとき衛星の台数を二重に数える (同じ 2 台が
+     * BS でも CS でも 1 台ぶんに見える)。1 つの列を全チューナーで引けば数は合う。
      * 数えるのは番組表の取得がいま使えるチューナーだけ (`laneTypes`)。それでも断られたら列へ戻す (`drain`)
      */
     let sweepsLeft = first.length;
@@ -1073,7 +1116,7 @@ async function run(): Promise<number> {
       /*
        * 詳細の無い種別の全局読みが受信できなかったら、**この周回のうちに次の中継で読み直す。**
        * 受信できない中継の番が来ても、そのネットワークの番組表を止めない
-       * (失敗した中継も「行った」と覚えるので、そのままだと次に集め直すときまで延びる)。
+       * (失敗した中継も「行った」と覚えるので、そのままだと次に取得し直すときまで延びる)。
        * 替えるのはネットワークごとに 1 回まで。どれも受信できないとき (アンテナの不調) に、
        * 中継を全部開いて回らない
        */

@@ -3,7 +3,7 @@
 
   /**
    * 何も映っていない間の幕。**見た目の決まりを画面ごとに書かない**。
-   * 敷きの濃さ・スピナーの大きさ・文字色が 3 画面で 3 種類に育っていた。
+   * 覆いの濃さ・スピナーの大きさ・文字色が 3 画面で 3 種類に育っていた。
    *
    * - **前のフレームを貼っている間 (`holding`) は塗り潰さない。** 覆ってしまうと
    *   貼っている意味が無くなる (実機で撮ると、前のフレームが白くかすんだだけの
@@ -14,7 +14,7 @@
    * - **回るものは、繋いでいる・読み込んでいる最中だけ出し、いつも文言を添える** (「読み込み中」。切れて繋ぎ直しているときは
    *   「繋ぎ直しています」)。3 画面で条件と文言を変えない
    * - **幕そのものは押させない** (`pointer-events: none`)。箱いっぱいに広がるので、
-   *   そのままだと下の操作バーを覆って押せなくなる。エラーの下のボタン (`actions`) だけ押せるように戻す
+   *   そのままだと下の操作バーを覆って押せなくなる。押せるように戻すのはエラーの箱 (文言と `actions` のボタン) だけ
    */
   interface Props {
     /** 前のフレームを貼っているか (`live-player` の holding) */
@@ -25,6 +25,11 @@
     resuming?: boolean;
     /** 失敗の文言。あれば busy より先にこちらを出す */
     error?: string;
+    /**
+     * 失敗の詳しいところ (観る画面の、何を再生しようとして何で止まったか)。文言の下に小さく出す。
+     * 報告の画面写真だけで、どの形式で止まったかを読み分けるため。空なら出さない
+     */
+    detail?: string;
     /** エラーの下のボタン (ライブ・追っかけの「再試行」、観る画面の「… で観る」)。押せるようにするのは幕の側 */
     actions?: Snippet | undefined;
     /** busy でも error でもないときの文言 (ライブの「局を選んでください」)。空なら何も出さない */
@@ -36,6 +41,7 @@
     busy,
     resuming = false,
     error = "",
+    detail = "",
     actions,
     idle = "",
     testid,
@@ -51,6 +57,9 @@
   {#if error !== ""}
     <div class="error">
       <div class="message">{error}</div>
+      {#if detail !== ""}<div class="detail" data-testid="{testid}-detail">
+          {detail}
+        </div>{/if}
       {#if actions}<div class="actions">{@render actions()}</div>{/if}
     </div>
   {:else if busy}
@@ -88,6 +97,12 @@
   }
   .message {
     font-weight: var(--dp-weight);
+  }
+  .detail {
+    margin-top: var(--dp-space-2);
+    font-size: var(--dp-text-sm);
+    color: var(--dp-on-video-muted);
+    overflow-wrap: anywhere;
   }
   .actions {
     margin-top: var(--dp-space-3);

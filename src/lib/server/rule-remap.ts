@@ -6,7 +6,7 @@
  * そのときは古い局がいまの局の一覧から消え、ルールは録画しなくなる。
  *
  * **自動では付け替えない。** 間違えて付け替えると、別の局の番組を録る。候補を出して人が選ぶ。
- * 候補は同じ種別のいまの局 (テレビ) で、古い局と同じチャンネル (TS) の局、同じ名前の局の順に並べる
+ * 候補は同じ種別のいまの局 (テレビ・ラジオ・データ放送) で、古い局と同じチャンネル (TS) の局、同じ名前の局の順に並べる
  */
 import { eq } from "drizzle-orm";
 
@@ -15,7 +15,7 @@ import { unreceivableService } from "./agent-channels";
 import { orm } from "./db";
 import { currentServices } from "./epg";
 import { reapply } from "./rule-actions";
-import { DIGITAL_TV, rules as ruleTable, services } from "./schema";
+import { IMPORTED_SERVICE_TYPES, rules as ruleTable, services } from "./schema";
 
 /** 候補として並べる数の上限 */
 const CANDIDATES = 5;
@@ -54,7 +54,9 @@ export function orphanedRules(): Orphan[] {
       .map((row) => row.id),
   );
   const live = all.filter(
-    (service) => current.has(service.id) && service.service_type === DIGITAL_TV,
+    (service) =>
+      current.has(service.id) &&
+      IMPORTED_SERVICE_TYPES.has(service.service_type),
   );
 
   /*
@@ -79,7 +81,7 @@ export function orphanedRules(): Orphan[] {
     for (const id of ids) {
       if (current.has(id)) continue;
       const gone = byId.get(id);
-      // 局の行が無い (映像の無い局として消した) ものは、名前も候補も出せない
+      // 局の行が無い (ワンセグなどの取り込まない局として消した) ものは、名前も候補も出せない
       if (gone === undefined) continue;
       if (blocked.has(gone.id)) continue;
       const name = toHalfWidth(gone.name);

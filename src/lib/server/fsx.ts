@@ -4,6 +4,7 @@ import {
   mkdirSync,
   renameSync,
   rmdirSync,
+  statSync,
   unlinkSync,
 } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
@@ -31,7 +32,7 @@ export function removeIfExists(path: string | null | undefined): void {
 }
 
 /**
- * ファイルを消した後に空になったフォルダ (シリーズ) を畳む。
+ * ファイルを消した後に空になったフォルダ (シリーズ) を消す。
  * encodedDir 自身より上には絶対に遡らない。encodedDir の外 (名前の先頭が同じだけの隣のフォルダも) には触らない
  */
 export function pruneEmptyDirs(path: string): void {
@@ -48,5 +49,14 @@ export function pruneEmptyDirs(path: string): void {
       return;
     }
     dir = dirname(dir);
+  }
+}
+
+/** いまのファイルの大きさ。無ければ null (消された・まだ書き始めていない) */
+export function fileSize(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
   }
 }

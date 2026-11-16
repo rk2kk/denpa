@@ -8,16 +8,164 @@ import {
   canvasTranscodes,
   codecChoices,
   covers,
+  failureText,
   type MediaAbility,
+  offersText,
   pickCanvas,
+  pickedText,
   pickOffer,
+  pickStream,
   playableAbility,
   type PlaybackInfo,
+  STREAM_RETRIES,
   streamForAudio,
+  streamOrigin,
+  StreamRetry,
+  type StreamState,
   switchPoint,
   transcodes,
   typeOfCodec,
 } from "./playback";
+
+/** 切れたときのリクエストし直し (`StreamRetry`)。待つ時間は偽のタイマーで飛ばす */
+describe("StreamRetry", () => {
+  function fake() {
+    const states: StreamState[] = [];
+    const waits: number[] = [];
+    let pending: (() => void) | null = null;
+    const saved = globalThis.setTimeout;
+    globalThis.setTimeout = ((run: () => void, wait: number) => {
+      waits.push(wait);
+      pending = run;
+      return 1;
+    }) as unknown as typeof setTimeout;
+    const retry = new StreamRetry((state) => states.push(state));
+    const fire = () => {
+      const run = pending;
+      pending = null;
+      run?.();
+    };
+    return {
+      retry,
+      states,
+      waits,
+      fire,
+      restore: () => (globalThis.setTimeout = saved),
+    };
+  }
+
+  test("倍々に待って呼び、上限を超えたら呼ばずに failed にする", () => {
+    const { retry, states, waits, fire, restore } = fake();
+    try {
+      let calls = 0;
+      for (let i = 0; i <= STREAM_RETRIES; i++) {
+        retry.schedule(() => calls++);
+        expect(retry.waiting).toBe(i < STREAM_RETRIES);
+        fire();
+      }
+      expect(calls).toBe(STREAM_RETRIES);
+      expect(waits.slice(0, 4)).toEqual([1000, 2000, 4000, 8000]);
+      expect(Math.max(...waits)).toBe(10_000);
+      expect(states.at(-1)).toBe("failed");
+      expect(states.filter((s) => s === "retrying")).toHaveLength(
+        STREAM_RETRIES,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("届き始めたら数を戻して flowing にする。リクエストし直していなければ何も言わない", () => {
+    const { retry, states, waits, fire, restore } = fake();
+    try {
+      retry.flowing();
+      expect(states).toEqual([]);
+      retry.schedule(() => {});
+      fire();
+      retry.schedule(() => {});
+      fire();
+      retry.flowing();
+      expect(states).toEqual(["retrying", "retrying", "flowing"]);
+      retry.schedule(() => {});
+      expect(waits.at(-1)).toBe(1000);
+    } finally {
+      restore();
+    }
+  });
+
+  test("quiet なら retrying を言わず、手元を使い切ったら (starved) 1 度だけ言う", () => {
+    const { retry, states, fire, restore } = fake();
+    try {
+      // 黙っていなければ starved は何も言わない
+      retry.starved();
+      expect(states).toEqual([]);
+      retry.schedule(() => {}, true);
+      expect(states).toEqual([]);
+      retry.starved();
+      retry.starved();
+      expect(states).toEqual(["retrying"]);
+      fire();
+      // 届き始めたら flowing。そのあとの starved は何も言わない
+      retry.schedule(() => {}, true);
+      fire();
+      retry.flowing();
+      retry.starved();
+      expect(states).toEqual(["retrying", "flowing"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("待っている間に cancel したら quiet を戻す。待ち終えて呼んだものの中の cancel では戻さない", () => {
+    const { retry, states, fire, restore } = fake();
+    const saved = globalThis.clearTimeout;
+    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+    try {
+      retry.schedule(() => {}, true);
+      retry.cancel();
+      retry.starved();
+      expect(states).toEqual([]);
+      retry.schedule(() => retry.cancel(), true);
+      fire();
+      retry.starved();
+      expect(states).toEqual(["retrying"]);
+    } finally {
+      globalThis.clearTimeout = saved;
+      restore();
+    }
+  });
+
+  test("quiet でも数は数え、上限を超えたら failed にする", () => {
+    const { retry, states, fire, restore } = fake();
+    try {
+      for (let i = 0; i <= STREAM_RETRIES; i++) {
+        retry.schedule(() => {}, true);
+        fire();
+      }
+      expect(states).toEqual(["failed"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("cancel すると待っていたものは呼ばない", () => {
+    const { retry, restore } = fake();
+    const saved = globalThis.clearTimeout;
+    let cleared = 0;
+    globalThis.clearTimeout = (() => {
+      cleared++;
+    }) as typeof clearTimeout;
+    try {
+      retry.schedule(() => {});
+      retry.cancel();
+      expect(retry.waiting).toBe(false);
+      expect(cleared).toBe(1);
+    } finally {
+      globalThis.clearTimeout = saved;
+      restore();
+    }
+  });
+});
 
 /** 答えを表で持つブラウザ。載っていない形式は読めない */
 function browser(play: string[], mse: string[]): MediaAbility {
@@ -233,6 +381,105 @@ describe("どれで観るか (pickOffer)", () => {
       source: "encoded",
     });
     expect(pickOffer(tsOnly, browser([], []))).toBeNull();
+  });
+});
+
+describe("ファイルを読めなかったときの行き先 (pickStream)", () => {
+  /** canPlayType は WebM の H.264 を読めると答えたが、`<video>` は入れ物を読めなかった端末 */
+  const fooled = browser(
+    ['video/webm; codecs="avc1.640028,opus"'],
+    [H264_MP4, H264_LIVE],
+  );
+
+  test("ファイルを外し、詰め替えを変換より先に選ぶ", () => {
+    expect(pickOffer(h264Only, fooled)).toEqual({
+      way: "file",
+      codec: "h264",
+      source: "encoded",
+    });
+    expect(pickStream(h264Only, fooled)).toEqual({
+      way: "stream",
+      codec: "h264",
+      type: H264_MP4,
+    });
+  });
+
+  test("詰め替えを受け取れなければ変換", () => {
+    expect(
+      pickStream(av1Only, browser([], [H264_LIVE, AV1_MP4]), true),
+    ).toEqual({ way: "stream", codec: "av1", type: AV1_MP4 });
+    expect(pickStream(av1Only, iphone, true)).toEqual({
+      way: "stream",
+      codec: "h264",
+      type: H264_LIVE,
+    });
+  });
+
+  test("ストリームを受け取れなければ元の TS、それも無ければ null", () => {
+    const kept: PlaybackInfo = {
+      ...h264Only,
+      offers: [...h264Only.offers, { codec: "mpeg2", way: "raw" }],
+    };
+    expect(pickStream(kept, { ...browser([], []), mpeg2: true })).toEqual({
+      way: "raw",
+      codec: "mpeg2",
+    });
+    expect(pickStream(kept, browser([], []))).toBeNull();
+  });
+});
+
+describe("再生できなかった理由の 1 行 (failureText・pickedText・offersText)", () => {
+  test("MediaError は定数名とブラウザの文言、無ければ受け取った例外", () => {
+    expect(failureText({ code: 4, message: "Unsupported" })).toBe(
+      "MEDIA_ERR_SRC_NOT_SUPPORTED (Unsupported)",
+    );
+    expect(failureText({ code: 3, message: "" })).toBe("MEDIA_ERR_DECODE");
+    expect(failureText(null, new Error("SourceBuffer error"))).toBe(
+      "SourceBuffer error",
+    );
+    expect(
+      failureText(null, new DOMException("not supported", "NotSupportedError")),
+    ).toBe("NotSupportedError: not supported");
+  });
+
+  test("その場で流すストリームは、最後にリクエストしたきっかけと位置、止まった位置を添える (streamOrigin)", () => {
+    expect(streamOrigin("open", 1234, 1240.46)).toBe(
+      "開いたときに 1234.0 秒から読み、1240.5 秒で止まりました",
+    );
+    expect(streamOrigin("switch", 30.25, 31)).toBe(
+      "画質を切り替えたときに 30.3 秒から読み、31.0 秒で止まりました",
+    );
+  });
+
+  test("何を再生しようとしたかを、コーデック・出し方・codecs で書く", () => {
+    expect(
+      pickedText(h264Only, { way: "file", codec: "h264", source: "encoded" }),
+    ).toBe("H.264 のファイル (avc1.640028,opus)");
+    expect(
+      pickedText(null, { way: "file", codec: "h264", source: "encoded" }, true),
+    ).toBe("端末に保存した H.264 のファイル");
+    expect(
+      pickedText(h264Only, { way: "stream", codec: "h264", type: H264_MP4 }),
+    ).toBe(`H.264 の詰め替え (${H264_MP4})`);
+    expect(
+      pickedText(av1Only, { way: "stream", codec: "h264", type: H264_LIVE }),
+    ).toBe(`H.264 の変換 (${H264_LIVE})`);
+    expect(pickedText(tsOnly, { way: "raw", codec: "mpeg2" })).toBe(
+      "MPEG-2 (元の TS)",
+    );
+  });
+
+  test("サーバが出せるものを並べる", () => {
+    expect(offersText(null)).toBe("再生の情報を取得できませんでした");
+    expect(offersText({ ...tsOnly, offers: [] })).toBe(
+      "サーバが出せる形式がありません",
+    );
+    expect(offersText(tsOnly)).toBe(
+      "サーバが出せる形式: H.264 の変換 (avc1.640029,mp4a.40.2)、AV1 の変換 (av01.0.08M.08,Opus)、MPEG-2 (元の TS)",
+    );
+    expect(offersText(h264Only)).toBe(
+      "サーバが出せる形式: H.264 のファイル (avc1.640028,opus)、H.264 の詰め替え (avc1.640028,mp4a.40.2)、AV1 の変換 (av01.0.08M.08,Opus)",
+    );
   });
 });
 
@@ -552,5 +799,35 @@ describe("サーバが選ぶ観方 (autoPick。playback?playable=)", () => {
       source: "encoded",
     });
     expect(autoPick(unknown, ["h264"], false)).toBeNull();
+  });
+});
+
+describe("映像の無い録画 (ラジオ・データ放送の局)", () => {
+  /** サーバの `videolessPlan` が返す形式。音声だけの fMP4 1 つ */
+  const radio: PlaybackInfo = {
+    duration: 3600,
+    axis: "ts",
+    audios: [{ id: "0", label: "" }],
+    offers: [{ codec: "h264", way: "stream", codecs: "mp4a.40.2" }],
+    video: false,
+  };
+
+  test("端末に聞かずに音声だけの fMP4 を選ぶ (MSE の型は AUDIO_TYPE)", () => {
+    expect(pickOffer(radio, browser([], []))).toEqual({
+      way: "stream",
+      codec: "h264",
+      type: AUDIO_TYPE,
+    });
+  });
+
+  test("コーデックのメニューには何も並べない", () => {
+    expect(codecChoices(radio, browser([H264_MP4], [H264_MP4]))).toEqual([]);
+  });
+
+  test("テレビのアプリが映像のコーデックしか言わなくても選ぶ", () => {
+    expect(autoPick(radio, ["av1"], false)).toEqual({
+      way: "stream",
+      codec: "h264",
+    });
   });
 });

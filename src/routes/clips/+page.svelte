@@ -417,6 +417,10 @@
   let hold: ReturnType<typeof setTimeout> | undefined;
   let held = false;
   let holdFrom = { x: 0, y: 0 };
+  $effect(() => () => {
+    clearTimeout(hold);
+    clearTimeout(copiedTimer);
+  });
   function onholdstart(clip: Clip, event: PointerEvent): void {
     held = false;
     clearTimeout(hold);
@@ -958,7 +962,7 @@
     color: var(--pico-color);
     text-align: start;
   }
-  /* 乗せたときはほかの件と同じく淡い地 (`--dp-hover-soft`)。画像の明るさは変えない */
+  /* 乗せたときは地の上の行と同じく淡い地 (`--dp-hover-soft`)。画像の明るさは変えない */
   .c-card:hover {
     background: var(--dp-hover-soft);
   }
@@ -1024,7 +1028,7 @@
     width: 1.75rem;
     height: 1.75rem;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--dp-video) 55%, transparent);
+    background: var(--dp-video-veil);
     color: transparent;
     box-shadow: inset 0 0 0 2px var(--dp-on-video);
     transition:
@@ -1219,14 +1223,18 @@
     height: 100%;
     object-fit: contain;
   }
-  /* 読みものは左下。右端の列に掛からないよう右を空け、明るい画像の上でも読めるよう下から影を敷く */
+  /*
+   * 読みものは左下。明るい画像の上でも読めるよう下から影を敷く。**影は舞台の右端まで敷き、字だけ右端の列の手前で止める**
+   * (影の右を空けると、右下の角だけ影が無く、右端の列の影との境目が縦の線に見える)
+   */
   .v-info {
     position: absolute;
-    inset: auto 5rem 0 0;
-    padding: 2.5rem var(--dp-space-4) var(--dp-space-4);
+    inset: auto 0 0 0;
+    padding: 2.5rem calc(5rem + var(--dp-space-4)) var(--dp-space-4)
+      var(--dp-space-4);
     background: linear-gradient(
       to top,
-      color-mix(in srgb, var(--dp-video) 82%, transparent),
+      var(--dp-video-veil-strong),
       transparent
     );
     pointer-events: none;

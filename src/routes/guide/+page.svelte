@@ -10,7 +10,10 @@
 
   import { dragScroll } from "#lib/actions.js";
   import { GENRE_TREE } from "#lib/arib.js";
-  import ChannelNotice from "#lib/components/ChannelNotice.svelte";
+  import {
+    CHANNEL_NOTICE_ACTION,
+    CHANNEL_NOTICE_SECTION,
+  } from "#lib/channel-notice.js";
   import {
     guideNavigation,
     rememberGuideTabs,
@@ -642,8 +645,8 @@
   /*
    * 前日・翌日を先に取り寄せておく。`data-sveltekit-preload-data="hover"` は指を乗せてからなので、狙って押すと間に合わない。
    *
-   * **マスを描き終わってから** (`drawing` が下りてから) 取得する。表が届いた時点で取得していた頃は、BS で 1 件 1 MB 超の
-   * 応答の解読が描画と取り合っていた。描き終わった直後もレイアウトが走っているので、少し置いて (`PREFETCH_DELAY`)
+   * **マスを描き終わってから** (`drawing` が false になってから) 取得する。表が届いた時点で取得していた頃は、BS で 1 件 1 MB 超の
+   * 応答のパースが描画と取り合っていた。描き終わった直後もレイアウトが走っているので、少し置いて (`PREFETCH_DELAY`)
    * 空いたとき (`requestIdleCallback`。Safari には無いので置くだけ) に取得する。
    * 同じ日・同じ種別の読み直しでは取り直さない (`prefetchedFor`)
    */
@@ -691,7 +694,7 @@
         局名の行に入れると、操作の幅のぶん局名が隠れる。表の外の 1 行なら、
         隠れるものも押す回数も増えない。
 
-        **スマホの形では下のタブのすぐ上に浮かせる** (親指が届く。表を読んでいる間は下のタブと一緒に引っ込む。`app.css` の `.guide-bar`)。
+        **スマホの形では下のタブのすぐ上に浮かせる** (親指が届く。低い画面で表を読んでいる間は引っ込む。`app.css` の `.guide-bar`)。
         DOM の順 (種別 → 日付 → 時刻 → …) は読み上げの順なので変えない。
         入りきらない幅では、時刻のボタンを「⋯」に、さらに狭いと日付のメニューに移す
     -->
@@ -961,14 +964,19 @@
   </div>
 
   {#if services.length === 0}
-    <div class="empty-state" data-testid="empty-grid">
+    <!-- まだ何も無いので見せる画面にする (`.glow`。docs/design.md 8 章)。読み込めなかったとき (下) は平らのまま -->
+    <div class="empty-state glow" data-testid="empty-grid">
       {#if data.typeEmpty}
-        <!-- 局がまだ無い。上の案内と同じ文とボタンを、表の場所の真ん中に (上の案内はこのとき出さない) -->
-        <ChannelNotice
-          kind="all"
-          variant="center"
-          text={`${typeWord}のチャンネルがありません。チャンネルスキャンをしてください`}
-        />
+        <!-- 局がまだ無い。上の案内と同じことを、ほかの空の状態と同じ並びで表の場所の真ん中に (上の案内はこのとき出さない) -->
+        <p class="bold">{typeWord}のチャンネルがありません</p>
+        <p class="small muted">チャンネルスキャンをしてください</p>
+        <div class="actions">
+          <a
+            class="button small"
+            href={`${resolve("settings/reception")}#${CHANNEL_NOTICE_SECTION.all}`}
+            >{CHANNEL_NOTICE_ACTION.all}</a
+          >
+        </div>
       {:else}
         <!-- 局はあるが、いま流している番組が無い (番組表を集めている途中など) -->
         <p class="bold">{typeWord}の番組表はまだありません</p>
@@ -1425,8 +1433,8 @@
     }
     .days > a.button,
     .date-label {
-      /* `--dp-space-*` の間の値。`--dp-space-2` にすると 390px で 1 行に収まらなくなるおそれがあり、`--dp-space-1` では詰まりすぎる */
-      padding-inline: 0.4rem;
+      /* 段の間の 6px (docs/design.md の「作り方」)。`--dp-space-2` では 390px で 1 行に収まらなくなるおそれがあり、`--dp-space-1` では詰まりすぎる */
+      padding-inline: 0.375rem;
     }
     /* サブ ch はジャンルのメニューに入れる (2 つ並べると、今日以外を見ているときに 390px で入りきらない) */
     .strip,

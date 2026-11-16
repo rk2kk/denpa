@@ -9,6 +9,7 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 
+import { parsePlaces } from "./agent-order";
 import { type Agent, listAgents } from "./agents";
 import { contractStatus } from "./contract-status";
 import { orm } from "./db";
@@ -28,13 +29,20 @@ export interface AgentCard {
 }
 
 /** `/denpa/card` の答えから。カードを読めていない (`ok` が false) なら、番号が見えていても復号には使えない */
-export function cardOf(agent: number, status: CardStatus): AgentCard {
+function cardOf(agent: number, status: CardStatus): AgentCard {
   return {
     agent,
     card: status.ok ? getActiveCardId(status) : null,
     local: status.source === "local",
     status,
   };
+}
+
+/** 使えるカードの番号。重なりを除き、初めて出てきた順 */
+function cardIds(cards: Iterable<AgentCard>): string[] {
+  const ids = new Set<string>();
+  for (const entry of cards) if (entry.card !== null) ids.add(entry.card);
+  return [...ids];
 }
 
 /** 全部のエージェントのカードを、並びの順にその場で読む (契約を確かめるとき) */
@@ -63,10 +71,7 @@ export function contractAgents(
         !holders.has(entry.card)
       )
         holders.set(entry.card, entry.agent);
-  const order = [
-    ...new Set(cards.flatMap((c) => (c.card === null ? [] : [c.card]))),
-  ];
-  return new Map(order.map((card) => [card, holders.get(card)!]));
+  return new Map(cardIds(cards).map((card) => [card, holders.get(card)!]));
 }
 
 /**
@@ -189,11 +194,7 @@ export async function keyRanks(
   wait: number,
 ): Promise<Map<number, number>> {
   const cards = await routeCards(agents, wait);
-  const contracts = contractsOf(service, [
-    ...new Set(
-      [...cards.values()].flatMap((c) => (c.card === null ? [] : [c.card])),
-    ),
-  ]);
+  const contracts = contractsOf(service, cardIds(cards.values()));
   return cardRanks(cards.values(), (card) => contracts.get(card) ?? null);
 }
 
@@ -216,11 +217,7 @@ export async function cardNarrower(
     const key = `${service}\n${places}`;
     let narrowed = memo.get(key);
     if (narrowed === undefined) {
-      const contracts = contractsOf(service, [
-        ...new Set(
-          [...cards.values()].flatMap((c) => (c.card === null ? [] : [c.card])),
-        ),
-      ]);
+      const contracts = contractsOf(service, cardIds(cards.values()));
       narrowed = narrowPlaces(
         places,
         cards,
@@ -242,15 +239,10 @@ export function narrowPlaces(
   statusOf: (card: string) => ReturnType<typeof contractStatus> | null,
 ): string {
   const lines = places.split("\n");
-  const agentOf = (line: string): number | null => {
-    const tab = line.indexOf("\t");
-    return tab < 0 ? null : Number(line.slice(0, tab));
-  };
+  // `parsePlaces` は行ごとに 1 つ返すので、`lines` と同じ添え字で引ける
+  const parsed = parsePlaces(places);
   const ids = new Set(
-    lines.flatMap((line) => {
-      const agent = agentOf(line);
-      return agent === null ? [] : [agent];
-    }),
+    parsed.flatMap((place) => (place.agent === null ? [] : [place.agent])),
   );
   if (ids.size <= 1) return places;
   const mine = [...ids].flatMap((id) => {
@@ -259,12 +251,24 @@ export function narrowPlaces(
   });
   const ranks = cardRanks(mine, statusOf);
   // 訊けなかったエージェントは、使えるカードが無いものとして数える (振り分けと同じ)
-  const rank = (id: number) => ranks.get(id) ?? 3;
+  const rank = (id: number) => ranks.get(id) ?? NO_KEY;
   const best = Math.min(...[...ids].map(rank));
   return lines
-    .filter((line) => {
-      const agent = agentOf(line);
+    .filter((_line, i) => {
+      const agent = parsed[i]?.agent ?? null;
       return agent === null || rank(agent) === best;
     })
     .join("\n");
+}
+
+/** カードを訊いて待つ上限 (ms。`cardIdOf`)。データ放送の `getIRDID` に渡すだけなので、選局を待たせない */
+const CARD_ID_WAIT = 3_000;
+
+/**
+ * **エージェント `agent` が復号に使うカードの番号** (10 進 16 桁。`cardOf`)。ライブがデータ放送の `getIRDID` に渡す (`live.ts` の `Session`)。
+ * 振り分けの控え (`CARD_KEEP`) を使い、無ければ訊く。カードが無い・読めない・繋がらなければ null
+ */
+export async function cardIdOf(agent: number): Promise<string | null> {
+  const cards = await routeCards([agent], CARD_ID_WAIT);
+  return cards.get(agent)?.card ?? null;
 }

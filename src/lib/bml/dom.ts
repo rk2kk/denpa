@@ -34,6 +34,12 @@ export interface DomHost {
   subscribed(element: BmlElement): void;
   /** object の streamStatus を書いた (音・MNG) */
   stream(element: BmlElement, status: string): void;
+  /** 主音声を替える (映像の object の `setMainAudioStream`)。替えられたら true */
+  setMainAudio(ref: string): boolean;
+  /** 今の主音声 (`getMainAudioStream`。`/10` の形式) */
+  mainAudioRef(): string;
+  /** object の `data` を書き換えた (音声の object なら主音声を決め直す) */
+  objectChanged(element: BmlElement): void;
 }
 
 interface Accessor {
@@ -350,7 +356,14 @@ export class Dom {
         attribute("href", "href");
         break;
       case "object":
-        attribute("data", "data");
+        object.define(
+          "data",
+          () => element.attr("data") ?? "",
+          (value) => {
+            element.setAttr("data", toStr(value));
+            host.objectChanged(element);
+          },
+        );
         object.define("type", () => element.attr("type") ?? "");
         object.define(
           "remain",
@@ -367,8 +380,13 @@ export class Dom {
         );
         attribute("streamPosition", "streamposition", "number");
         attribute("streamLooping", "streamlooping", "number", 1);
-        object.method(this.realm, "setMainAudioStream", () => false);
-        object.method(this.realm, "getMainAudioStream", () => "/10");
+        // 主音声の切り替え (STD-B24 第二編。J:COM テレビのラジオ選局など)。替えるのはエンジン (`setMainAudio`)
+        object.method(this.realm, "setMainAudioStream", (_, args) =>
+          host.setMainAudio(toStr(args[0])),
+        );
+        object.method(this.realm, "getMainAudioStream", () =>
+          host.mainAudioRef(),
+        );
         break;
       case "beitem":
         object.define("type", () => element.attr("type") ?? "");
@@ -437,7 +455,7 @@ export class Dom {
 
 /** 止まった状態から始まる object (付属 2 4.8.5.2 注 2) */
 function isStoppable(element: BmlElement): boolean {
-  const type = (element.attr("type") ?? "").toLowerCase();
+  const type = element.type;
   return [
     "audio/x-arib-mpeg2-aac",
     "audio/x-arib-aiff",

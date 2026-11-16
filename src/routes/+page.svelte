@@ -95,7 +95,7 @@
 
   /** 取り消せるか。サーバ・番組表・検索と同じ判定 (`format.cancelable`) */
   const cancelable = (res: { state: string; end_at: number }) =>
-    isCancelable(res.state, res.end_at, Date.now());
+    isCancelable(res.state, res.end_at, minute.now);
 
   /** 端末への保存の結果。フォームではないので自前で持つ */
   let offlineNote = $state<Notice | null>(null);
@@ -108,7 +108,7 @@
     if (offlineNote?.key === key) offlineNote = null;
   }
 
-  /** 裏で失敗した保存 (Background Fetch)。黙って消えると「無かったことになった」ように見える */
+  /** 裏で失敗した保存 (Background Fetch)。何も出さずに消えると「無かったことになった」ように見える */
   $effect(() => {
     if (offline.failed === null) return;
     offlineNote = {
@@ -336,7 +336,7 @@
     void data;
     return Date.now();
   });
-  /** 分ごとに進むいまの時刻 (`HomeContext.now`)。「いま」の時刻・あと何分か・進み具合のバーだけが使う */
+  /** 分ごとに進むいまの時刻 (`HomeContext.now`)。「いま」の時刻・あと何分か・進み具合のバーと、取り消せるか (`cancelable`) が使う */
   const minute = minuteClock();
 
   /** 終わった予約と、それで録れた録画を 1 本に (`mergeRecorded`)。録画の行が代わりに立つ */
@@ -769,7 +769,7 @@
   });
 </script>
 
-<!-- 聞き返しは他所を触ったら取り下げる (`stand`)。巻いたら、先頭に貼り付いている日 (カレンダーの印) を読み直す (`trackPinned`) -->
+<!-- 「削除を確定」は、ほかの所を押したら元に戻す (`stand`)。巻いたら、先頭に貼り付いている日 (カレンダーの印) を読み直す (`trackPinned`) -->
 <svelte:window onclick={deleting.stand} onscroll={trackPinned} />
 
 <!--
@@ -818,15 +818,14 @@
       data-testid="timeline"
     >
       <!--
-                **300 件で頭打ちなのを黙らない。** 溜まると古いものが黙って消え、「消えた」ように見える。
+                **300 件で頭打ちなことを画面に出す。** 出さないと、300 件を超えた古いものが一覧から外れ、「消えた」ように見える。
                 上限に当たっていたら、いちばん古い録画の隣 (一覧の端。新しい順のときは末尾) に検索へ誘う一行を出す (`+page.server.ts` の `.limit(300)`)。
                 描き切っていなければ、代わりに残りの件数を出し、近づいたら古いほうを足す (`sentinel`・`revealOlder`)。残りが無くなれば消える
             -->
       {#snippet older()}
         {#if data.recordings.length >= 300 && pastDone}
           <div class="row-empty muted small">
-            新しい順に 300
-            件まで表示しています。古いものは検索で探してください。
+            新しい順に 300 件まで表示しています。古いものは検索で探してください
           </div>
         {/if}
         {#if !pastDone}

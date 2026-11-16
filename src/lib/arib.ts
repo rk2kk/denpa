@@ -228,6 +228,11 @@ function langNames(audio: Audio): string[] {
 
 export interface Audio {
   componentType: number;
+  /**
+   * 部品タグ (`audio_component_descriptor` の `component_tag`)。PMT の音声の ES と突き合わせる (`audioTracks` の `pmt`)。
+   * 古い行と、番組表を引き継いだ行には無い
+   */
+  componentTag?: number;
   langs?: string[];
   samplingRate?: number;
   /**
@@ -296,13 +301,35 @@ export interface AudioTrack {
  *
  * **番組表が何も言っていなければ 1 つだけ返す。** 音声が無いことはないので、
  * 何も出せないより「そのまま出す」1 つを置くほうが確か
+ *
+ * @param pmt PMT の音声の ES の部品タグ (PMT の順。`@danything/arib/bml` の `pmtAudios`)。渡せば**並びと本数は PMT に従う。**
+ *   番組表の音声は部品タグで突き合わせ (タグを持たない古い行は並びで)、番組表に無い ES も「音声 N」として並べる。
+ *   PMT に無い音声は選んでも鳴らないので並べない。渡さない (PMT をまだ読んでいない) か、PMT の音声に部品タグが 1 つも無ければ、番組表だけで決める
  */
-export function audioTracks(audios: Audio[]): AudioTrack[] {
+export function audioTracks(
+  audios: Audio[],
+  pmt?: readonly (number | null)[],
+): AudioTrack[] {
+  // 部品タグを 1 つも持たない PMT (放送では運用されない) は突き合わせられないので、番組表だけで決める
+  const placed: readonly (Audio | undefined)[] =
+    pmt === undefined || pmt.every((tag) => tag === null)
+      ? audios
+      : onPmt(audios, pmt);
   // 音声が 2 本以上あるときだけ「音声 1/音声 2」を添える。1 本のときは邪魔なだけ
-  const many = audios.length > 1;
+  const many = placed.length > 1;
   const tracks: AudioTrack[] = [];
 
-  audios.forEach((audio, stream) => {
+  placed.forEach((audio, stream) => {
+    // 番組表に無い ES。種別も名前も分からないので、何本目かで呼ぶ
+    if (audio === undefined) {
+      tracks.push({
+        id: `${stream}:both`,
+        stream,
+        side: "both",
+        label: many ? `音声 ${stream + 1}` : "音声",
+      });
+      return;
+    }
     // 放送が名乗っていれば、何本目かは添えない (「主音声ステレオ」に「音声 1」を足しても長いだけ)
     const named = audio.text !== undefined && audio.text !== "";
     const head = many && !named ? `音声 ${stream + 1} ` : "";
@@ -345,6 +372,23 @@ export function audioTracks(audios: Audio[]): AudioTrack[] {
 }
 
 /**
+ * 番組表の音声を、PMT の音声の ES の並びに置き直す (`audioTracks` の `pmt`)。番組表に無い ES は undefined。
+ * 番組表の音声が 1 つも部品タグを持たない (古い行・引き継いだ行) ときは、番組表の並びが PMT の並びと同じとみなす
+ */
+function onPmt(
+  audios: Audio[],
+  pmt: readonly (number | null)[],
+): (Audio | undefined)[] {
+  if (!audios.some((audio) => audio.componentTag !== undefined))
+    return pmt.map((_, index) => audios[index]);
+  return pmt.map((tag) =>
+    tag === null
+      ? undefined
+      : audios.find((audio) => audio.componentTag === tag),
+  );
+}
+
+/**
  * 音声の構成 (`component_type`) から、出すチャンネル数。モノラル 1・ステレオ 2・5.1ch 6。
  * ほかの構成とデュアルモノは undefined (ffmpeg に任せる。デュアルモノは左右に割る)
  */
@@ -357,7 +401,7 @@ const AUDIO_CHANNELS: Record<number, number> = { 1: 1, 3: 2, 9: 6 };
 
 /**
  * エンコードしたものに入れる音声の名前 (番組表と同じ言い方。入れないとプレイヤーに「Audio 1」としか出ない)。
- * 数と並びはエンコードしたものに合わせる: デュアルモノは左右に割った 2 本 (`encoder.ts` の `channelsplit`)、
+ * 数と並びはエンコードしたものに合わせる。デュアルモノは左右に割った 2 本 (`encoder.ts` の `channelsplit`)、
  * それ以外は放送の順。多すぎても ffmpeg は在りもしないトラックへの指定を黙って読み飛ばす
  */
 export function audioTitles(audios: Audio[], dualMono: boolean): string[] {
@@ -389,7 +433,7 @@ export function parseAudios(
 }
 
 /**
- * 指定されたものを選ぶ。**知らないものを指定されたら主音声。**
+ * 指定されたものを選ぶ。**一覧に無いものを指定されたら主音声。**
  *
  * 番組が変われば音声の構成も変わる (二カ国語の映画が終わればステレオに戻る)。
  * 前の番組の ID が残っていても、無いものは選べない。
@@ -401,6 +445,8 @@ export function pickTrack(
   tracks: AudioTrack[],
   wanted: string | undefined,
 ): AudioTrack {
+  const chosen = broadcastTrack(wanted);
+  if (chosen !== undefined) return chosen;
   // `audioTracks` は 1 本も無くても「音声」を 1 つ返すので、先頭は必ずある
   return (
     tracks.find((track) => track.id === wanted) ??
@@ -410,13 +456,49 @@ export function pickTrack(
 }
 
 /**
+ * **データ放送が選んだ音声** (`N:es`。PMT の音声の ES の N 本目。映像の object の `setMainAudioStream`)。
+ * 番組表に載っていない音声 (J:COM テレビのラジオ選局など) なので、`audioTracks` の一覧には無い。
+ * `N:both` は番組表に無ければ主音声に落とす (`pickTrack`) ので、別の書き方にしてある。それ以外の ID は undefined
+ */
+export function broadcastTrack(
+  wanted: string | undefined,
+): AudioTrack | undefined {
+  const match = /^(\d{1,2}):es$/.exec(wanted ?? "");
+  if (match === null) return undefined;
+  return {
+    id: wanted!,
+    stream: Number(match[1]),
+    side: "both",
+    label: "データ放送の音声",
+  };
+}
+
+/**
+ * **データ放送が主音声を替えたとき、ライブで選ぶ音声の ID** (`setMainAudioStream`。`routes/live` の `mainAudioFromData`)。
+ * 替えた (`index` が数) なら `N:es`。戻した (`index` が null) なら、まだデータ放送の音声のままのときだけ、番組表の音声の
+ * 主音声 (無ければ先頭) を返す。見ている人が「音声」で選び直していれば、そちらを残して null (選び直さない)
+ */
+export function dataAudio(
+  index: number | null,
+  current: string,
+  tracks: readonly AudioTrack[],
+): string | null {
+  if (index !== null) return `${index}:es`;
+  if (broadcastTrack(current) === undefined) return null;
+  const listed = tracks.filter(
+    (track) => broadcastTrack(track.id) === undefined,
+  );
+  return (listed.find((track) => track.main) ?? listed[0])?.id ?? null;
+}
+
+/**
  * 外から指定された音声の ID (`AudioTrack.id`) を読む。**形式が違えば指定されなかったことにする。**
  *
  * HTTP API (`?audio=0:sub`。docs/api.md) から来るもの。形式が合っていても無いもの
  * (番組が替わって消えた副音声など) は `pickTrack` が主音声に落とすので、ここで断らない
  */
 export function askedTrack(value: string | null): string | undefined {
-  return value !== null && /^\d{1,2}:(main|sub|both)$/.test(value)
+  return value !== null && /^\d{1,2}:(main|sub|both|es)$/.test(value)
     ? value
     : undefined;
 }

@@ -19,13 +19,10 @@
 import { ascii, concatBytes, joinBytes, u32 } from "@danything/arib/bytes";
 import { ADTS_RATES } from "@danything/arib/pes";
 
+import type { Fmp4Segment } from "../mp4/fmp4";
+
 /** ボックスのヘッダ。大きさと種別で 8 バイト */
 const HEADER = 8;
-
-interface Segment {
-  kind: "init" | "media";
-  data: Uint8Array;
-}
 
 /**
  * バイト列を渡すと、組み上がったセグメントを返す。
@@ -42,10 +39,10 @@ export class Fmp4Splitter {
   /** 読めないボックスが来た。以降は持ち越さずに捨てる (持ったままだと、届くたびに溜まり続ける) */
   private broken = false;
 
-  feed(chunk: Uint8Array): Segment[] {
+  feed(chunk: Uint8Array): Fmp4Segment[] {
     if (this.broken) return [];
     this.buffer = concatBytes([this.buffer, chunk]);
-    const out: Segment[] = [];
+    const out: Fmp4Segment[] = [];
     let at = 0;
     while (this.buffer.length - at >= HEADER) {
       const size = u32(this.buffer, at);
@@ -542,7 +539,7 @@ function readTraf(
 /**
  * **MP4 の AAC の 1 コマに付ける ADTS のヘッダ。** デコーダ (`wasm/decoder.c` の `aac_open`) は
  * 放送の ADTS を受け取る作りなので、MP4 の 1 コマ (ヘッダ無し) はそのままでは渡せない。
- * ヘッダの中身は AudioSpecificConfig (esds) から起こす: 種類 (LC なら 2)・標本化周波数の番号・チャンネル数。
+ * ヘッダに書く種類 (LC なら 2)、標本化周波数の番号、チャンネル数は AudioSpecificConfig (esds) から起こす。
  *
  * ヘッダは 7 バイト (CRC 無し)。ADTS に書ける種類は 1〜4 (Main / LC / SSR / LTP) だけで、
  * それ以外 (HE-AAC など) と、標本化周波数を値で書いたもの (番号 15) は null

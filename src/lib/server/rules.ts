@@ -33,6 +33,7 @@ import {
   type Taken,
 } from "./episode";
 import {
+  hasVideo,
   HELD_STATES,
   programs as programTable,
   recordedHistory,
@@ -75,7 +76,13 @@ export function haystack(
 type Matchable = Pick<
   Program,
   "service_id" | "is_free" | "genres" | "genre_detail" | "start_at"
->;
+> & {
+  /**
+   * 局の ARIB のサービス種別 (`services.service_type`)。映像の無い局 (`schema.hasVideo`) は、局を名指ししたルールだけが当てる。
+   * 省けば見ない (検索の「これからの放送」は録るかどうかを決めないので、映像の無い局の番組も出す)
+   */
+  arib_service_type?: number;
+};
 
 /**
  * 番組のジャンル。中分類まで持っている genre_detail を使い、
@@ -91,10 +98,9 @@ function parseGenreDetail(program: Matchable): Genre[] {
 /**
  * 判定に使う形式にほどいたルール。
  *
- * ほどく作業 (JSON の読み出し、キーワードの分割、全角の直し) を**ルール 1 つにつき
- * 1 回**にするために分けてある。以前は判定のたびにやっていて、実機では
- * 有効なルール 318 × これから放送される番組 25,608 = **810 万回**それをやっていた。
- * ルールを 1 つ足すだけで十数秒待たされていたのはこれが理由。
+ * ほどく作業 (JSON の読み出し、キーワードの分割、全角を半角に寄せる) を**ルール 1 つにつき
+ * 1 回**にするために分けてある。判定のたびにやると、実機では
+ * 有効なルール 318 × これから放送される番組 25,608 = **810 万回**になり、ルールを 1 つ足すだけで十数秒掛かった。
  */
 interface CompiledRule {
   rule: Rule;
@@ -133,7 +139,7 @@ export function compile(rule: Rule): CompiledRule {
 /**
  * SQL の `GLOB` で候補を減らすための形式。**減らすだけで、当てるのは `matchesCompiled`。**
  *
- * 下見 (`rule-preview.ts`) はこれから放送される番組を全部引いて JS で絞っていた。
+ * 下見 (`rule-preview.ts`) がこれから放送される番組を全部引いて JS で絞ると、
  * 実データ相当 (33,000 件) で全列を読むだけで 330〜400ms、条件が 1 語でも同じだけ
  * かかる。番組名に `GLOB '*語*'` を掛ければ当たった行だけ読める。
  *
@@ -173,6 +179,7 @@ export const ANY_PAID: PaidAllowed = () => true;
  *
  * - `paid` 契約を確かめていない有料放送 (`PaidAllowed`)
  * - `service` 局の条件から外れる
+ * - `videoless` 映像の無い局 (ラジオ・データ放送) の番組で、ルールがその局を名指ししていない
  * - `genre` ジャンルの条件から外れる
  * - `time` 始まる時刻が時間帯の外
  * - `weekday` 始まる時刻の曜日が条件の外
@@ -183,6 +190,7 @@ export const ANY_PAID: PaidAllowed = () => true;
 export type Miss =
   | "paid"
   | "service"
+  | "videoless"
   | "genre"
   | "time"
   | "weekday"
@@ -220,6 +228,17 @@ export function missOf(
       serviceType !== undefined && (types?.includes(serviceType) ?? false);
     if (!byService && !byType) return "service";
   }
+
+  /*
+   * **映像の無い局 (ラジオ・データ放送) の番組は、その局を名指ししたルールだけが当てる。** 種別 (「地上波全部」) や
+   * キーワードだけのルールは当てない。取り込んでいなかった頃からあるルールが、映像の無い局を急に録り始めないため。データ放送の局は 1 日 1 番組のことがあり、キーワードで当たると丸 1 日録る
+   */
+  if (
+    program.arib_service_type !== undefined &&
+    !hasVideo(program.arib_service_type) &&
+    !(services?.includes(program.service_id) ?? false)
+  )
+    return "videoless";
 
   // ジャンルは "7" (大分類だけ) と "7-0" (中分類まで) の 2 通りで持つ。
   // 昔のルールは数値の配列だが、読み出し時に文字列へ揃えてある (schema.ts の strings)
@@ -409,8 +428,8 @@ const DECLINE_WINDOW = 10 * 60 * 1000;
  * **システムの取り消しは含めない。** 選局できなくなった局の予約はシステムが
  * 取り消す (`epg.clearBelongings`、`canceled_by = 'system'`) が、それは「局が戻ったなら
  * 録る」でよい。列を足す前の行 (NULL) は人が押したものとして扱う。
- * 手動予約を人が取り消したぶんは含める。今までも id が同じ限りルールを止めていたので、
- * その振る舞いを id が変わっても続けるだけ。
+ * 手動予約を人が取り消したぶんは含める。id が同じなら `INSERT OR IGNORE` でルールが止まるので、
+ * id が変わっても同じに止める。
  */
 export function canceledBroadcasts(at: number): Declined {
   const rows = orm()
@@ -849,8 +868,8 @@ interface RuleSync {
 /**
  * ルールを番組表に当て直して、予約をそろえる。
  *
- * **足すだけでなく、外れたものは消す。** 足すだけだった頃は、番組表が書き換わって
- * 条件から外れた予約がそのまま残り、消す手立てが画面の「取り消し」しか無かった。
+ * **足すだけでなく、外れたものは消す。** 足すだけだと、番組表が書き換わって
+ * 条件から外れた予約がそのまま残り、消すには画面で取り消すしか無い。
  *
  * - 当たるのに予約が無い → **作る**
  * - 予約があるのに、どのルールにも当たらなくなった → **消す**
@@ -900,6 +919,8 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
     .select({
       ...getTableColumns(programTable),
       service_type: services.type,
+      // 映像の無い局は、局を名指ししたルールだけが当てる (`missOf`)
+      arib_service_type: services.service_type,
       channel: shareKey(),
       decodable: services.decodable,
     })
@@ -1025,7 +1046,7 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
         .all();
   /** 番組表にまだ載っている番組。読めていないだけのものと区別する */
   const listed = new Map(programs.map((program) => [program.id, program]));
-  /** まだ生きているルール。消された/止められたぶんは猶予を置かずに引っ込める */
+  /** 有効なルール。消された/止められたぶんは猶予を置かずに引っ込める */
   const enabled = new Set(rules.map((rule) => rule.id));
   const grace = at + config.ruleRetractGrace;
 
@@ -1061,16 +1082,9 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
         /*
          * 別のルールが引き取ったなら付け替えるだけで、録るものは変わらない。
          *
-         * **同じルールでも、優先度は当て直す。**
-         *
-         * 予約は `INSERT OR IGNORE` で立てるので、**もう立っている
-         * ぶんは作った日の優先度のまま**だった。ルールの優先度を
-         * 上げても効くのは次に立つ予約からで、いま競合している
-         * 予約はいくら上げても負けたまま。実機で、優先度 2 に
-         * 上げた「片田舎のおっさん」が優先度 1 の裏番組に負け続けて
-         * いた (予約側は 3 件とも 1 のまま)。
-         *
-         * 優先度はルールが持つものなので、こちらを本物として扱う
+         * **同じルールでも、優先度は当て直す。** 予約は `INSERT OR IGNORE` で立てるので、
+         * もう立っているぶんは作った日の優先度のまま残る。当て直さないと、ルールの優先度を
+         * 上げても、いま競合している予約は負けたままになる。優先度はルールが持つものなので、ルールの値を写す
          */
         const moved = owner.rule.id !== reservation.rule_id;
         if (moved || owner.rule.priority !== reservation.priority) {
@@ -1090,7 +1104,7 @@ export function applyRules(options: { rule?: number } = {}): RuleSync {
       const program = listed.get(reservation.program_id);
       // 番組表から消えているだけかもしれない。タイトルが空のものも判断材料にならない
       if (program === undefined || program.name === "") continue;
-      // ルールが生きているのに外れた = 番組表が動いた。直前なら録っておく
+      // ルールが有効なのに外れた = 番組表が動いた。直前なら録っておく
       const byChurn =
         reservation.rule_id !== null && enabled.has(reservation.rule_id);
       if (byChurn && reservation.start_at < grace) continue;

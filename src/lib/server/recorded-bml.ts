@@ -36,6 +36,7 @@ import {
 
 import type { Recording } from "../types";
 import { orm } from "./db";
+import { keepNewest } from "./expiring";
 import { fillTsHead } from "./recording";
 import { openRecording } from "./recording-io";
 import { programs, services } from "./schema";
@@ -107,10 +108,10 @@ export function withProgramInfo(
 const CHUNK = 1 << 20;
 
 /**
- * TS を 1MB ずつ読んでデコードする。**丸ごと抱えない** (録画は数 GB になる) し、
+ * TS を 1 MB ずつ読んでデコードする。**丸ごと抱えない** (録画は数 GB になる) し、
  * **読む間もイベントループを止めない** (チャンクごとに await)。
  *
- * 前は同期の `readSync` で回していて、10GB の録画 (2 時間の映画) では
+ * 前は同期の `readSync` で回していて、10 GB の録画 (2 時間の映画) では
  * イベントループが数分止まり、その間 `/api/health` が返せず、Kubernetes の
  * 生存確認 (1 秒で 3 回) に落ちて SIGTERM → 再起動 → エンコードのやり直し、
  * を **1 周 2 時間で 5 回** 繰り返した (2026-08-17 実機)。エンコードそのものは
@@ -217,12 +218,7 @@ export async function recordedAutoStart(sidecarPath: string): Promise<boolean> {
       ? held.on
       : await readAutoStart(sidecarPath);
   // 開いたものを新しい側 (後ろ) へ置き、上限を超えたら古いもの (先頭) から捨てる
-  autoStartHeld.delete(sidecarPath);
-  if (autoStartHeld.size >= AUTO_START_KEEP) {
-    const oldest = autoStartHeld.keys().next().value;
-    if (oldest !== undefined) autoStartHeld.delete(oldest);
-  }
-  autoStartHeld.set(sidecarPath, { size, mtime, on });
+  keepNewest(autoStartHeld, sidecarPath, { size, mtime, on }, AUTO_START_KEEP);
   return on;
 }
 

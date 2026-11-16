@@ -23,6 +23,11 @@ export interface CmInput {
   logo?: Range[] | null;
   /** コマごとのロゴの点 (`times` と同じ並び)。境目の候補のうちロゴが替わった所を選ぶのに使う */
   logoScores?: ArrayLike<number>;
+  /**
+   * ロゴの区間の外で、後ろが見えずにロゴが出ているか判断できなかった所 (秒。`logo-detect.readLogo` の `blind`)。
+   * ロゴがあったとも無かったとも数えない (`logoIndex`)
+   */
+  logoBlind?: Range[];
   /** 番組の尺 (番組表。秒)。録画の先頭と末尾に入った前後の番組を見分けるのに使う */
   programLength?: number;
   /** 番組表どおりなら番組が始まる秒 (録画の先頭の放送時刻から測る。`server/encoder.programSpan`)。番組の置き場所が決めきれないときの目安 */
@@ -173,12 +178,12 @@ function points(candidates: Boundary[]): number[] {
   return out;
 }
 
-/** 番組の尺の窓の端を、どれだけ離れた無音まで寄せるか (秒) */
+/** 番組の尺で置いた窓の端を、どれだけ離れた無音まで寄せるか (秒) */
 const SNAP = 5;
 /** 切れ目の無い無音を、どれだけ遠いとみなすか (秒) */
 const STILL_PENALTY = 1.5;
 
-/** `at` にいちばん近い無音の、いちばん強い切れ目。`SNAP` 秒より遠ければ `at` のまま (番組の尺の窓の端) */
+/** `at` にいちばん近い無音の、いちばん強い切れ目。`SNAP` 秒より遠ければ `at` のまま (番組の尺で置いた窓の端) */
 function snap(at: number, candidates: Boundary[]): number {
   let best = at;
   let distance = SNAP;
@@ -199,7 +204,7 @@ const CHANGE_RATIO = 0.5;
 
 /**
  * 切れ目の前後でロゴの点がどれだけ変わったか (`way` が 1 なら上がった量、-1 なら下がった量)。
- * ロゴの出入りの判定 (`logo-detect.logoSpans`) はならすぶん遅れ、ロゴに似た字 (番宣の放送時刻) に
+ * ロゴの出入りの判定 (`logo-detect.readLogo`) はならすぶん遅れ、ロゴに似た字 (番宣の放送時刻) に
  * 引きずられることもある。点が実際に大きく替わった切れ目のほうが確か (実機の日テレの番宣で 5 秒)
  */
 function logoChange(
@@ -336,7 +341,7 @@ const PROGRAM_LOGO = 1;
  */
 const PROGRAM_BARE = 0.5;
 /**
- * 番組: ロゴの区間の末尾で、見えないまま持ち越された 1 秒ごとの点 (`unseenTails`)。見えた秒の半分。CM のほうはロゴの減点をしない
+ * 番組: ロゴの区間の末尾で見えないまま持ち越された所 (`unseenTails`) の 1 秒ごとの点。見えた秒の半分。CM のほうはロゴの減点をしない
  */
 const UNSEEN_PROGRAM = 0.5;
 /** CM: 尺が 15 秒の倍数にぴったりのときの 1 秒ごとの点。ずれると減り、`CM_TOLERANCE` で 0 */
@@ -352,7 +357,7 @@ const SPOT_FIT = 0.5;
 /** 告知の尺とみなす誤差 (秒)。実機の BS-TBS で 5.47 秒の告知があった */
 const SPOT_TOLERANCE = 0.6;
 /**
- * CM に挟まれた短い所 (`ISLAND_MAX` 秒以内のロゴの出ている所) の先頭の告知の点。局の 5 秒の告知はロゴを出したまま流れ、
+ * CM に挟まれた短い所 (`ISLAND_MAX` 秒以内のロゴの出ている所) で、先頭にある告知に付ける点。局の 5 秒の告知はロゴを出したまま流れ、
  * 次回予告との間に無音が無いことがある (実機で 5 秒の告知 → 次回予告 → 提供)。ロゴの減点はせず、番組にしたときと同じ点にこれを足す
  */
 const SPOT_ISLAND = 4;
@@ -402,7 +407,7 @@ const EDGE_CAP = 30;
  */
 const HEAD_GRACE = 3;
 /**
- * 番組表どおりの先頭の近くで、無音が無くても録画の先頭の CM の終わりにしてよい切れ目の強さ (ふつうの CM の継ぎ目と同じ)。
+ * 番組表どおりの先頭に近い所で、無音が無くても録画の先頭にある CM の終わりにしてよい切れ目の強さ (ふつうの CM の継ぎ目と同じ)。
  *
  * **局が番組表より遅れて番組を始めると、番組表どおりの先頭は CM の途中に来る。** 局の切り替わりは無音を挟まないことがあり、
  * 先頭の近くに無音が無いと、録画の先頭の CM を番組表どおりの先頭までで終えられず、その先の CM まで番組になっていた
@@ -436,10 +441,10 @@ interface Candidate {
  * 無音 1 つにつき強いほうから `PER_SILENCE` 個まで。切れ目が無ければ無音の真ん中。ほかに、
  *
  * - 録画の先頭と末尾
- * - 無音の候補からちょうど 5・10 秒の、無音の外の強い切れ目 (`bare`)。CM に挟まれた短い所の先頭の告知の終わりにだけ使う
+ * - 無音の候補からちょうど 5・10 秒の、無音の外の強い切れ目 (`bare`)。CM に挟まれた短い所で、先頭にある告知の終わりにだけ使う
  * - 最初のロゴの出始めと最後の消え際 (`logo`)。録画の先頭と末尾の CM の端にだけ使う (前後の番組との境目は無音を挟まないことがある)
  * - 番組表どおりの先頭から前後 `HEAD_GRACE` 秒の、無音の外の強い切れ目 (`start`)。録画の先頭からそこまでに無音の候補が
- *   1 つも無いときだけ。録画の先頭の CM の終わりと、そこから続く 15 秒の倍数の CM の先頭にだけ使う (`START_CUT`)
+ *   1 つも無いときだけ。録画の先頭にある CM の終わりと、そこから続く 15 秒の倍数の CM の先頭にだけ使う (`START_CUT`)
  */
 function candidates(
   input: CmInput,
@@ -614,6 +619,21 @@ function measure(ranges: Range[]): (t: number) => number {
  * ロゴの区間の末尾の、ロゴが見えないまま持ち越された所 (`unseenTails`) は、見えた秒 (`lit`) にもロゴの無い秒 (`bare`) にも
  * 入れず、別に数える (`unseen`)。その先頭もロゴの消え際に足す。
  *
+ * **ロゴの区間の外で、後ろが見えずに判断できなかった所 (`logoBlind`) は、長さと後ろを見て数える。** ロゴの判定はそこで
+ * 直前の「消えた」を持ち越しているだけで、ロゴが無かったとは言い切れない。CM 1 本 (`UNSEEN_MAX`) より長く続く所は見えた秒に数える
+ * (区間の末尾の長い所を番組に数えるのと同じ考え。CM は 15 秒ごとに映像が替わる)。それまでの所は、すぐ後ろ (`BLIND_RISE` 秒まで) で
+ * ロゴが出たものだけ、見えた秒にもロゴの無い秒にも数えない。白い背景のあいだに番組が戻ったかもしれないため。
+ * すぐ後ろでロゴが出ない所は、持ち越した「消えた」のままロゴの無い秒に数える。前後ともロゴが無いので、CM の中の白い場面と見てよい。
+ * これも数えないと、番組からロゴが消えた直後の白い CM で番組の秒にロゴの無い秒の減点が付かず、CM の先頭を番組と「CM の前の提供」に
+ * する分け方や、尺の合わない短い CM を番組にする分け方が CM を上回る
+ * (本番の録画 57 本の控えで、休みの最初の CM 167 か所に判断できない 5〜15.6 秒を置くと 2 か所)。
+ * 区間の末尾のように番組に半分の点を付けないのは、直前の判断が「消えた」だから (区間の末尾は直前までロゴが見えていた)。
+ * 番組の直後の CM 1 本がまるごと白い背景で判断できないと、その中のちょうど 5 秒の切れ目から「CM の前の提供」とみる分け方が
+ * 半分の点のぶん CM 1 本を上回り、CM を番組にする (同じ控えで、休みの最初の CM 212 か所に判断できない 15 秒を置くと 31 か所)。
+ * 白い背景で始まる番組の冒頭で、ロゴが溶けて見えないまま 2 分近く続き、その間の無音の切れ目が 15 秒の倍数に近く並んで、
+ * 120 秒の CM にされていた (本番のテレ東のアニメで、番組の冒頭の 12.7〜127.5 秒)。
+ * 番組表の尺の外 (前後の番組) は見えた秒にしない。そこの CM は尺を問わずに外す
+ *
  * **映像の欠けた所 (`missingVideo`) は、見えた秒にもロゴの無い秒にも入れない。** コマが無いのでロゴがあったか分からない。
  * ロゴの無い秒に数えていた頃は、録画の途中から最後まで映像が欠けた録画 (本番の TBS の 30 分で、18 分 50 秒から後ろ) で、
  * 欠けた 11 分が CM になり、半分以上が CM だとしてロゴの結果を捨てていた
@@ -634,14 +654,36 @@ function logoIndex(input: CmInput, spans: Range[]) {
   /** ロゴの区間のうち、映像の欠けた所 */
   const hidden = intersect(merged, missing);
   /**
+   * ロゴの区間の外で判断できなかった所 (欠けた所は除く)。CM 1 本 (`UNSEEN_MAX`) より長く続く所はロゴが見えたものとして、
+   * それまでの所は、すぐ後ろでロゴが出たものだけどちらにも数えない (ほかはロゴの無い秒)
+   */
+  const blind = subtract(subtract(input.logoBlind ?? [], merged), missing);
+  // 録画の先頭と末尾に入った前後の番組 (番組表の尺の外) は見えたものにしない。そこの CM は尺を問わずに外すため
+  const { programStart = 0, programLength = duration } = input;
+  const blindLong = intersect(
+    blind.filter((s) => s.end - s.start > UNSEEN_MAX),
+    [{ start: programStart, end: programStart + programLength }],
+  );
+  const blindShort = blind.filter(
+    (s) =>
+      s.end - s.start <= UNSEEN_MAX &&
+      merged.some(
+        (m) => m.start >= s.end - 1e-6 && m.start - s.end <= BLIND_RISE,
+      ),
+  );
+  /**
    * 0 から `t` までのロゴの区間の秒 / そのうち見えないまま持ち越された秒 (欠けた所は除く) /
-   * 映像の欠けた秒 / そのうちロゴの区間の中の秒
+   * 映像の欠けた秒 / そのうちロゴの区間に入る秒 / ロゴの区間の外で判断できなかった秒 (CM 1 本より長い所 / それまでの所)
    */
   const coveredTo = measure(merged);
-  const unseenTo = measure(subtract(tails, missing));
+  const tailTo = measure(subtract(tails, missing));
   const missingTo = measure(missing);
   const hiddenTo = measure(hidden);
-  const unseen = (a: number, b: number) => unseenTo(b) - unseenTo(a);
+  const longTo = measure(blindLong);
+  const shortTo = measure(blindShort);
+  const tailIn = (a: number, b: number) => tailTo(b) - tailTo(a);
+  const longIn = (a: number, b: number) => longTo(b) - longTo(a);
+  const shortIn = (a: number, b: number) => shortTo(b) - shortTo(a);
   const hiddenIn = (a: number, b: number) => hiddenTo(b) - hiddenTo(a);
   // 録画の端で切れているロゴは、そこで出入りしたのではない
   const rises = merged.map((s) => s.start).filter((t) => t > EDGE);
@@ -652,14 +694,21 @@ function logoIndex(input: CmInput, spans: Range[]) {
     merged,
     /** ロゴが見えていた秒 */
     lit: (a: number, b: number) =>
-      coveredTo(b) - coveredTo(a) - unseen(a, b) - hiddenIn(a, b),
-    unseen,
-    /** ロゴの無い秒 (映像の欠けた所は除く) */
+      coveredTo(b) -
+      coveredTo(a) -
+      tailIn(a, b) -
+      hiddenIn(a, b) +
+      longIn(a, b),
+    /** ロゴが見えないまま持ち越された秒 */
+    unseen: (a: number, b: number) => tailIn(a, b),
+    /** ロゴの無い秒。映像の欠けた所と、判断できなかった所のうち見えた秒に数える所 (`blindLong`) とどちらにも数えない所 (`blindShort`) は除く */
     bare: (a: number, b: number) =>
       b -
       a -
       (coveredTo(b) - coveredTo(a)) -
-      (missingTo(b) - missingTo(a) - hiddenIn(a, b)),
+      (missingTo(b) - missingTo(a) - hiddenIn(a, b)) -
+      longIn(a, b) -
+      shortIn(a, b),
     rises,
     falls,
   };
@@ -678,9 +727,14 @@ const UNSEEN_MIN = 2;
  * 映像が替わるので、見えない後ろが何本も続くことは少ない
  */
 const UNSEEN_MAX = 15 + CM_TOLERANCE;
+/**
+ * ロゴの区間の外で判断できなかった短い所のすぐ後ろでロゴが出たとみる、終わりからロゴの出始めまでの最長 (秒)。
+ * 見えないまま持ち越された所の最短 (`UNSEEN_MIN`) と同じく、ロゴの判定の窓のぶん
+ */
+const BLIND_RISE = UNSEEN_MIN;
 
 /**
- * **ロゴの区間の末尾の、ロゴが見えないまま持ち越された所。** ロゴの判定 (`logo-detect.logoSpans`) は、ロゴが溶けて見えない後ろ
+ * **ロゴの区間の末尾の、ロゴが見えないまま持ち越された所。** ロゴの判定 (`logo-detect.readLogo`) は、ロゴが溶けて見えない後ろ
  * (白っぽい場面・細かい柄) では直前の判断を持ち越すので、区間の末尾に点が 0 のままの所が残ることがある。そこは番組の終わりの
  * 明るい場面のこともあれば、番組から続けて入った CM のこともある (実機の TBS のアニメで、番組の直後の 15 秒の CM が、
  * ロゴの点は 0 のまま区間に入り、番組にされた)。ロゴがあったとも無かったとも言い切れないので、番組には見えた秒の
@@ -880,7 +934,7 @@ function byLogo(input: CmInput, logo: Range[]): Range[] {
 
       // CM へ。無音の外の切れ目とロゴの出入りからは始めない。告知が無音の外で終わったら次は番組
       if (s === State.Bare || a.kind === "bare") continue;
-      // 番組表どおりの先頭の近くの切れ目からは、録画の先頭の CM の続き (15 秒の倍数) だけ
+      // 番組表どおりの先頭に近い切れ目からは、録画の先頭にある CM の続き (15 秒の倍数) だけ
       if (a.kind === "start" && s !== State.Head) continue;
       const entering = s === State.Program || isCredit(s);
       let base = here;
@@ -914,7 +968,7 @@ function byLogo(input: CmInput, logo: Range[]): Range[] {
         // ロゴの出入りそのものは、録画の先頭と末尾の CM の端にだけ
         if ((a.kind === "logo" && !tail) || (b.kind === "logo" && !head))
           continue;
-        // 番組表どおりの先頭の近くの切れ目は、録画の先頭の CM の終わりにだけ
+        // 番組表どおりの先頭に近い切れ目は、録画の先頭にある CM の終わりにだけ
         if (b.kind === "start" && !head) continue;
         if (head || tail) {
           if (b.kind === "bare") continue;

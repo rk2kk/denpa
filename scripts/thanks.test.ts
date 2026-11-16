@@ -79,8 +79,16 @@ describe("GitHub から読む", () => {
   });
 });
 
+/** 1 人ぶんの表のマス (`thanks.ts` の `person`) */
+const cell = (login: string, link: string) =>
+  `<td align="center"><a href="${link}"><img src="https://github.com/${login}.png?size=96" width="48" height="48" alt=""><br><sub>@${login}</sub></a></td>`;
+const prs = (login: string) =>
+  `https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3A${login}`;
+const issues = (login: string) =>
+  `https://github.com/danything/denpa/issues?q=author%3A${login}`;
+
 describe("一覧の形", () => {
-  test("最初に関わった順に並べ、番号は小さい順。持ち主は載せない", () => {
+  test("最初に関わった順に、アイコンの下に名前を置いたマスを表に並べ、名前からその人の PR・Issue の一覧へ飛ぶ。持ち主は載せない", () => {
     const text = render([
       { kind: "pr", number: 662, login: "fetburner" },
       { kind: "pr", number: 188, login: "Khronos31" },
@@ -94,13 +102,39 @@ describe("一覧の形", () => {
       [
         "**手を入れてくれた人** (ありがとうございます):",
         "",
-        "- [@Khronos31](https://github.com/Khronos31) ([#188](https://github.com/danything/denpa/issues/188))",
-        "- [@fetburner](https://github.com/fetburner) ([#662](https://github.com/danything/denpa/issues/662))",
+        "<table>",
+        `<tr>${cell("Khronos31", prs("Khronos31"))}${cell("fetburner", prs("fetburner"))}</tr>`,
+        "</table>",
         "",
         "**報告や提案をくれた人** (ありがとうございます):",
         "",
-        "- [@Khronos31](https://github.com/Khronos31) ([#184](https://github.com/danything/denpa/issues/184) [#377](https://github.com/danything/denpa/issues/377))",
-        "- [@fetburner](https://github.com/fetburner) ([#668](https://github.com/danything/denpa/issues/668))",
+        "<table>",
+        `<tr>${cell("Khronos31", issues("Khronos31"))}${cell("fetburner", issues("fetburner"))}</tr>`,
+        "</table>",
+      ].join("\n"),
+    );
+  });
+
+  test("1 行に 7 人ずつ並べ、8 人目から次の行にする", () => {
+    const logins = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const text = render(
+      logins.map((login, i) => ({
+        kind: "issue" as const,
+        number: i + 1,
+        login,
+      })),
+    );
+    expect(text).toBe(
+      [
+        "**報告や提案をくれた人** (ありがとうございます):",
+        "",
+        "<table>",
+        `<tr>${logins
+          .slice(0, 7)
+          .map((l) => cell(l, issues(l)))
+          .join("")}</tr>`,
+        `<tr>${cell("h", issues("h"))}</tr>`,
+        "</table>",
       ].join("\n"),
     );
   });
@@ -110,7 +144,9 @@ describe("一覧の形", () => {
       [
         "**報告や提案をくれた人** (ありがとうございます):",
         "",
-        "- [@a](https://github.com/a) ([#5](https://github.com/danything/denpa/issues/5))",
+        "<table>",
+        `<tr>${cell("a", issues("a"))}</tr>`,
+        "</table>",
       ].join("\n"),
     );
   });
@@ -129,5 +165,21 @@ describe("README の印の間を差し替える", () => {
   test("印が欠けていれば止める", () => {
     expect(() => replaceBlock(`${START}\n`, "x")).toThrow();
     expect(() => replaceBlock(`${END}\n${START}\n`, "x")).toThrow();
+  });
+});
+
+describe("報告や提案のリンク先", () => {
+  test("Issue を立てた人は Issue の一覧、Discussion だけの人は Discussion の一覧へ飛ぶ", () => {
+    const text = render([
+      { kind: "issue", number: 5, login: "a" },
+      { kind: "discussion", number: 6, login: "a" },
+      { kind: "discussion", number: 7, login: "b" },
+    ]);
+    expect(text).toContain(
+      '<a href="https://github.com/danything/denpa/issues?q=author%3Aa">',
+    );
+    expect(text).toContain(
+      '<a href="https://github.com/danything/denpa/discussions?discussions_q=author%3Ab">',
+    );
   });
 });

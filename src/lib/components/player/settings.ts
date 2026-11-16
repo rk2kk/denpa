@@ -21,7 +21,7 @@ import type { IconShape } from "./icons";
  *
  * 何を覚えるか (端末ごと) は各画面と `ambient.svelte.ts`・`background.svelte.ts` が持つ。ここは並べ方だけ
  */
-export interface SettingOption {
+interface SettingOption {
   key: string | number;
   label: string;
   /** いま選ばれているか (`aria-checked`) */
@@ -277,8 +277,8 @@ export interface SettingAction {
 }
 
 /**
- * **狭い枠で操作バーから畳んだもの** (`StageTail` の `fold`)。⚙ の上の並びの先頭に、押すもの・切り替え・選ぶものを
- * 操作バーと同じ順に並べる (`kind` で見分ける)。広い枠では操作バーに出ているので並べない
+ * **操作バーから畳んだもの** (`StageTail` の `fold`。狭い枠か、一段に収まらないとき)。⚙ の上の並びの先頭に、押すもの・切り替え・選ぶものを
+ * 操作バーと同じ順に並べる (`kind` で見分ける)。畳まないときは操作バーに出ているので並べない
  */
 export type SettingRow =
   | ({ kind: "action" } & SettingAction)

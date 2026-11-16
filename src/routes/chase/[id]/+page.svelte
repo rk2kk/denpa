@@ -104,6 +104,7 @@
   let encoded = $state(false);
   liveUpdates([], {
     recordings: () => {
+      if (encoded) return;
       void fetch(resolve(`api/recordings/${data.rec.id}`))
         .then((res) => (res.ok ? res.json() : null))
         .then((body: { encoded?: boolean } | null) => {
@@ -180,7 +181,7 @@
   onMount(() => () => jikkyo.close());
 
   /**
-   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端に縦に並ぶボタンで出す (端末ごとに覚える)。
+   * 右の列に出す「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端に縦に並ぶボタンで出す (端末ごとに覚える)。
    * 右の列の無い形 (横にしたスマホ・全画面) では出さず、ボタンも置かない (`jikkyoListSwitch`。3 画面で同じ)
    */
   const jikkyoList = jikkyoListSwitch(
@@ -353,7 +354,7 @@
           icon={shooter.saved ? CHECK : CAMERA}
           label="この場面を切り抜く"
           testid="chase-shot"
-          onclick={() => void snapshot()}
+          onclick={snapshot}
         />
         <!-- 右の列の先頭に「コメントの一覧」を出す・しまう (`jikkyoList`) -->
         {#if jikkyoList.can}

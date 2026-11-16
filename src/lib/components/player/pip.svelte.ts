@@ -171,7 +171,7 @@ export function pictureInPicture(options: Options): Pip {
         else if (on === video) on = null;
         if (video === proxy && on !== proxy) {
           flowing(false);
-          // 変換した映像に重ねていたなら畳む。小窓に出していない間まで重ねない
+          // 変換した映像に重ねていたなら破棄する。小窓に出していない間まで重ねない
           dropBaked();
         }
       },
@@ -224,7 +224,7 @@ export function pictureInPicture(options: Options): Pip {
 
   /**
    * **canvas に移った・`<video>` に戻ったら小窓を閉じる。** 出しているほうにはもう映像が
-   * 流れてこない (canvas では `<video>` は空、戻れば canvas は畳まれる)。閉じずに残すと、
+   * 流れてこない (canvas では `<video>` は空、戻れば canvas は破棄される)。閉じずに残すと、
    * 止まった映像の小窓が残り続ける
    */
   $effect(() => {
@@ -234,7 +234,7 @@ export function pictureInPicture(options: Options): Pip {
     if ((on === proxy && baked === null) !== isRaw) leave();
   });
 
-  /** canvas に移ったら代わりの video を用意しておく。出たら畳む (canvas ごと無くなる) */
+  /** canvas に移ったら代わりの video を用意しておく。出たら破棄する (canvas ごと無くなる) */
   $effect(() => {
     if (!able || !raw() || !canCapture || options.capture === undefined) return;
     untrack(prepare);
@@ -331,7 +331,7 @@ export function pictureInPicture(options: Options): Pip {
     options.flow?.(flow);
   }
 
-  /** 代わりの video を畳む。canvas で描くのをやめたとき (canvas ごと無くなる) */
+  /** 代わりの video を破棄する。canvas で描くのをやめたとき (canvas ごと無くなる) */
   function release(): void {
     rawComposed?.stop();
     rawComposed = null;
@@ -405,7 +405,7 @@ export function pictureInPicture(options: Options): Pip {
     return target;
   }
 
-  /** 変換した映像に重ねていたら畳む。**元のストリーム (`captureStream`) も止める** */
+  /** 変換した映像に重ねていたら破棄する。**元のストリーム (`captureStream`) も止める** */
   function dropBaked(): void {
     const composed = baked;
     if (composed === null) return;
@@ -441,9 +441,9 @@ export function pictureInPicture(options: Options): Pip {
     if (standard()) await video.requestPictureInPicture();
     else if (webkit(video)) {
       /*
-       * Safari の API は断っても何も言わない。切り替わったかを見て言う。
-       * **一度でも切り替わったかで見る**。1 秒の間に閉じられた・画面を離れたものまで
-       * 「切り替わらなかった」と言っていた
+       * Safari の API は断っても例外を出さないので、切り替わったかを見て通知を出す。
+       * **一度でも切り替わったかで見る**。1 秒後の状態だけで見ると、その間に閉じられた・画面を離れたものまで
+       * 「切り替わらなかった」になる
        */
       const target = video;
       let reached = false;
@@ -464,7 +464,7 @@ export function pictureInPicture(options: Options): Pip {
     }
   }
 
-  /** 出せなかった理由を言う。**コンソールにも残す** (端末によってはトーストより読みやすい) */
+  /** 出せなかった理由を通知に出す。**コンソールにも残す** (端末によってはトーストより読みやすい) */
   function refuse(error: unknown): void {
     console.warn("[pip]", error);
     refused = {
@@ -473,7 +473,7 @@ export function pictureInPicture(options: Options): Pip {
       text: `小窓を出せませんでした: ${reason(error)}`,
     };
     flowing(false);
-    // 字幕を重ねて用意したものは、出せなかったなら畳む
+    // 字幕を重ねて用意したものは、出せなかったなら破棄する
     if (on === null) dropBaked();
     // リクエストする前に下ろした印を戻す (`enter`)
     guard();

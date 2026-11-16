@@ -31,7 +31,7 @@ export function dataReceiveNote(on: boolean): string {
 
 /**
  * サーバに受信をリクエストするか。開いている (d) か、自動で受信していて、局を映していて、
- * その局の入口に自動起動の指定があるとき (`autoStart`。サーバが PMT を読んで知らせる `Notice` の `autoStart`)。
+ * その局の入口に自動起動の指定があるとき (サーバが PMT を読んで知らせる `Notice` の `type: "autoStart"` の `on`)。
  * 追っかけ・録画に譲っている間は局のデータ放送が無いので、開いていなければリクエストしない。
  * 別の局への選局の答えを待っている間 (`switching`。`closingOnTune`) は、開いていてもリクエストしない。
  * 答えが届けば閉じるので、次の局のセッションが覚えているぶん (実機で約 2 MB) を受け取っても使わない
@@ -60,8 +60,8 @@ export function closesData(previous: number | null, next: number): boolean {
 
 /**
  * 選局をリクエストしたとき、答えを待ってから閉じる局 (`closesData` が閉じると言う次の局)。閉じないなら null。
- * **閉じるのはサーバが選局を受けたとき** (`tunedCloses`)。リクエストした時点で閉じていた頃は、サーバが選局を
- * 断ると (復号できない局の `error`) 前の局を受信したまま、データ放送だけが閉じていた。
+ * **閉じるのはサーバが選局を受けたとき** (`tunedCloses`)。リクエストした時点で閉じると、サーバが選局を
+ * 断ったとき (復号できない局の `error`) 前の局を受信したまま、データ放送だけが閉じる。
  * `onAir` はサーバが選局の答え (`tuned`) で受けたと知らせた局 (`Tuned.serviceId`)。追っかけの間も前の局のまま覚えておく
  */
 export function closingOnTune(

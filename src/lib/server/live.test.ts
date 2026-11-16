@@ -1,17 +1,28 @@
 import { describe, expect, test } from "bun:test";
 
+import { PacketStream } from "@danything/arib/psi";
+import {
+  packetize,
+  patSection,
+  programMap,
+  stream,
+} from "@danything/arib/synth";
+
 import {
   askedTrack,
   type AudioSide,
   audioTracks,
+  broadcastTrack,
   pickTrack,
 } from "#lib/arib.js";
 import { BROADCAST_HEVC, CHANNEL, codecsFor } from "#lib/live.js";
 
 import type { LiveHw } from "./hwenc";
 import {
+  AUDIO_FORM,
   audioArgs,
   blameLiveHw,
+  CardNumber,
   CHASE_STREAM_HOLD,
   chaseForm,
   chaseRawServed,
@@ -36,7 +47,9 @@ import {
   parseCommand,
   parsePlayable,
   pinnedNotTuned,
+  PmtAudioWatch,
   rawEnding,
+  rawOpeningLine,
   rungCodec,
   rungPlan,
   rungSlot,
@@ -71,7 +84,7 @@ describe("ライブのエンコード方法", () => {
    * **`-flags low_delay` を入れない。**
    *
    * `-i` より前に書くとエンコーダではなくデコーダに効く。放送の MPEG-2 には
-   * B フレームがあるので、この指定を受けたデコーダは表示順ではなく復号順で
+   * B フレームがあるので、この指定を受けたデコーダは表示順ではなくデコード順で
    * フレームを出し、1 枚進んでは戻るように見える。実測で隣り合うコマの差の比が
    * 2.17 → 1.11 に落ちた (素材のフィールドを直に測ると 1.02)。
    * エンコーダ側の遅れは `-tune zerolatency` が見ている。
@@ -100,7 +113,7 @@ describe("ライブのエンコード方法", () => {
    * ffmpeg は名指しした局を `-probesize` のぶん読む間に見つけられなければ、
    * **そのまま終了する**。実機の tvk (T15。tvk1/2/3 + ワンセグ + データで、
    * 局ごとに 14 本以上のストリーム) では 400KB でも足りず、
-   * `Failed to set value '0:p:24632:v:0' for option 'map'` で降りていた。
+   * `Failed to set value '0:p:24632:v:0' for option 'map'` で失敗して終了していた。
    *
    * わざと probesize を下げて T15 で測ったもの (3 回ずつ):
    *
@@ -235,7 +248,7 @@ describe("ライブのエンコード方法", () => {
 
   /*
    * **字幕を持たない放送はある** (ショッピングやサブチャンネル)。
-   * そこで字幕を求めると ffmpeg は組み立ての時点で降りて**映像も出ない**ので、
+   * そこで字幕を求めると ffmpeg は組み立ての時点で失敗して終了し、**映像も出ない**ので、
    * 字幕を外して再エンコードできるようにしてある (`Session.run`)
    */
   test("字幕なしでも組める", () => {
@@ -498,7 +511,7 @@ describe("H.264 は速さを優先する", () => {
    * 余っていて、削るのは動きの多い場面の映像のほう。細い経路には AV1 がある。
    *
    * 途切れも「映像だけ遅れる」も、**症状から流量を疑って 2 回とも外した**
-   * (本当は受け側の貯め方と復号。`server/live.ts`)
+   * (本当は受け側の貯め方とデコード。`server/live.ts`)
    */
   test("山は抑えない (宅内で見るものなので)", () => {
     expect(plain()).not.toContain("-maxrate");
@@ -574,7 +587,7 @@ describe("使えなかった理由", () => {
 
   /*
    * **言い換えるのは「同期しなかった」ときだけ。** 塞がっていたときや
-   * ffmpeg が降りたときに「放送休止です」と出すと、今度はこちらが嘘をつく
+   * ffmpeg が失敗して終了したときに「放送休止です」と出すと、今度はこちらが嘘をつく
    */
   test("別の理由で使えなかったときは言い換えない", () => {
     expect(whyNotTuned("チューナーに空きがありません", until)).toBe(
@@ -606,8 +619,8 @@ describe("名指しの選局を断られたときの文面 (pinnedNotTuned)", ()
     );
   });
 });
-describe("ffmpeg が局の映像・音声を指定できずに降りた (missingMedia)", () => {
-  test("映像か音声の指定で降りた行なら、どちらかを返す", () => {
+describe("ffmpeg が局の映像・音声を指定できずに失敗した (missingMedia)", () => {
+  test("映像か音声の指定で失敗した行なら、どちらかを返す", () => {
     expect(
       missingMedia(
         "Failed to set value '0:p:24632:v:0' for option 'map': Invalid argument",
@@ -624,7 +637,7 @@ describe("ffmpeg が局の映像・音声を指定できずに降りた (missing
   });
 
   /*
-   * 字幕の指定で降りたのは、字幕なしで起こし直す (`NO_SUBTITLE`)。実機の BS10プレミアム (未契約) で出た行。
+   * 字幕の指定で失敗したのは、字幕なしで起こし直す (`NO_SUBTITLE`)。実機の BS10プレミアム (未契約) で出た行。
    * スクランブルされたままだったことは、届いた TS の印で別に決める (`LastingScramble`)
    */
   test("字幕の指定とほかの行は見ない", () => {
@@ -647,6 +660,35 @@ describe("音声だけのエンコード方式 (外から使う API の ?audio=o
     expect(args).not.toContain("-filter_complex");
     expect(args.join(" ")).toContain("-c:a aac");
     expect(args.join(" ")).toContain("-f mp4");
+  });
+
+  test("映像も音声も無い局 (データ放送だけの局) は、TS を読まずに無音を実時間で出す", () => {
+    const args = encodeArgs(
+      1024,
+      stereo,
+      "audio",
+      null,
+      null,
+      0,
+      false,
+      "pipe:3",
+      "ts",
+      "mpeg2",
+      true,
+    );
+    expect(args).not.toContain("pipe:0");
+    expect(args).toContain("-re");
+    expect(args.join(" ")).toContain("-f lavfi -i sine=frequency=0");
+    expect(args.join(" ")).toContain("-c:a aac");
+    expect(args.at(-1)).toBe("pipe:1");
+  });
+
+  test("映像の無い局の形式は、どれをリクエストされても音声だけ (AUDIO_FORM)", () => {
+    expect(AUDIO_FORM).toEqual({
+      codec: "audio",
+      raw: false,
+      downgraded: false,
+    });
   });
 });
 
@@ -717,7 +759,7 @@ describe("GPU でエンコードする", () => {
     expect(args).not.toContain("-hwaccel");
   });
 
-  test("復号から GPU。`-hwaccel` は入力より前、CPU のフィルタは挟まない", () => {
+  test("デコードから GPU。`-hwaccel` は入力より前、CPU のフィルタは挟まない", () => {
     const args = full();
     expect(before(args, "-hwaccel")).toBe(true);
     expect(before(args, "-hwaccel_output_format")).toBe(true);
@@ -744,7 +786,7 @@ describe("GPU でエンコードする", () => {
 
   /*
    * **H.265 は GPU でだけ。** 音声は H.264 と同じ AAC で、入れ物の中の名前は `hvc1` (Safari は `hev1` を受け取らない)。
-   * GPU が無いのにリクエストされたら投げる (選局の指示を受けるところで H.264 にしてあるので、ふつうは来ない)
+   * GPU が無いのにリクエストされたら例外にする (選局の指示を受けるところで H.264 にしてあるので、ふつうは来ない)
    */
   test("H.265 は GPU でだけエンコードし、hvc1 の名前で出し、音声は AAC", () => {
     const args = encodeArgs(1024, stereo, "hevc", 0, {
@@ -786,9 +828,9 @@ describe("GPU でエンコードする", () => {
 
   /*
    * 消費者向けの GPU は同時に開けるエンコードの数に上限がある (`hwenc.nvencBusy`)。
-   * 超えて降りたのは GPU が壊れているのではないので、15 分外すことはしない
+   * 超えて失敗したのは GPU が壊れているのではないので、15 分外すことはしない
    */
-  test("同時に開ける数を超えて降りただけなら、方式を覚えない", () => {
+  test("同時に開ける数を超えて失敗しただけなら、方式を覚えない", () => {
     // ほかのテストと混ざらないよう、ここだけのデバイス
     const hw = {
       way: { device: "/dev/nvidia-test-busy", kind: "nvenc" as const, gpu: 0 },
@@ -882,6 +924,14 @@ describe("開くまでの内訳", () => {
       "[live] GR:T27: 開くまで 選局 - / 最初のバイト - / ffmpeg 3ms / init 250ms / 最初の fMP4 260ms (av1)",
     );
   });
+
+  test("放送のままの経路は、ffmpeg の代わりに最初の送信を出す", () => {
+    expect(
+      rawOpeningLine("GR:T27", { tuned: 312.4, firstByte: 520.6, sent: 530 }),
+    ).toBe(
+      "[live] GR:T27: 開くまで 選局 312ms / 最初のバイト 521ms / 最初の送信 530ms (放送のまま)",
+    );
+  });
 });
 
 /** 画面から来た指示の読み方 (`parseCommand`)。追っかけを元の TS で受ける `raw` と、送るのを止める `hold` */
@@ -924,7 +974,7 @@ describe("元の TS が尽きたあと (rawEnding)", () => {
     );
   });
 
-  test("畳んだあとは何も伝えない", () => {
+  test("終えたあとは何も伝えない", () => {
     expect(rawEnding({ chase: true, fed: true, stopped: true })).toBe("quiet");
     expect(rawEnding({ chase: false, fed: true, stopped: true })).toBe("quiet");
   });
@@ -990,7 +1040,7 @@ describe("エンコードが遅れたときの軽い組み合わせ", () => {
       step: "half",
       light: { half: true, gpu: false },
     });
-    // 答えは 1 回だけ (セッションはここで畳む)
+    // 答えは 1 回だけ (セッションはここで終える)
     expect(lag.tick(20_000, 0.5, base)).toBeNull();
   });
 
@@ -1094,6 +1144,14 @@ describe("エンコードが遅れたときの軽い組み合わせ", () => {
     keepLight("GR:T27:1", { half: true, gpu: false }, 1_000);
     expect(takeLight("GR:T27:1", 60_000)).toBeNull();
     expect(takeLight("GR:T16:1", 2_000)).toBeNull();
+  });
+
+  test("受け取られないまま期限を過ぎたものは、次に預けるときに捨てる", () => {
+    keepLight("GR:T20:1", { half: true, gpu: false }, 1_000);
+    // 期限 (30 秒) を過ぎてから別のセッションが預ける。前のものは捨てたので、期限を戻しても受け取れない
+    keepLight("GR:T21:1", { half: true, gpu: false }, 40_000);
+    expect(takeLight("GR:T20:1", 1_000)).toBeNull();
+    expect(takeLight("GR:T21:1", 40_000)).toEqual({ half: true, gpu: false });
   });
 });
 
@@ -1653,7 +1711,7 @@ describe("TS で送る 4K の局のライブ", () => {
       codec: "av1",
       raw: false,
     });
-    // 再生できる形式が無い (呼ぶ側が「再生できる形式がありません」で畳む)
+    // 再生できる形式が無い (呼ぶ側が「再生できる形式がありません」で終える)
     expect(servedFormat(raw, "hevc", ["raw"])).toBeNull();
     // MPEG-2 の局・読めなかったとき・放送のままでないものは、リクエストされたまま
     expect(servedFormat(raw, "mpeg2", null)).toEqual(raw);
@@ -1684,5 +1742,117 @@ describe("TS で送る 4K の局のライブ", () => {
     expect(parseCommand({ ...tune, broadcast: "av1" })).toMatchObject({
       broadcast: "mpeg2",
     });
+  });
+});
+
+/**
+ * **データ放送が選んだ音声 (`N:es`) は、PMT の音声の N 本目をエンコードする** (`arib.broadcastTrack`。J:COM テレビのラジオ選局)。
+ * PMT を見ずに受けるので、無い ES なら音声無しで続ける (`-map` の `?`)。番組表の音声 (`N:both`) はそのまま (`?` を付けない)
+ */
+describe("データ放送が選んだ音声のエンコード", () => {
+  test("N:es は a:N? で、番組表の音声は ? を付けない", () => {
+    const es = encodeArgs(1, broadcastTrack("2:es")!, "h264");
+    expect(es.join(" ")).toContain("-map 0:p:1:a:2?");
+    const main = encodeArgs(1, stereo, "h264");
+    expect(main.join(" ")).toContain("-map 0:p:1:a:0 ");
+    expect(main.join(" ")).not.toContain("a:0?");
+  });
+});
+
+/**
+ * **選局したエージェントのカードの番号を知らせる** (`CardNumber`。データ放送の `getIRDID`)。選局し直したら前の番号を渡さず、
+ * 応答を待つ間に別のエージェントへ移ったら古い応答を捨てる。双方向がオフなら知らせない
+ */
+describe("カードの番号", () => {
+  /** 訊いた順に、手で応答を返せる `cardIdOf` の代わり */
+  const setup = (network = true) => {
+    const answers = new Map<number, (id: string | null) => void>();
+    const told: string[] = [];
+    let agent: number | null = null;
+    const card = new CardNumber(
+      (asked) =>
+        new Promise((resolve) => {
+          answers.set(asked, resolve);
+        }),
+      () => network,
+      () => agent,
+      (id) => told.push(id),
+    );
+    const tune = (to: number) => {
+      agent = to;
+      return card.learn(to);
+    };
+    return { answers, told, card, tune };
+  };
+
+  test("応答を受けたら覚えて知らせ、選局し直したら前の番号を null に戻す", async () => {
+    const { answers, told, card, tune } = setup();
+    const first = tune(1);
+    answers.get(1)!("0000111122223333");
+    await first;
+    expect(card.id).toBe("0000111122223333");
+    expect(told).toEqual(["0000111122223333"]);
+
+    void tune(2);
+    expect(card.id).toBeNull();
+  });
+
+  test("応答を待つ間に別のエージェントへ移ったら、古い応答を捨てる", async () => {
+    const { answers, told, card, tune } = setup();
+    const first = tune(1);
+    const second = tune(2);
+    answers.get(1)!("0000111122223333");
+    await first;
+    expect(card.id).toBeNull();
+    expect(told).toEqual([]);
+
+    answers.get(2)!("4444555566667777");
+    await second;
+    expect(card.id).toBe("4444555566667777");
+    expect(told).toEqual(["4444555566667777"]);
+  });
+
+  test("双方向がオフなら訊かず、知らせない", async () => {
+    const { answers, told, card, tune } = setup(false);
+    await tune(1);
+    expect(answers.size).toBe(0);
+    expect(card.id).toBeNull();
+    expect(told).toEqual([]);
+  });
+});
+
+describe("PmtAudioWatch", () => {
+  /** 局 1024 の PMT。音声の ES の部品タグを並べる */
+  const pmt = (tags: number[]) =>
+    packetize(
+      0x1f0,
+      programMap(1024, 0x100, [
+        [0x02, 0x100, [0x52, 0x01, 0x00]],
+        ...tags.map((tag, i): [number, number, number[]] => [
+          0x0f,
+          0x110 + i,
+          [0x52, 0x01, tag],
+        ]),
+      ]),
+    );
+  const feed = (watch: PmtAudioWatch, ...parts: Uint8Array[]): boolean[] => {
+    const out: boolean[] = [];
+    for (const packet of new PacketStream().feed(stream(...parts)))
+      out.push(watch.feedPacket(packet));
+    return out;
+  };
+
+  test("PMT の音声の部品タグを読み、初めて決まったときと変わったときだけ true を返す", () => {
+    const watch = new PmtAudioWatch(1024);
+    const pat = packetize(0x0000, patSection([[1024, 0x1f0]]));
+    expect(feed(watch, pat, pmt([0x10]), pmt([0x10]))).toEqual([
+      false,
+      true,
+      false,
+    ]);
+    expect(watch.value).toEqual([0x10]);
+    // 副音声の ES が足された
+    expect(feed(watch, pmt([0x10, 0x11]))).toEqual([true]);
+    expect(watch.value).toEqual([0x10, 0x11]);
   });
 });

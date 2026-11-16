@@ -208,7 +208,7 @@ test("デコード待ちが上限を超えたら打ち切って片付ける", ()
   expect(worker.terminated).toBe(true);
   expect(context.sources.every((node) => node.stopped)).toBe(true);
 });
-test("畳んだあとに来たコマは鳴らさない", () => {
+test("破棄したあとに来たコマは鳴らさない", () => {
   const { worker, context, audio } = setup();
   audio.destroy();
   worker.pcm(1, 10.1);
@@ -221,7 +221,7 @@ test("映像の時刻が揺れても、続く PCM の間に隙間を作らない
   worker.pcm(1, 10.1);
   const firstStart = context.sources[0]!.starts[0]![0]!;
   context.currentTime = 50.01;
-  video.currentTime = 10.012; // 読んだときの 2ms の揺れ (飛んだのではない)
+  video.currentTime = 10.012; // 読んだときの 2 ms の揺れ (飛んだのではない)
   worker.pcm(1, 10.1 + 1024 / 48000);
   expect(context.sources[1]!.starts[0]![0]).toBeCloseTo(
     firstStart + 1024 / 48000,
@@ -242,7 +242,7 @@ test("<video> が再生に戻ったら、別に鳴らす AudioContext も起こ�
   expect(context.state).toBe("running");
 });
 
-test("Audio Session は作ったら playback にし、畳んだら戻す (バックグラウンド再生のオン・オフでは変えない)", () => {
+test("Audio Session は作ったら playback にし、破棄したら戻す (バックグラウンド再生のオン・オフでは変えない)", () => {
   const session = (navigator as unknown as { audioSession: { type: string } })
     .audioSession;
   const { audio } = setup();
@@ -297,7 +297,7 @@ test("音の経路を組めなかったら、worker を作らずに例外を投�
 });
 
 // #2728。iOS の Safari は、押したとき以外に作った AudioContext を止めたまま始める。画質を切り替えて作り直しても、動いている AudioContext を使い続ける
-test("渡した AudioContext は畳んでも閉じず、作り直した次の音でもそのまま使う", () => {
+test("渡した AudioContext は破棄しても閉じず、作り直した次の音でもそのまま使う", () => {
   const shared = new Context();
   const make = () =>
     new NativeAudio(
@@ -417,7 +417,7 @@ test("映像が進んでいて時計だけずれたときは、組み直して�
   worker.pcm(1, 10.3);
   expect(context.sources.length).toBeGreaterThan(count);
 });
-test("AudioContext を 48kHz で作り、続いたコマは前のコマの終わりのサンプルにつなぐ", () => {
+test("AudioContext を 48 kHz で作り、続いたコマは前のコマの終わりのサンプルにつなぐ", () => {
   const { worker, context, audio } = setup();
   expect(context.sampleRate).toBe(48_000);
   audio.setMuted(false);

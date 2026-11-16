@@ -17,7 +17,7 @@ namespace Denpa.Agent;
 /// <summary>受信機の復調器</summary>
 public enum It930xDemod
 {
-    /// <summary>CXD2856ER。地上波・衛星・J.83B を 1 つで受ける (CXD2856 の仕様書)</summary>
+    /// <summary>CXD2856ER。地上波・衛星・J.83B・ISDB-C を 1 つで受ける (CXD2856 の仕様書)</summary>
     Cxd2856,
 
     /// <summary>TC90522 の地上波のアドレス (TC90522 の仕様書 1.2)。地上波だけ</summary>
@@ -158,7 +158,7 @@ public static class It930x
     /// <summary>衛星だけの受信機</summary>
     private static readonly IReadOnlyList<string> Satellite = ["BS", "CS"];
 
-    /// <summary>地上波と衛星を切り替える受信機 (J.83B は受けられない)</summary>
+    /// <summary>地上波と衛星を切り替える受信機 (J.83B と ISDB-C は受けられない)</summary>
     private static readonly IReadOnlyList<string> Both = ["GR", "BS", "CS"];
 
     /// <summary>PX-MLT5PE・DTV02A-5TS-P の割り当て (CXD2856 の仕様書 1.2)。T のアドレスとバスは 3 機種で同じで、TS 入力は受信機の番号と同じ</summary>
@@ -238,7 +238,7 @@ public static class It930x
     /// PX-MLT5U と DTV02A-5TS-P は実機で確かめていない。DTV02A-5TS-P は PX-MLT5PE と同じ割り当てとして扱う (CXD2856 の仕様書 1.2 も未確認としている)</item>
     /// <item>Q3・W3 系 (TC90522 + R850 + RT710): PX-Q3PE4 は Linux の実機で、8 つの受信機の同時受信と内蔵カードリーダーを確かめた。
     /// ほかの機種は実機で確かめていない (#1578)</item>
-    /// <item>PX-MLT8PE・DTV02A-4TS-P (MLT5 系と同じチップで、割り当てだけが違う): 実機で確かめていない</item>
+    /// <item>PX-MLT8PE・DTV02A-4TS-P (MLT5 系と同じチップで、割り当てだけが違う): PX-MLT8PE は Linux の実機で、受信機 0 と 2 の地上波を確かめた。DTV02A-4TS-P は実機で確かめていない</item>
     /// <item>受信機が 1 つの機種 (ISDB2056・ISDB2056N・PX-M1UR・PX-S1UR・DTV03A-1TU): 実機で確かめていない。
     /// 電源は GPIOH3 で、LNB には給電できない (IT930x の仕様書 7.3・8)</item>
     /// </list>
@@ -314,7 +314,7 @@ public static class It930x
     public static string Name(string port, int receiver) => Identify(port) is { } model ? Name(model, port, receiver) : $"{Model} {port} #{receiver}";
 
     /// <summary>
-    /// 挿さっている機材の受信機を、設定に書いたのと同じ形式で。並べるだけで開かない (開くとファームウェアを起動して電源を入れる)。
+    /// 挿さっている機材の受信機を、設定に書くのと同じ形式で返す。並べるだけで開かない (開くとファームウェアを起動して電源を入れる)。
     /// 受信機ごとに、受けられる種別のうち最初に選ぶもの (<see cref="It930xReceiver.DetectedTypes"/>) を付ける。
     /// Q3 は 2 つの USB デバイスを続けて並べ、シリアル番号の末尾が 1 の側を先にする (IT930x の仕様書 2.1)
     /// </summary>

@@ -33,6 +33,7 @@
   import { onDestroy, untrack } from "svelte";
 
   import type { Bml, BmlIp, Rect, Service } from "#lib/bml/engine.js";
+  import { irdIdOf } from "#lib/bml/ird.js";
   import { type Plane, planeArea } from "#lib/bml/plane.js";
   import { fetchRelayed } from "#lib/bml/relay.js";
   import {
@@ -45,6 +46,7 @@
   import { read, readAll, write } from "#lib/keep.js";
   import type { HybridcastLink } from "#lib/live.js";
 
+  import { dataNote, loadEngine } from "./data-load";
   import HybridcastFrame from "./HybridcastFrame.svelte";
 
   type Place = Extract<FrameMessage, { type: "video" }>["place"];
@@ -65,7 +67,7 @@
     /** 通知を受け取る関数を預ける。`null` を渡すと外れる */
     listen: (handler: ((message: ResponseMessage) => void) | null) => void;
     /**
-     * 指のリモコン (`Remote.svelte`) から押すための関数 (bind で受け取る)。入れ物ができたら入り、畳んだら null。
+     * 指のリモコン (`Remote.svelte`) から押すための関数 (bind で受け取る)。入れ物ができたら入り、破棄したら null。
      * 有るかどうかが、そのままリモコンを出すかどうか
      */
     press?: ((code: number) => void) | null;
@@ -75,7 +77,7 @@
      */
     pressD?: (() => boolean) | null;
     /**
-     * 映像の上に出す短い通知 (bind で受け取る。無ければ空)。「データ取得中…」と Hybridcast のアプリの読み込み。
+     * 映像の上に出す短い通知 (bind で受け取る。無ければ空)。「データ取得中…」、エンジンを読み込めなかったこと、Hybridcast のアプリの読み込み (`data-load.ts` の `dataNote`)。
      * 出すのは使う画面で、舞台の通知の列 (`PlayerStage` の `notes`) に積む。右上の隅に置くと、右端の縦の列と重なっていた
      */
     note?: string;
@@ -92,6 +94,16 @@
     clock?: (() => number | null) | null;
     /** 文書が別の局へ選局したい (epgTune)。選局は画面がやり、切り替えたら true。渡さなければいつも失敗 */
     tune?: ((service: Service) => boolean) | null;
+    /**
+     * 文書が主音声を替えた (`setMainAudioStream`)。PMT の音声の ES の何本目か (0 から)。null はふだんの音声に戻す。
+     * エンジンを破棄したとき (局が替わった・閉じた) も null。渡さなければ文書の切り替えは音に出ない
+     */
+    mainAudio?: ((index: number | null) => void) | null;
+    /**
+     * 選局したエージェントのカードの番号 (10 進 16 桁。ライブの `card`)。データ放送の `getIRDID` に渡す。
+     * 双方向 (`network`) がオフなら渡さない。録画の再生では渡さない (いまのカードと録ったときのカードが違うことがある)
+     */
+    cardId?: string | null;
     /**
      * この番組に載っている Hybridcast (AIT)。文書が起動を求めたら (startAITControlledApp) 映像の上に開く
      * (`HybridcastFrame`)。双方向がオフ (`network`) なら開かない。文書の問い合わせにも「無い」と答える
@@ -118,6 +130,8 @@
     network,
     clock = null,
     tune = null,
+    mainAudio = null,
+    cardId = null,
     apps = [],
     serviceName = "",
     captions = false,
@@ -278,8 +292,15 @@
   let host = $state<HTMLDivElement | null>(null);
   /** いま動いているエンジン */
   let engine = $state<Bml | null>(null);
+  /** 文書が主音声を替えているか (`mainAudio`)。破棄するときに戻す */
+  let audioChosen = false;
   /** 読み込み中か。**押してすぐは何も出ないので、「データ取得中」を出す** */
   let loading = $state(false);
+  /**
+   * エンジンを読み込めなかったか (`data-load.ts` の `loadEngine`)。「データ取得中…」の代わりに読み込めなかったことを出す。
+   * 閉じて開き直したときも読み込み直す (`close`・`opened`。読めるとは限らないので、通知はページの再読み込みを案内する)
+   */
+  let failed = $state(false);
   /** BML の文書が見える状態か (`onVisible`)。BML は `invisible` で始まり、d を受けたアプリが自分で外して出てくる */
   let showing = $state(false);
   /** いま実際に映しているか (`place` が決める)。`showing` との違いは `settled` を見よ */
@@ -299,13 +320,13 @@
   let receiving = $state(false);
   // テレビと同じ「データ取得中」。押されてから読み取り始めるので、テレビより待つ (実測で 8 秒)
   $effect(() => {
-    note = !on
-      ? ""
-      : running !== null
-        ? appNote
-        : loading || receiving
-          ? "データ取得中…"
-          : "";
+    note = dataNote({
+      on,
+      app: running !== null ? appNote : null,
+      failed,
+      loading,
+      receiving,
+    });
   });
   /**
    * 一度でも出し切ったか。最初の 1 枚が揃うまでは映像のままにする。入口の文書はほぼ白紙のまま自分で
@@ -485,7 +506,7 @@
     }
   }
 
-  /** 取得中が終わるのを待つ上限。「取得中」が下りない局でも、白くても出るほうがまし */
+  /** 取得中が終わるのを待つ上限。「取得中」が終わらない局でも、白くても出るほうがまし */
   const SHOW_WAIT = 8000;
   let waiting: ReturnType<typeof setTimeout> | null = null;
 
@@ -547,7 +568,7 @@
       return;
     }
     tap(DATA_BUTTON);
-    // 押しただけ数える。**反応があれば `loaded` が下ろす**ので、ここでは待つだけ
+    // 押しただけ数える。**反応があれば `loaded` が `dueD` を外す**ので、ここでは待つだけ
     if (++taps >= TAP_MOST) {
       dueD = false;
       return;
@@ -592,13 +613,21 @@
     if (host === null || media === null) return;
     const mine = ++generation;
     loading = true;
+    failed = false;
     // 押されてから取得する (上の説明)
-    const { createBml, aribKey, visibleFrom } =
-      await import("#lib/bml/engine.js");
+    const loadedEngine = await loadEngine(() => import("#lib/bml/engine.js"));
+    // 待っている間に離されていたら、作らない
+    if (mine !== generation) return;
+    // 読み込めなかった。「データ取得中…」を消し、読み込めなかったと出す (閉じて開き直したときも読み込み直す)
+    if (loadedEngine === null) {
+      loading = false;
+      failed = true;
+      return;
+    }
+    const { createBml, aribKey, visibleFrom } = loadedEngine;
     toAribKey = aribKey;
     nvramVisible = visibleFrom;
-    // 待っている間に離されていたら、作らない
-    if (mine !== generation || host === null || media === null) return;
+    if (host === null || media === null) return;
     const into = makeMount(host);
     // 出す操作は文書にとっての d の 1 押し。受け付ける文書が出てきたら届ける (`knock`)。受信しているだけなら届けない
     dueD = on;
@@ -645,6 +674,12 @@
       },
       // 選局は画面に任せる (エンジンは選局先を渡すだけ)。開くまでは断る (勝手に局を替えない)
       onTune: (service) => on && (tune?.(service) ?? false),
+      // 受信機の番号。双方向がオフなら渡さない (外へ送られうる経路と同じ扱い。`bml/ird.ts` の `irdIdOf`)
+      irdId: (type) => (network ? irdIdOf(type, cardId) : null),
+      onMainAudio: (index) => {
+        audioChosen = index !== null;
+        mainAudio?.(index);
+      },
       // 開くまでは、自動起動の指定がある入口だけ動かす (`receive`)
       opened: () => on,
       // Hybridcast。双方向がオフなら開かない (エンジンも問い合わせに「無い」と答える)
@@ -690,6 +725,11 @@
    * リモコンを渡す。自動起動でない入口はここで始まる (`Bml.open`)
    */
   function opened(): void {
+    // 受信していたが、エンジンを読み込めなかった。開いたら読み込み直す (閉じたときの `close` と同じく、開き直しで再試行する)
+    if (engine === null && failed && shown !== null) {
+      void open();
+      return;
+    }
     if (engine === null) return;
     dueD = true;
     taps = 0;
@@ -733,6 +773,7 @@
     press = null;
     pressD = null;
     loading = false;
+    failed = false;
     handed = 0;
     showing = false;
     receiving = false;
@@ -748,6 +789,11 @@
     place();
     engine?.destroy();
     engine = null;
+    // 文書が替えた主音声は、文書と一緒に戻す
+    if (audioChosen) {
+      audioChosen = false;
+      mainAudio?.(null);
+    }
     videoRect = null;
     if (roundFont !== null) document.fonts.delete(roundFont);
     roundFont = null;
@@ -767,7 +813,7 @@
     if (want !== null) void open();
   });
 
-  // 受信したまま開いた・閉じた。エンジンが無ければ (読み込み中・受信していない) 作るとき・畳むときに済む
+  // 受信したまま開いた・閉じた。エンジンが無ければ (読み込み中・受信していない) 作るとき・破棄するときに済む
   $effect(() => {
     const now = on;
     untrack(() => {
@@ -778,7 +824,7 @@
 
   /**
    * リモコンの代わり。**十字・決定・戻る・数字・色・d** をそのまま渡す
-   * (エンジンの `aribKey`)。キーの d は文書へそのまま届く。入れ物の出し入れは
+   * (エンジンの `aribKey`)。キーの d は文書の DataButtonPressed になる。データ放送の表示と非表示の切り替えは
    * 画面の d ボタンの側 (`pressD`)
    */
   function key(event: KeyboardEvent, down: boolean): void {
@@ -822,7 +868,13 @@
   hidden={!on && !receive}
   data-testid="live-data"
   data-open={on}
-  data-state={engine !== null ? "ready" : loading ? "loading" : "off"}
+  data-state={engine !== null
+    ? "ready"
+    : loading
+      ? "loading"
+      : failed
+        ? "failed"
+        : "off"}
   data-showing={visible}
   data-receiving={receiving}
   data-for={shown ?? ""}

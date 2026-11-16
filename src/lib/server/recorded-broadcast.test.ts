@@ -14,9 +14,9 @@ import { peekPmt, PMT_WAIT } from "./captions";
 import { followFile } from "./chase";
 import {
   broadcastDecided,
-  headVideo,
   learnBroadcast,
   recordedBroadcast,
+  recordedMedia,
   UNDECIDED_WAIT,
 } from "./recorded-broadcast";
 import { chunks } from "./stream";
@@ -62,6 +62,89 @@ function recording(bytes: Uint8Array, ext = ".m2ts"): string {
   writeFileSync(path, bytes);
   return path;
 }
+
+describe("録画に映像と音声があるか (recordedMedia)", () => {
+  /** PAT と、`streams` の ES だけを並べた PMT */
+  const only = (streams: [number, number][]) =>
+    recording(
+      stream(
+        packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+        packetize(PMT_PID, programMap(SERVICE, 0x110, streams)),
+      ),
+    );
+
+  test("テレビは両方、ラジオは音声だけ、データ放送だけの局はどちらも無い", () => {
+    expect(recordedMedia(recording(head(0x02)), SERVICE)).toEqual({
+      video: true,
+      audio: true,
+    });
+    expect(recordedMedia(only([[0x0f, 0x110]]), SERVICE)).toEqual({
+      video: false,
+      audio: true,
+    });
+    // データ放送のカルーセル (stream_type 0x0D) だけ
+    expect(recordedMedia(only([[0x0d, 0x140]]), SERVICE)).toEqual({
+      video: false,
+      audio: false,
+    });
+  });
+
+  test("PMT を読めない録画と 4K の局の録画は、両方あるものとして扱う", () => {
+    expect(recordedMedia(recording(filler(3)), SERVICE)).toEqual({
+      video: true,
+      audio: true,
+    });
+    expect(recordedMedia(join(dir, "missing.mmts"), SERVICE)).toEqual({
+      video: true,
+      audio: true,
+    });
+  });
+
+  test("録り始めに PMT を読めなくても、あとで書かれれば読み直して決める (読み直しの間を待たない)", () => {
+    const path = recording(filler(3));
+    // 放送のコーデックは読めず、読み直しの間に入る
+    expect(recordedBroadcast(path, SERVICE)).toBe("mpeg2");
+    expect(recordedMedia(path, SERVICE)).toEqual({ video: true, audio: true });
+    // 録っているうちにラジオの PMT が書かれた
+    appendFileSync(
+      path,
+      stream(
+        packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+        packetize(PMT_PID, programMap(SERVICE, 0x110, [[0x0f, 0x110]])),
+      ),
+    );
+    expect(recordedMedia(path, SERVICE)).toEqual({ video: false, audio: true });
+  });
+
+  test("先頭の PMT に映像が無くても、番組の途中で PMT に映像が付けば映像のある録画 (コーデックもその PMT から)", () => {
+    const radioHead = stream(
+      packetize(0x0000, patSection([[SERVICE, PMT_PID]])),
+      packetize(PMT_PID, programMap(SERVICE, 0x110, [[0x0f, 0x110]])),
+    );
+    const mpeg2 = recording(stream(radioHead, filler(1000), head(0x02)));
+    expect(recordedMedia(mpeg2, SERVICE)).toEqual({ video: true, audio: true });
+    const hevc = recording(stream(radioHead, filler(1000), head(0x24)));
+    expect(recordedBroadcast(hevc, SERVICE)).toBe("hevc");
+    expect(recordedMedia(hevc, SERVICE)).toEqual({ video: true, audio: true });
+  });
+
+  test("映像の無い答えは、録っている間に録画が伸びたら読み直す (あとで映像が付いた録画)", () => {
+    const path = only([[0x0f, 0x110]]);
+    // 録っている最中に追っかけが読んだ
+    expect(recordedMedia(path, SERVICE)).toEqual({ video: false, audio: true });
+    expect(recordedBroadcast(path, SERVICE)).toBe("mpeg2");
+    appendFileSync(path, stream(filler(1000), head(0x24)));
+    expect(recordedMedia(path, SERVICE)).toEqual({ video: true, audio: true });
+    expect(recordedBroadcast(path, SERVICE)).toBe("hevc");
+  });
+
+  test("追っかけが放送のコーデックだけを覚えた録画も、PMT を読んで決める", () => {
+    const path = only([[0x0f, 0x110]]);
+    learnBroadcast(path, "mpeg2");
+    expect(broadcastDecided(path)).toBe(true);
+    expect(recordedMedia(path, SERVICE)).toEqual({ video: false, audio: true });
+  });
+});
 
 describe("録画の放送のコーデック (recordedBroadcast)", () => {
   test("PMT の映像が HEVC の TS は 4K の局 (hevc)。MPEG-2 なら mpeg2", () => {
@@ -134,11 +217,5 @@ describe("録画の放送のコーデック (recordedBroadcast)", () => {
     expect(peeked.count).not.toBeNull();
     expect(peeked.video).toBe("hevc");
     await peeked.stream.return(undefined);
-  });
-
-  test("読むのは先頭の決まった量まで。その先の PMT は見ない", () => {
-    const path = recording(stream(filler(20), head(0x24)));
-    expect(headVideo(path, SERVICE, 188 * 10)).toBeUndefined();
-    expect(headVideo(path, SERVICE)).toBe("hevc");
   });
 });

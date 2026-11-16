@@ -19,17 +19,18 @@ import {
 } from "../types";
 import { NO_CHANNEL, placesOfService } from "./agent-channels";
 import type { Place } from "./agent-order";
-import { fileSize } from "./chase";
 import { config } from "./config";
 import { now, orm } from "./db";
 import { aribServiceId, encodeInput, enqueue } from "./encoder";
 import { savePrograms } from "./epg";
 import { emit } from "./events";
-import { moveFile, removeIfExists } from "./fsx";
+import { fileSize, moveFile, removeIfExists } from "./fsx";
 import { libraryPath, recordedPath } from "./library";
 import { refreshLineup } from "./lineup-follow";
-import { writeThumbnail } from "./metadata";
+import { sidecarPaths, writeThumbnail } from "./metadata";
 import { PfEvent } from "./pf-event";
+import { saveRecordedBml } from "./recorded-bml";
+import { recordedMedia } from "./recorded-broadcast";
 import { fillTsHead, recordingSummary } from "./recording";
 import { appendRecording } from "./recording-io";
 import { duplicateAtStart } from "./rules";
@@ -49,11 +50,11 @@ import { notify } from "./webhook";
 
 /**
  * 録り始めてから PMT でコピー禁止と分かり、1 バイトも保存しなかった録画の理由
- * (番組表が古い・無かったとき。ふだんは予約の時点で止まる: `format.COPY_NEVER_REASON`)
+ * (番組表が古い・無かったとき。ふだんは予約の時点で止まる。`format.COPY_NEVER_REASON`)
  */
 const COPY_NEVER_RECORDING = "コピー禁止の番組なので録画しませんでした";
 
-/** 録画中のストリームを止めるための手段。プロセス内にしか無いので再起動で失われる (起動時に回収する: recoverOrphanedRecordings) */
+/** 録画中のストリームを止めるための手段。プロセス内にしか無いので再起動で失われる (起動時に回収する。`recoverOrphanedRecordings`) */
 const active = new Map<number, AbortController>();
 
 export function activeRecordingIds(): number[] {
@@ -531,10 +532,9 @@ async function pump(
       /*
        * **選局は自分から切るまで終わらない。** 向こうから終わったなら (EOF でも
        * 例外でも) チューナーを取り上げられたか切れたかで、終了時刻 (自分の abort) までは取り直す。
-       * EOF を正常終了と読んでいた頃は、チューナーを取り上げられた録画が末尾の欠けたまま「録れた」に
-       * なり (HTTP 越しでは失敗も正常終了に見える。`agent/conformance.test.ts`)、
-       * 例外で抜けていた頃はエージェントの Pod を入れ替えただけで番組が丸ごと
-       * 失敗した (実機)
+       * EOF を正常終了と読むと、チューナーを取り上げられた録画が末尾の欠けたまま「録れた」に
+       * なる (HTTP 越しでは失敗も正常終了に見える。`agent/conformance.test.ts`)。
+       * 例外で抜けると、エージェントの Pod を入れ替えただけで番組が丸ごと失敗する (実機)
        */
       // 引き継ぎは最初に使うときだけ。取り直すころには、止めた録画はもう離れている
       let handoff = after;
@@ -808,25 +808,42 @@ function finish(recordingId: number, size: number): void {
 
   /*
    * **エンコードするのは、予約と録り終えたときの設定のどちらもエンコードするときだけ。** 予約したあとに
-   * 設定を「エンコードしない」に変えたら、前からある予約も元の TS をそのまま置く (`encoder.runJob` と同じ決まり)
+   * 設定を「エンコードしない」に変えたら、前からある予約も元の TS をそのまま置く (`encoder.runJob` と同じ決まり)。
+   * **映像の無い録画 (ラジオ・データ放送の局) はエンコードしない** (`recorded-broadcast.recordedMedia`)。
+   * 映像をエンコードできないので、エンコードする設定でも元の TS をそのまま置く
    */
-  if ((reservation?.encode ?? true) && settings().encode) {
+  const program = aribServiceId(recording.service_id);
+  const { video } = recordedMedia(recording.ts_path!, program);
+  if (video && (reservation?.encode ?? true) && settings().encode) {
     enqueue(recording.id);
     return;
   }
 
-  // エンコードしない設定なら元の TS をそのまま保存先へ移す。拡張子 (伝送の形式) はそのまま (`.m2ts`・`.mmts`)
+  // エンコードしないなら元の TS をそのまま保存先へ移す。拡張子 (伝送の形式) はそのまま (`.m2ts`・`.mmts`)
   const dest = libraryPath(recording, extname(recording.ts_path!));
   moveFile(recording.ts_path!, dest);
   /*
    * 4K の局の録画 (TLV) は ffmpeg が読めないので、サムネイルを作らない (エンコードすれば、詰め替えた MP4 から作る。`encoder.ts`)。
-   * TS で送る 4K の局の録画は、縮めて SDR に直して取る (`encoder.encodeInput` の `uhd`)
+   * TS で送る 4K の局の録画は、縮めて SDR に直して取る (`encoder.encodeInput` の `uhd`)。映像の無い録画には作るものが無い
    */
-  const kind = encodeInput(dest, aribServiceId(recording.service_id));
-  if (!kind.tlv)
+  const kind = encodeInput(dest, program);
+  if (!video) {
+    /*
+     * 映像の無い録画のデータ放送は、エンコードするときと同じくサイドカーに取り出す (`recorded-bml.ts`)。観る画面の物差しは元の TS なので
+     * 先頭で捨てた長さは 0。付け足しなので、失敗しても録画は失敗にしない
+     */
+    void saveRecordedBml(dest, sidecarPaths(dest).dataBroadcast, recording, 0)
+      .then(() => emit("recordings"))
+      .catch((error: unknown) =>
+        console.warn(
+          `[recorder] 録画 ${recording.id} のデータ放送を取り出せませんでした: ${String(error)}`,
+        ),
+      );
+  } else if (!kind.tlv)
     void writeThumbnail(
       dest,
-      (recording.end_at - recording.start_at) / 1000,
+      // 録れた長さ (測れていなければ予定の尺)。途中で切れた録画で、位置が尺を超えないように
+      (recording.duration_ms || recording.end_at - recording.start_at) / 1000,
       undefined,
       kind.uhd,
     );
@@ -841,7 +858,7 @@ function finish(recordingId: number, size: number): void {
 /**
  * その録画が終わっているべき時刻。**末尾を譲っていればそこまで** (`record_to`)。
  *
- * 止めるとき (`scheduler.tick`)・起動時に回収するとき・持ち主のいない行を畳むとき
+ * 止めるとき (`scheduler.tick`)・起動時に回収するとき・持ち主のいない行を終えるとき
  * (`failStrayRecordings`) で同じ物差しを使う。書き写していると、片方だけ直したときに
  * 「止めた時刻」と「終わっているはずの時刻」がずれる
  */
@@ -889,22 +906,22 @@ export function recoverOrphanedRecordings(): {
 }
 
 /**
- * 終了時刻を過ぎてから畳むまでの猶予。**正常に終わる録画に手を出さないため。**
+ * 終了時刻を過ぎてから終えるまでの猶予。**正常に終わる録画に手を出さないため。**
  *
  * 止めてから `finish` までは同じ処理の中で続けて終わるので実際には重ならないが、
- * 急いで畳んで得るものが何も無い
+ * 急いで終えて得るものが何も無い
  */
 const STRAY_GRACE = 60_000;
 
 /**
- * **持ち主のいない「録画中」を畳む。**
+ * **持ち主のいない「録画中」を終える。**
  *
  * 録っている最中の録画はプロセスの中にしか無い (`active`)。ノードごと落とした・Pod を強制終了したなど、
- * **畳む前にプロセスが止まった**ときは、DB の行だけが録画中で残る。
+ * **終える前にプロセスが止まった**ときは、DB の行だけが録画中で残る。
  * 起動時にも同じ片付けをするが (`recoverOrphanedRecordings`)、そのとき**まだ放送中なら
- * 録り直す**ので、再開した先でまたプロセスが止まると次の起動まで畳まれない。
+ * 録り直す**ので、再開した先でまたプロセスが止まると次の起動まで終わらない。
  *
- * 畳まれない行は**一覧の予約の側に残り、録画の側には出てこない**。どちらの振り分けも
+ * 終わらない行は**一覧の予約の側に残り、録画の側には出てこない**。どちらの振り分けも
  * `recordings.state = 'recording'` で決まっている (`routes/+page.server.ts`)。放送は
  * とうに終わっているのに「録画中」と出たままで、取り消す以外に消す方法が無い。
  *

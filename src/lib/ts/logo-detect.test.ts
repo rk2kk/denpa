@@ -12,9 +12,9 @@ import {
   framer,
   level,
   type LogoModel,
-  logoSpans,
   makeTemplate,
   mergeModel,
+  readLogo,
   score,
 } from "./logo-detect";
 
@@ -217,7 +217,7 @@ describe("区間にする", () => {
       [450, 0, 80],
       [600, 0.8, 80],
     ]);
-    const spans = logoSpans(readings, FPS);
+    const spans = readLogo(readings, FPS).spans;
     expect(spans.map((s) => [s.start, s.end])).toEqual([
       [0, 299],
       [750, 1349],
@@ -233,7 +233,7 @@ describe("区間にする", () => {
       [450, 0, 80],
       [600, 0.8, 80],
     ]);
-    const spans = logoSpans(readings, FPS);
+    const spans = readLogo(readings, FPS).spans;
     expect(spans.map((s) => [s.start, s.end])).toEqual([
       [0, 1499],
       [1950, 2549],
@@ -264,7 +264,7 @@ describe("区間にする", () => {
     // CM (のっぺりした後ろで見えない = 無い)
     push(450, 0, 0);
     push(300, 0.8, 0);
-    const spans = logoSpans(
+    const { spans } = readLogo(
       {
         scores: Float32Array.from(scores),
         levels: Uint8Array.from(levels),
@@ -278,6 +278,23 @@ describe("区間にする", () => {
     ]);
   });
 
+  test("区間の外で白い場面が続いた所は、判断できなかった所として添える", () => {
+    const readings = series([
+      // CM (暗い後ろで見えない = 無い)
+      [300, 0, 80],
+      // 番組の冒頭の白い場面 (60 秒)。ロゴは溶けて見えない
+      [1800, 0.02, 245],
+      [600, 0.8, 80],
+      // 番組の中の白い場面 (10 秒)。区間の中なので添えない
+      [300, 0.02, 245],
+      [600, 0.8, 80],
+    ]);
+    const { spans, blind } = readLogo(readings, FPS);
+    expect(spans.map((s) => [s.start, s.end])).toEqual([[2100, 3599]]);
+    // 判断できるコマが窓の 1/3 を超える所 (前後の端の 10 コマ) は判断している
+    expect(blind.map((s) => [s.start, s.end])).toEqual([[310, 2089]]);
+  });
+
   test("白いフラッシュ数コマや、CM の中のまぎれは検出しない", () => {
     const readings = series([
       [600, 0.8, 80],
@@ -287,7 +304,7 @@ describe("区間にする", () => {
       [20, 0.5, 80],
       [400, 0, 80],
     ]);
-    const spans = logoSpans(readings, FPS);
+    const spans = readLogo(readings, FPS).spans;
     expect(spans.map((s) => [s.start, s.end])).toEqual([[0, 1202]]);
   });
 });

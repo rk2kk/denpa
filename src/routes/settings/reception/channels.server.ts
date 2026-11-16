@@ -3,8 +3,8 @@ import { asc, count, eq, or, sql } from "drizzle-orm";
 
 import { parseId } from "#lib/id.js";
 import {
-  serviceAgent,
-  serviceChannel,
+  servicePlaces,
+  strictPlaces,
   unreceivableService,
 } from "#lib/server/agent-channels.js";
 import {
@@ -46,7 +46,10 @@ import {
 interface Coverage {
   type: ChannelType;
   channel: string;
-  /** このチャンネルを控えに持つエージェント (`agent-channels.serviceAgent`)。受信の様子と測定はこのエージェントのもの */
+  /**
+   * このチャンネルで選局するエージェント (`agent-channels.servicePlaces` の先頭)。受信の様子と測定はこのエージェントのもの。
+   * 受信できるエージェントが 1 台でもあればそのうちの先頭で、全部で受信できないと決めたときだけ受信できないエージェントになる
+   */
   agent: number;
   /** このチャンネルの TS を受けられるエージェントの名前 (並びの順)。画面は 2 台以上のときだけ出す */
   agents: string[];
@@ -103,9 +106,8 @@ function receiversByTs(): Map<string, string[]> {
  *
  * エージェントにも同じ顔ぶれの控えがある (スキャンの結果を預けてあるので) が、
  * **聞きに行かない。** 向こうが持っているのは選局に要る周波数と TSID のためで、
- * 局名も番組表も denpa のもの。両方を並べていた頃は、取り込みが 1 分おきだった
- * 名残で「denpa への取り込み待ち」を出していたが、いまはスキャンが終わった
- * その場で取り込む (scan.ts) ので、待ちようがない。
+ * 局名も番組表も denpa のもの。スキャンが終わったその場で取り込む (scan.ts) ので、
+ * 取り込みを待つ局は無い。
  *
  * 出すのは**いま選局できる局だけ**。スキャンをやり直すと局は入れ替わり、
  * 前の回の行は残る (録画や過去の予約が辿れなくなるので消せない)。
@@ -117,8 +119,7 @@ function coverage(): Coverage[] {
       id: services.id,
       name: services.name,
       type: services.type,
-      channel: serviceChannel(),
-      agent: serviceAgent(),
+      places: servicePlaces(),
       network_id: services.network_id,
       transport_stream_id: services.transport_stream_id,
       decodable: services.decodable,
@@ -137,9 +138,15 @@ function coverage(): Coverage[] {
   const receivers = receiversByTs();
   const channels = new Map<string, Coverage>();
   for (const row of rows) {
-    const { id, name, type, channel, agent, programs, until, decodable } = row;
+    const { id, name, type, programs, until, decodable } = row;
+    /*
+     * 選局するエージェントのチャンネルで出す。並びの先頭のエージェントで受信できなくても、ほかのエージェントで
+     * 受信できるなら、そちらのチャンネルの受信の様子を出す
+     */
+    const place = row.places === null ? undefined : strictPlaces(row.places)[0];
     // チャンネルの分からない局 (エージェントの控えの写しがまだ無い) は出さない
-    if (channel === null || agent === null) continue;
+    if (place === undefined) continue;
+    const { agent, channel } = place;
     const key = `${type}:${channel}`;
     const from = type === "CATV" ? origin(row.network_id) : null;
     const entry = channels.get(key) ?? {
@@ -187,7 +194,7 @@ export function load() {
     channels: coverage(),
     /** 番組表を集めている最中の様子。1 チャンネルに数分かかる */
     collect: collectState(),
-    /** チャンネルを書き換えたお知らせが出ているか。出ていれば、画面を開いたところで消す (`seenLineup`) */
+    /** チャンネルを書き換えた通知が出ているか。出ていれば、画面を開いたところで消す (`seenLineup`) */
     lineupChanged: lineupNotice() !== null,
   };
 }
@@ -229,7 +236,7 @@ export const actions = {
   },
 
   /**
-   * チャンネルを書き換えたお知らせを消す。**開いた画面が呼ぶ** (`Channels.svelte`)。load で消すと、
+   * チャンネルを書き換えた通知を消す。**開いた画面が呼ぶ** (`Channels.svelte`)。load で消すと、
    * リンクに指を乗せただけの先読みでも消える
    */
   seenLineup: () => {
@@ -254,7 +261,9 @@ export const actions = {
       if (!result.removed) return fail(409, { message: result.message });
       return { success: true, scan: result.message };
     } catch (error) {
-      return fail(502, { message: `局を削除できませんでした: ${error}` });
+      return fail(502, {
+        message: `局を削除できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+      });
     }
   },
 

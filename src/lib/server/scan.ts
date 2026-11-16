@@ -21,8 +21,8 @@
  * - SKY と CATV は、番組表 (EIT) がスクランブルされずに来たかを控えに書く。読めれば復号できない局も番組表に出す (`types.epgReadableService`)
  * - 1 チャンネルにつき最大 30 秒待ち、NIT と SDT が**両方**揃ったら受信できたとみなす。CATV は SDT だけで揃ったとみなす
  *   (`ServiceReader` の `requireNit`)
- * - Mirakurun と同じサービス種別を残す (`psi.SERVICE_TYPES`。ラジオ・データも入り、
- *   映像の無いものは取り込みで落とす: `schema.DIGITAL_TV`)
+ * - Mirakurun と同じサービス種別を残す (`psi.SERVICE_TYPES`。ラジオ・データも入る)。局ごとに部分受信の局 (ワンセグ) かを
+ *   控えに書き (NIT の部分受信記述子)、取り込みはワンセグとエンジニアリングなどを落とす (`schema.importedService`)
  *
  * **録画中でも実行できる。** 選局はエージェントの取り合いに加わるので、録画が
  * 使っているチューナーは取られないだけ (空きが無ければ待ち、飛ばさない)。
@@ -52,7 +52,11 @@ import {
   entranceOrder,
   lineupChanges,
   lineupJobs,
+  listedEntries,
+  listedNetworks,
   parseStored,
+  restChannels,
+  retryableChannel,
   type StoredCableLineup,
   toStored,
 } from "./cable";
@@ -76,6 +80,7 @@ import {
   putChannels,
   TunerBusyError,
   tunerList,
+  TunerUnusableError,
 } from "./tuner";
 
 /**
@@ -138,12 +143,6 @@ export type ScanKind = (typeof SCAN_KINDS)[number];
 const PASSTHROUGH_RANGE = { min: 13, max: 63 };
 
 /**
- * ケーブル (ISDB-C) の総当たりで回すチャンネル。エージェントの選局表の `QC13`〜`QC63` (C13〜C63 の周波数)・`QU13`〜`QU62` (UHF)・
- * `QV1`〜`QV12` (VHF) (docs/agent.md「選局表」)。ケーブル局の NIT を読めたら、残りはその一覧に置き換える (`cable.ts`)
- */
-export { catvChannels };
-
-/**
  * TSMF (1 つの搬送波に複数の TS を束ねる) の搬送波で、0 番目のほかに選局する TS (`QC30:1`〜)。
  * `streams` は選局の答えの `X-Denpa-Tsmf-Streams` (`tuner.openChannel`)。0 番目は名前に番号を付けない。
  * 番号の付いたもの (2 つ目から) は束ね直さない
@@ -198,7 +197,7 @@ export function skyChannels(): string[] {
  * 地上波で選局する物理チャンネルの一覧。エージェントが受け付ける書き方で返す。
  *
  * **範囲は決め打ち。** 放送で使う物理チャンネルは決まっていて、狭めても
- * 総当たりの時間が少し減るだけ。狭めた結果 見つからない局が出るほうが困る
+ * 総当たりの時間が少し減るだけ。狭めた結果、見つからない局が出るほうが困る
  */
 export function channelsFor(type: "GR" | "PASSTHROUGH"): string[] {
   const uhf = Array.from(
@@ -383,6 +382,7 @@ export async function readTlvServices(
           networkId: own.originalNetworkId,
           transportStreamId: own.tlvStreamId,
           remoteControlKeyId: null,
+          partialReception: false,
         })),
       error: null,
       unnamed: true,
@@ -449,6 +449,8 @@ export function channelEntry(
         serviceId: service.serviceId,
         serviceType: service.serviceType,
         name: service.name,
+        // 部分受信の局 (ワンセグ) は取り込まない (`schema.importedService`)。新しいスキャンはどの局にも書く
+        partialReception: service.partialReception,
         ...(caSystemIdsOf === undefined
           ? {}
           : { caSystemIds: caSystemIdsOf(service.serviceId) }),
@@ -607,12 +609,26 @@ class Scanner {
   /** 中断の合図。押されたら選局を切り、残りのチャンネルには行かない */
   private readonly aborter = new AbortController();
   private readonly found = new Map<string, AgentChannel>();
-  /** 電波が来た(TS が 1 バイトでも出た)チャンネル数。種別ごと */
+  /** 電波が来た (TS が 1 バイトでも出た) チャンネル数。種別ごと */
   private readonly tuned = new Map<ChannelType, number>();
   /** 電波は来たのに局情報が揃わなかったチャンネル。1 周したあとで回し直す */
   private retry: Job[] = [];
   /** 放送の一覧を読めた衛星の種別。読めなかった種別は控えを書き換えない (`runScan`) */
   readonly lineups = new Set<SatelliteType>();
+  /**
+   * エージェントが「電源を入れ直すまで使えない」と返した並び (`work`)。止めて、残りの並びで回す。
+   * 並びはチューナーと 1 対 1 ではない (どのチューナーで選局するかはエージェントが選ぶ) が、503 を受けるたびに 1 つ止めるので、止める数は使えないチューナーの数を超えない (推定)
+   */
+  private readonly retired = new Set<AgentTuner>();
+  /** 503 を受けた種別と、そのときの理由。受けられる並びが全部止まったら `unusable` に移す (`dropUnusable`) */
+  private readonly pending = new Map<ChannelType, string>();
+  /** 総当たりで回す種別 (`ground`)。`dropUnusable` はこの種別だけを見る */
+  private readonly scanning = new Set<ChannelType>();
+  /**
+   * 受けられる並びが全部止まった種別と、エージェントが返した理由。その種別の残りのチャンネルは回さず、
+   * 控えも書き換えない (`runScan`)。1 件も見つからなければ、この理由をスキャンの失敗に出す
+   */
+  readonly unusable = new Map<ChannelType, string>();
   /**
    * 局を探している間に流れてきた番組表。**ついでに取得しておく。** NIT と SDT を待つ
    * 数秒〜十数秒で「いま・次」と今日ぶんくらいは来るので、スキャンが終わった
@@ -663,8 +679,11 @@ class Scanner {
       ...satellites,
     ]);
     this.keepUnlocked();
+    this.addListed();
 
+    // 選局できるチューナーが無くなった種別 (`dropUnusable`) は、回し終えていないので返さない (控えを書き換えない。`runScan`)
     const sorted = [...this.found.entries()]
+      .filter(([, entry]) => !this.unusable.has(entry.type))
       .sort(([a], [b]) => {
         const at = (key: string) => key.indexOf(":");
         const typeA = a.slice(0, at(a));
@@ -753,10 +772,13 @@ class Scanner {
     }
     const added = jobs.filter((job) => !cable.seen.has(job));
     for (const job of added) cable.seen.add(job);
-    // 一覧に無いチャンネルは、再送信の TS が NIT に載っていなければ総当たりの残りとして後ろに戻す
-    const rest = lineup.others
-      ? []
-      : pulled.filter((channel) => !cable.seen.has(channel));
+    // 一覧に無いチャンネルのうち、総当たりの残りとして後ろに戻すもの (`restChannels`)
+    const rest = restChannels(
+      pulled,
+      cable.seen,
+      lineup.others,
+      cable.previous,
+    );
     for (const channel of rest) cable.seen.add(channel);
     queue.unshift(
       ...added.map((channel) => ({ type: "CATV" as const, channel })),
@@ -774,45 +796,99 @@ class Scanner {
     });
   }
 
+  /** 試し直して残す搬送波か (`cable.retryableChannel`)。NIT に TS が載っているネットワーク (`listedNetworks`) は、呼ぶたびに読めた NIT から数え直す */
+  private retryable(cable: CableScan): (channel: string) => boolean {
+    const networks = listedNetworks(cable.lineups);
+    return (channel) =>
+      retryableChannel(channel, cable.listed, cable.previous, networks);
+  }
+
   /**
    * **ケーブル局の NIT に載っているのにロックしなかったチャンネルを、間をあけて試し直す** (`CABLE_RETRY`)。
+   * 前の控えにある搬送波のうち、NIT に TS が載っていないネットワークのものも同じく試し直す (`cable.retryableChannel`)。
+   * NIT を読めた回は、そのあと総当たりでロックしなかった残りのチャンネルも、最後に 1 回だけ試し直す。ロックは回によってできたりできなかったりするため。
+   * NIT を読めなかった回は、残りが 100 チャンネル前後になってスキャンが長く延びるので試し直さない。
    * チューナーは選局のたびにエージェントが選ぶので、ほかのチューナーで開くこともある
    */
   private async retryCable(workers: AgentTuner[]): Promise<void> {
     const cable = this.cable;
     if (cable === undefined) return;
     for (const wait of CABLE_RETRY) {
+      // 受けられるチューナーが使えなくなった (`dropUnusable`) なら、待って試し直しても選局できない
+      if (this.unusable.has("CATV")) return;
       if (this.aborted) return;
       const jobs = [...cable.unlocked]
-        .filter((channel) => cable.listed.has(channel))
+        .filter(this.retryable(cable))
         .map((channel) => ({ type: "CATV" as const, channel }));
-      if (jobs.length === 0) return;
+      if (jobs.length === 0) break;
       this.onProgress({
-        line: `CATV: 放送の一覧にあるのにロックしなかった ${jobs.length} チャンネルを、${wait / 1000} 秒後にもう一度試します`,
+        line: `CATV: NIT か前のスキャンにあるのにロックしなかった ${jobs.length} チャンネルを、${wait / 1000} 秒後にもう一度試します`,
       });
       await pause(wait, this.aborter.signal);
       if (this.aborted) return;
       await Promise.all(
-        workers.map((tuner) => this.work(tuner.types, jobs, false)),
+        this.live(workers).map((tuner) => this.work(tuner, jobs, false)),
       );
+      this.dropUnusable(workers, jobs);
     }
+    if (this.unusable.has("CATV") || this.aborted) return;
+    if (cable.lineups.length === 0) return;
+    const retryable = this.retryable(cable);
+    const rest = [...cable.unlocked]
+      .filter((channel) => !retryable(channel))
+      .map((channel) => ({ type: "CATV" as const, channel }));
+    if (rest.length === 0) return;
+    this.onProgress({
+      line: `CATV: 総当たりでロックしなかった ${rest.length} チャンネルを、最後にもう一度試します`,
+    });
+    await Promise.all(
+      this.live(workers).map((tuner) => this.work(tuner, rest, false)),
+    );
+    this.dropUnusable(workers, rest);
   }
 
   /**
    * **ロックしなかった CATV のチャンネルは、前の控えにあれば残す。** ロックが不安定な回線で、1 回のスキャンで
-   * 搬送波が消えないようにする。ケーブル局の NIT を読めた回は、一覧に載っているチャンネルだけを残す (載っていないものは無くなった搬送波)
+   * 搬送波が消えないようにする。ケーブル局の NIT を読めた回は、NIT に載っているチャンネルと、NIT に TS が載っていないネットワークの
+   * チャンネルを残す。NIT に TS が載っているネットワークで、NIT に無いものは無くなった搬送波とみなす (`cable.retryableChannel`)。
+   * 前の控えにも無い NIT のチャンネルは、NIT の service_list_descriptor から入れる (`addListed`)
    */
   private keepUnlocked(): void {
     const cable = this.cable;
     if (cable === undefined || this.aborted) return;
+    const retryable = this.retryable(cable);
     for (const entry of cable.previous) {
       const key = `CATV:${entry.channel}`;
       if (this.found.has(key) || !cable.unlocked.has(entry.channel)) continue;
-      if (cable.lineups.length > 0 && !cable.listed.has(entry.channel))
-        continue;
+      if (cable.lineups.length > 0 && !retryable(entry.channel)) continue;
       this.found.set(key, entry);
       this.onProgress({
         line: `${entry.channel}: ロックしなかったため、前のチャンネルを残します`,
+      });
+    }
+  }
+
+  /**
+   * **ケーブル局の NIT に載っているのにロックせず、前の控えにも無い TS は、NIT の service_list_descriptor から入れる** (`cable.listedEntries`)。
+   * 局名は前の控えか仮の名前で、番組表の取得が SDT[actual] を受信したら放送の局名にする (`tlv-names.ts`)。
+   * 番組表とライブにも出し、選局できなければ、ほかのチャンネルと同じく受信できないチャンネルになる
+   */
+  private addListed(): void {
+    const cable = this.cable;
+    if (cable === undefined || this.aborted || cable.lineups.length === 0)
+      return;
+    const entries = listedEntries(
+      cable.lineups,
+      (channel) =>
+        cable.unlocked.has(channel) && !this.found.has(`CATV:${channel}`),
+      knownNames(cable.previous),
+      SERVICE_TYPES,
+      unnamedService,
+    );
+    for (const entry of entries) {
+      this.found.set(`CATV:${entry.channel}`, entry);
+      this.onProgress({
+        line: `${entry.channel}: ロックしなかったため、NIT に載っている ${entry.services.length} 局を入れます`,
       });
     }
   }
@@ -821,6 +897,7 @@ class Scanner {
   storedCable(): StoredCableLineup | null {
     const cable = this.cable;
     if (cable === undefined || cable.entrance === null) return null;
+    if (this.unusable.has("CATV")) return null;
     return toStored(cable.entrance, cable.lineups);
   }
 
@@ -911,6 +988,7 @@ class Scanner {
     tuners: AgentTuner[],
   ): Promise<void> {
     const queue: Job[] = [];
+    for (const [type] of targets) this.scanning.add(type);
     for (const [type, channels] of targets) {
       if (!tuners.some((tuner) => tuner.types.includes(type))) {
         this.onProgress({
@@ -935,12 +1013,15 @@ class Scanner {
        */
       do {
         await Promise.all(
-          workers.map((tuner) => this.work(tuner.types, queue)),
+          this.live(workers).map((tuner) => this.work(tuner, queue)),
         );
       } while (
         !this.aborted &&
-        queue.some((job) => workers.some((t) => t.types.includes(job.type)))
+        queue.some((job) =>
+          this.live(workers).some((t) => t.types.includes(job.type)),
+        )
       );
+      this.dropUnusable(workers, queue);
 
       /*
        * 電波は来たのに揃わなかったチャンネルは、もう一度だけ回す。
@@ -954,8 +1035,9 @@ class Scanner {
       if (retry.length > 0 && !this.aborted) {
         this.onProgress({ line: `${retry.length}ch をもう一度試します` });
         await Promise.all(
-          workers.map((tuner) => this.work(tuner.types, retry, false)),
+          this.live(workers).map((tuner) => this.work(tuner, retry, false)),
         );
+        this.dropUnusable(workers, retry);
       }
       await this.retryCable(workers);
     }
@@ -982,6 +1064,36 @@ class Scanner {
     }
   }
 
+  /** 止めていない並び (`retired`) */
+  private live(workers: AgentTuner[]): AgentTuner[] {
+    return workers.filter((tuner) => !this.retired.has(tuner));
+  }
+
+  /**
+   * **受けられる並びが全部止まった種別は、残りのチャンネルを回さない。** 列から外して飛ばした数に入れ、エージェントが返した理由を 1 行出す。
+   * 同じ機材のエラーでチャンネルを 1 つずつ落とさないため
+   */
+  private dropUnusable(workers: AgentTuner[], queue: Job[]): void {
+    for (const [type, reason] of this.pending) {
+      // このスキャンで回していない種別は数えない (止めた並びが受けていただけ)
+      if (!this.scanning.has(type)) continue;
+      if (this.live(workers).some((tuner) => tuner.types.includes(type)))
+        continue;
+      this.pending.delete(type);
+      this.unusable.set(type, reason);
+      const before = queue.length;
+      queue.splice(
+        0,
+        queue.length,
+        ...queue.filter((job) => job.type !== type),
+      );
+      this.onProgress({
+        line: `${type}: 選局できるチューナーがありません。${reason}`,
+        skipped: before - queue.length,
+      });
+    }
+  }
+
   /** そのチューナーで引ける先頭の 1 件を取り出す。引けないものは飛ばして次を見る */
   private take(queue: Job[], types: ChannelType[]): Job | undefined {
     const at = queue.findIndex((job) => types.includes(job.type));
@@ -997,10 +1109,11 @@ class Scanner {
    * first が false のときは数え直さない (同じチャンネルを 2 回数えないため)
    */
   private async work(
-    types: ChannelType[],
+    tuner: AgentTuner,
     queue: Job[],
     first = true,
   ): Promise<void> {
+    const { types } = tuner;
     for (;;) {
       if (this.aborted) return;
       const job = this.take(queue, types);
@@ -1059,6 +1172,19 @@ class Scanner {
           queue.unshift(job);
           await Bun.sleep(BUSY_RETRY);
           continue;
+        }
+        /*
+         * エージェントが選んだチューナーが、電源を入れ直すまで使えない (503)。**チャンネルは列に戻し、この並びを止める。**
+         * 残りの並びが回す。受けられる並びが全部止まれば、その種別の残りは回さない (`dropUnusable`)
+         */
+        if (error instanceof TunerUnusableError) {
+          queue.unshift(job);
+          this.retired.add(tuner);
+          // この並びが受けていた種別は全部、ほかに受けられる並びが残っているかを確かめ直す (`dropUnusable`)。残っていなければ回さない
+          for (const kind of types)
+            if (!this.pending.has(kind))
+              this.pending.set(kind, error.reason ?? error.message);
+          return;
         }
         const counts = first ? { scanned: 1 } : {};
         // ロックしなかった。ケーブル局の NIT に載っていれば試し直し、前の控えにあれば残す (`retryCable`・`keepUnlocked`)
@@ -1272,8 +1398,16 @@ async function runScan(
 
     // 1 件も見つからないまま上書きすると、今まで録れていた局まで消える
     if (results.every((result) => result.found.length === 0)) {
+      // 選局できるチューナーが無くなった種別があれば、エージェントが返した理由を出す (アンテナを疑わせない)
+      const reasons = [
+        ...new Set(
+          results.flatMap(({ scanner }) => [...scanner.unusable.values()]),
+        ),
+      ];
       throw new Error(
-        "チャンネルが 1 件も見つかりませんでした。チューナーとアンテナを確認してください",
+        reasons.length > 0
+          ? `チャンネルが 1 件も見つかりませんでした。${reasons.join("。")}`
+          : "チャンネルが 1 件も見つかりませんでした。チューナーとアンテナを確認してください",
       );
     }
 
@@ -1288,7 +1422,9 @@ async function runScan(
       // 放送の一覧を読めなかった衛星の種別は置き換えない (今のチャンネルを消さない)
       const replaced = targets
         .map(([type]) => type)
-        .filter((type) => !isSatellite(type) || scanner.lineups.has(type));
+        .filter((type) => !isSatellite(type) || scanner.lineups.has(type))
+        // 選局できるチューナーが無くなった種別も置き換えない (回し終えていない)
+        .filter((type) => !scanner.unusable.has(type));
       // 預ける先はスキャンを回したエージェント
       await putChannels(found, replaced, scanner.agent);
       // ケーブル局の NIT から作った一覧を控えに書く (次のスキャンの入口と、搬送波の増減)。読めなかった回は前の控えを残す
@@ -1321,10 +1457,10 @@ async function runScan(
     );
 
     /*
-     * 局が入れ替わった。**取り込み直して、番組表を集め直す。**
+     * 局が入れ替わった。**取り込み直して、番組表を取得し直す。**
      *
      * 番組表を持っているのは denpa なので、**待つ相手がいない**。
-     * 見つかった局をその場で取り込んで、そのまま集めに行く
+     * 見つかった局をその場で取り込んで、そのまま取得する
      */
     await sync().catch(() => undefined);
     // 局が入ったので、スキャン中に取得した番組表を書ける
@@ -1336,7 +1472,7 @@ async function runScan(
           saved += savePrograms(events, { type });
       if (saved > 0) {
         settle();
-        // 立った予約の取り合いを裁き直す (`settle` は裁かない。ほかの呼び手と同じ)
+        // 立った予約の取り合いを裁き直す (`settle` は裁かない。ほかの呼び出し元と同じ)
         await resolveConflicts();
       }
     } catch (error) {
@@ -1360,7 +1496,7 @@ async function runScan(
 /**
  * 選んだ種別から、回すチャンネルを決める。知らない種別と重複は除く。
  * パススルー (`PASSTHROUGH`) は UHF も回すので、地上波と両方来ても UHF を 2 回回さない。
- * CATV は QC・QU・QV を (`catvChannels`)、SKY は H01〜H105 を総当たりする。
+ * CATV は QC・QU・QV を (`cable.catvChannels`。NIT を読めたら残りを一覧に置き換える)、SKY は H01〜H105 を総当たりする。
  * 衛星は総当たりしないので、チャンネルの一覧は持たない。進み具合では 1 つと数える
  * (放送の一覧を 1 回読む。CS はネットワークが 2 つなので 2 回選局するが、数は 1 のまま)
  */

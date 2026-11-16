@@ -1,7 +1,7 @@
 /**
  * **1 局に絞った TS から、映像と音声の PES を取り出す** (denpa のライブを変換せずに送る経路。docs/stream.md#放送そのままmpeg-2を送る)。
  *
- * エンコードする経路ではここを ffmpeg がやっていた。変換せずに送ると TS がそのままブラウザへ来るので、
+ * エンコードする経路では ffmpeg が PES を取り出す。変換せずに送ると TS がそのままブラウザへ来るので、
  * 映像も音声も WASM のデコーダ (denpa の `wasm/decoder.c`) に渡す前に、
  * こちらで PES に戻す。サーバが 1 局に絞ってある (`ServiceFilter`) ので PAT に
  * 載っている局は 1 つだけで、その PMT を読んで映像 1 本と音声 (並んだ順) を取り出す。
@@ -17,6 +17,7 @@ import {
   PID_PAT,
   pmtStreams,
   PmtTracker,
+  STREAM_AAC,
 } from "./psi.js";
 
 /** PTS・PCR の刻み (90kHz)。denpa の取り決めの時刻もこの刻み (docs/stream.md#websocket-プロトコル) */
@@ -24,9 +25,8 @@ export const CLOCK = 90_000;
 /** PTS の一周 (33 ビット)。26.5 時間 */
 export const WRAP = 2 ** 33;
 
-/** PMT の stream_type。**放送の映像は MPEG-2、音声は ADTS の AAC** (ARIB STD-B32) */
+/** PMT の stream_type。**放送の映像は MPEG-2、音声は ADTS の AAC** (ARIB STD-B32。AAC は psi.ts の `STREAM_AAC`) */
 const STREAM_MPEG2 = 0x02;
-const STREAM_AAC = 0x0f;
 
 export interface Pes {
   pid: number;
@@ -99,7 +99,7 @@ export class PesDemuxer {
   /** 絞ってあるので局は 1 つだけのはず。万一複数あっても先頭を採る */
   private readonly pmt = new PmtTracker();
   private readonly partial = new Map<number, Partial>();
-  /** いま分かっている ES。**変わったら `feed` の返りで知らせる** */
+  /** いま分かっている ES。**変わったら `feed` の戻り値 (`changed`) で知らせる** */
   streams: Streams = { video: null, audio: [] };
   /** デコードする音声の PID。**選ばれた 1 本だけ**組み立てる (他は捨てる) */
   audioPid: number | null = null;
@@ -272,7 +272,7 @@ export class AdtsSplitter {
           data: buffer.slice(at, at + length),
           pts: this.next,
           sampleRate: rate,
-          // 0 は「中身に書いてある」(PCE)。放送のデュアルモノはここに来るので、2 本とみなす
+          // 0 は「中身に書いてある」(PCE)。放送のデュアルモノはここに来るので、2 チャンネルとみなす
           channels: channels === 0 ? 2 : channels,
           duration,
         });

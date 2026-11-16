@@ -21,7 +21,7 @@ import { run } from "./stream";
  * `encoder.ts`)。ここの `scan` が自分で ffmpeg を起こすのは、ロゴを覚え直して枠だけ読み直すとき、
  * CM 検出だけやり直すとき、エンコードのあとに音だけ読み直すとき。
  *
- * **材料は標準エラーに出させない。** ffmpeg はログを書けなければ黙って捨てるので、エンコードと一緒に読むと
+ * **材料は標準エラーに出させない。** ffmpeg は書き切れないログの行をエラーにせず捨てるので、エンコードと一緒に読むと
  * 行が落ちる (実測 30 分で 54712 行のうち 1 行)。ファイルへ書かせれば落ちない。標準エラーから読むのはコンテナの尺 (`Duration:`) だけ。
  */
 
@@ -87,7 +87,7 @@ export function scanLine(line: string): { duration: number } | null {
 const FRAME_TIME = /pts_time:\s*(-?[\d.]+)/;
 
 /**
- * `metadata=mode=print` の書き出しから、コマごとの時刻と `scdet` の点を読み取る。1 コマ 2 行:
+ * `metadata=mode=print` の書き出しから、コマごとの時刻と `scdet` の点を読み取る。1 コマにつき次の 2 行。
  *
  *     frame:0    pts:58316   pts_time:0.647956
  *     lavfi.scd.score=0.000
@@ -152,7 +152,7 @@ export function scanOutputs(
      */
     const filters = [
       "scdet=threshold=100",
-      `metadata=mode=print:key=lavfi.scd.score:file=${files.cuts}`,
+      `metadata=mode=print:key=lavfi.scd.score:file=${filterPath(files.cuts)}`,
     ];
     if (want.logo) filters.push(want.logo.filter, "format=gray");
     args.push(
@@ -174,13 +174,25 @@ export function scanOutputs(
       "-map",
       "0:a:0",
       "-af",
-      `silencedetect=noise=${SILENCE_NOISE}:d=${SILENCE_MIN},ametadata=mode=print:file=${files.silences}`,
+      `silencedetect=noise=${SILENCE_NOISE}:d=${SILENCE_MIN},ametadata=mode=print:file=${filterPath(files.silences)}`,
       "-f",
       "null",
       "-",
     );
   }
   return args;
+}
+
+/**
+ * パスを ffmpeg のフィルタの引数に入れる形にする (ffmpeg-filters の「Notes on filtergraph escaping」)。
+ * Windows の一時フォルダ (`C:\Windows\Temp\denpa-scan-…`) は、`:` が引数の区切りに、`\` がエスケープに読まれて崩れる (#2816)。
+ * `\` は `/` に替え (Windows の ffmpeg も読める)、引数の中の `'` と `:` を `\` でエスケープしてから、フィルタの並びの側で `'…'` で囲む。
+ * `'…'` の中の `'` は、いったん閉じて `\'` を挟んで開き直す
+ */
+export function filterPath(path: string): string {
+  // `\` は `/` に替えたあとなので残らないが、エスケープの対象には入れておく (引数の中の `\` はエスケープの印)
+  const value = path.replaceAll("\\", "/").replace(/[\\':]/g, "\\$&");
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /** ffmpeg の出力を読んで材料にする。エンコードと一緒に読むときも、自分で読むときも同じもの */

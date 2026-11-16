@@ -16,7 +16,7 @@
  * (Chrome・Edge) だけ。無ければ字幕無しの小窓のまま。
  *
  * **重さ**: 字幕が出ている間は 1080 のコマを毎回描き直す。GPU の無いヘッドレスの Chromium
- * (SwiftShader) で 30fps の 1920x1080 を測ると、素通しの 3% に対して 1 コアの 35% ほど。
+ * (SwiftShader) で 30 fps の 1920x1080 を測ると、素通しの 3% に対して 1 コアの 35% ほど。
  * 1280 幅に縮めて描くと拡大縮小のぶんかえって重かった (40%) ので、そのままの大きさで描く。
  * 用意するのは小窓に出している間だけ (`pip.svelte.ts`)
  */
@@ -64,7 +64,7 @@ export function captionDrawn(
 export interface Composed {
   /** 字幕を重ねたストリーム。代わりの `<video>` に繋ぐ */
   readonly stream: MediaStream;
-  /** 畳む。**元のストリームも止める** (`captureStream` で取ったものは止めないと取り続ける) */
+  /** 破棄する。**元のストリームも止める** (`captureStream` で取ったものは止めないと取り続ける) */
   stop: () => void;
 }
 

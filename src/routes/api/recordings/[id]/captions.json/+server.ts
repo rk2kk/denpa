@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 
+import { DRCS_REPLACE } from "@danything/arib/b24-tables";
 import { joinBytes } from "@danything/arib/bytes";
+import { CAPTION_TEXT_VERSION } from "@danything/arib/caption-text";
 import { error } from "@sveltejs/kit";
 
 import { pagesFromMkv } from "#lib/server/captions.js";
@@ -22,7 +25,7 @@ import { run } from "#lib/server/stream.js";
  * 画像の字幕 (PGS) は読まずに 404 を返す (扱いは docs/encode.md「字幕は放送の ARIB 字幕をそのまま」)。
  *
  * **まだエンコードできていない録画は元の TS から抜く** (`playback.captionArgs`)。時刻は観る画面の物差し
- * (TS の先頭を 0) に揃える。TS は丸ごと舐めるのでエンコードしたものより時間がかかる (1 時間の BS で 7GB)。
+ * (TS の先頭を 0) に揃える。TS は先頭から末尾まで読むのでエンコードしたものより時間がかかる (1 時間の BS で 7 GB)。
  * エンコードが終わると物差しが変わるので、こちらは覚えない (同時に来たリクエストだけ、1 回の取り出しを共有する)
  *
  * **4K の局の録画 (TTML) は ffmpeg を通さない** (`playback.uhdCaptionSource`)。エンコード済みがあれば、その隣に置いた
@@ -49,8 +52,17 @@ const extracting = sharing<Made>();
 const MISSING = "字幕がありません";
 
 /**
+ * 字幕を作る側のバージョン。JSON の形式 (`CAPTION_TEXT_VERSION`) と、外字の置き換え表の中身の MD5 の先頭 8 桁。
+ * 表に足したり値を直したりしたら、端末に控えてある古い JSON (置き換える前の画像) を 304 で使い続けさせない
+ */
+const CAPTION_TAG = `c${CAPTION_TEXT_VERSION}.${createHash("md5")
+  .update(JSON.stringify([...DRCS_REPLACE]))
+  .digest("hex")
+  .slice(0, 8)}`;
+
+/**
  * 字幕を抜いてデコードし、JSON にする。字幕を持たない (抜けたものが空・画像の字幕) ならその理由。
- * **ffmpeg が降りた・上限で切れたときは覚えない** (404 を投げる)。時間切れや、ffmpeg を起こせなかっただけかもしれないため
+ * **ffmpeg が失敗で終わった・上限で切れたときは覚えない** (404 を投げる)。時間切れや、ffmpeg を起こせなかっただけかもしれないため
  */
 async function build(argv: string[], ts: boolean): Promise<Made> {
   const parts: Uint8Array[] = [];
@@ -67,7 +79,7 @@ async function build(argv: string[], ts: boolean): Promise<Made> {
       size += chunk.length;
     },
   });
-  // 字幕を持たない番組のほうが多い (ffmpeg は「そのストリームは無い」で、動画を読む前に降りる)
+  // 字幕を持たない番組のほうが多い (ffmpeg は「そのストリームは無い」で、動画を読む前に終わる)
   if (code !== 0) error(404, MISSING);
   // 上限で切れた。壊れたファイルの途中までを覚えて返し続けない
   if (over) error(404, MISSING);
@@ -127,11 +139,15 @@ export async function GET({ params, request }) {
   /*
    * **持たせてよいが、毎回確かめさせる** (チャプターと同じ)。再エンコードしても置き場所は同じ名前のことがあり、
    * 捨てる先頭の長さが変われば字幕の時刻も変わる。`no-cache` + ETag (ファイルの大きさと更新時刻) にして、変わっていなければ 304。
-   * 元の TS はエンコードが終わると物差しが変わるので控えさせない
+   * 元の TS はエンコードが終わると物差しが変わるので控えさせない。
+   * **ETag には字幕を作る側の変化も入れる** (`CAPTION_TAG`)。外字の置き換え表に足すと、同じファイルでも作り直した JSON を渡す
    */
   const stat =
     path === null ? undefined : statSync(path, { throwIfNoEntry: false });
-  const tag = stat === undefined ? null : fileEtag(stat);
+  const tag =
+    stat === undefined
+      ? null
+      : fileEtag(stat).replace(/"$/, `-${CAPTION_TAG}"`);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Cache-Control": ts ? "no-store" : "private, no-cache",

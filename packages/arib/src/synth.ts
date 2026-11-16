@@ -445,7 +445,7 @@ export function satelliteDeliveryDescriptor(
 
 /**
  * ケーブルの分配の記述子 (0x44)。周波数は Hz で渡す (111000000)。
- * 既定は TS が 1 つの搬送波 (多重フレーム型式番号 0xF)・RS(204,188)・64QAM・5.274 Msps・内符号なし
+ * 既定は TS が 1 つの搬送波 (多重フレーム型式番号 0xF)・RS(204,188)・64QAM・5.274 Msym/s・内符号なし
  */
 export function cableDeliveryDescriptor(
   frequency: number,
@@ -756,6 +756,66 @@ export function ddbSection(
   ]);
 }
 
+/**
+ * ストリーム記述子のセクション (table_id 0x3D)。**イベントメッセージと NPT 参照を運ぶ。**
+ * table_id_extension の上位 4 ビットが data_event_id
+ */
+export function streamDescriptorSection(
+  descriptors: number[][],
+  dataEventId = 0x0f,
+  version = 0,
+): Uint8Array {
+  return withCrc([
+    ...head(0x3d, ((dataEventId & 0x0f) << 12) | 0x0fff, { version }),
+    ...descriptors.flat(),
+  ]);
+}
+
+/** 33 ビットの値を、上位 7 ビットを 1 で埋めた 5 バイトに */
+const be33 = (value: number) => [
+  0xfe | Math.floor(value / 2 ** 32),
+  ...be32(value % 2 ** 32),
+];
+
+/**
+ * 汎用イベントメッセージ記述子 (0x40)。`npt` を渡せば時刻指定 (time_mode 2)、渡さなければすぐ起きるもの (time_mode 0)。
+ * `id` は event_msg_id の上位 8 ビット (message_id)、`version` は下位 8 ビット (message_version)
+ */
+export function eventMessageDescriptor(options: {
+  group?: number;
+  id: number;
+  version?: number;
+  npt?: number;
+  data?: number[];
+}): number[] {
+  const { group = 0, id, version = 1, npt, data = [] } = options;
+  const body = [
+    ...be(((group & 0x0fff) << 4) | 0x0f),
+    npt === undefined ? 0 : 2,
+    ...(npt === undefined ? [0xff, 0xff, 0xff, 0xff, 0xff] : be33(npt)),
+    0x00, // event_msg_type
+    id & 0xff,
+    version & 0xff,
+    ...data,
+  ];
+  return [0x40, body.length, ...body];
+}
+
+/** NPT 参照記述子 (0x17)。STC が `stc` のとき NPT が `npt` で、そこから同じ速さ (scale 1/1) で進む */
+export function nptReferenceDescriptor(stc: number, npt: number): number[] {
+  const body = [
+    0x00, // post_discontinuity_indicator 0・dsm_content_id 0
+    ...be33(stc),
+    0xff,
+    0xff,
+    0xff, // reserved (NPT_Reference の手前の 31 ビットのうち 24)
+    ...be33(npt),
+    ...be(1), // scale_numerator
+    ...be(1), // scale_denominator
+  ];
+  return [0x17, body.length, ...body];
+}
+
 /** ロゴデータモジュール (ARIB STD-B21)。カルーセルで運ばれる中身 */
 export function logoModule(
   logoType: number,
@@ -774,8 +834,8 @@ export function logoModule(
 
 /*
  * --- データ放送のテストで使う定番の割り振り ---
- * denpa の bml / data-timeline / recorded-bml の 3 つのテストが、同じ表と同じ組み立てを
- * それぞれに書いていた。番号そのものに意味は無く、揃っていることに意味がある。
+ * denpa の databroadcast・data-timeline・recorded-bml・ts-head のテストが、同じ表と同じ組み立てを使う。
+ * 番号そのものに意味は無く、揃っていることに意味がある。
  */
 export const BML_TS = {
   service: 1024,
@@ -822,7 +882,7 @@ export function multipartModule(
   return new TextEncoder().encode(out);
 }
 
-/** PMT の ES に付ける application_signalling_descriptor (0x6F)。**AIT の在り処の印** */
+/** PMT の ES に付ける application_signalling_descriptor (0x6F)。**AIT の在りかの印** */
 export function aitSignallingDescriptor(
   applicationType = 0x0010,
   version = 1,

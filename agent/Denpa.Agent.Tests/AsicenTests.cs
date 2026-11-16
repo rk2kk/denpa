@@ -313,7 +313,7 @@ public class AsicenTests
             }
 
             var selection = AsicenDaemon.Hardware("1-2", firmware, true, () => [w3u3], Lend);
-            // 複製を作るのは起動する直前 (Userland.Start の中)。選んだだけでは作らない
+            // 複製を作るのは起動する直前 (AsicenUserland.Start の中)。選んだだけでは作らない
             await Assert.That(lent).IsEmpty();
             await Assert.That(selection.Args).IsEquivalentTo(new[] { "--firmware", firmware, "--allow-lnb-power" });
             using var inherit = selection.Lend!();
@@ -401,7 +401,6 @@ public class AsicenTests
         if (Environment.GetEnvironmentVariable("ASICEN_USERLAND_DIR") is not null) return;
         await Assert.That(AsicenUserland.Installed).IsFalse();
         await Assert.That(AsicenUserland.Detect()).IsEmpty();
-        await Assert.That(AsicenUserland.Cards()).IsEmpty();
     }
 
     [Test]
@@ -430,11 +429,11 @@ public class AsicenTests
         }
 
         var t27 = ChannelTable.Parse("T27")!;
-        await Assert.That(AsicenTuner.TuneRequest(epoch, 1, t27, t27.StreamId)).IsEquivalentTo(With5s(AsicenRecorded.TuneT27));
+        await Assert.That(AsicenTuner.TuneRequest(epoch, 1, t27)).IsEquivalentTo(With5s(AsicenRecorded.TuneT27));
         var bs03 = ChannelTable.Parse("BS03:16433")!;
-        await Assert.That(AsicenTuner.TuneRequest(epoch, 5, bs03, bs03.StreamId)).IsEquivalentTo(With5s(AsicenRecorded.TuneBs03));
+        await Assert.That(AsicenTuner.TuneRequest(epoch, 5, bs03)).IsEquivalentTo(With5s(AsicenRecorded.TuneBs03));
         var cs2 = ChannelTable.Parse("CS2")!;
-        await Assert.That(AsicenTuner.TuneRequest(epoch, 6, cs2, cs2.StreamId)).IsEquivalentTo(With5s(AsicenRecorded.TuneCs2));
+        await Assert.That(AsicenTuner.TuneRequest(epoch, 6, cs2)).IsEquivalentTo(With5s(AsicenRecorded.TuneCs2));
     }
 
     [Test]

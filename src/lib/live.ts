@@ -190,11 +190,25 @@ export type Notice =
       /** 選べる音声。1 つしか無ければ画面は切り替えを出さない */
       audios: AudioTrack[];
       /**
+       * **映像の無い局 (ラジオ・データ放送) と映像の無い録画の追っかけだけ** false。どの形式をリクエストしても `codec` は `audio`
+       * (`server/live.ts` の `AUDIO_FORM`。音声も無い局は無音)。画面は回線に合わせて段を動かさない
+       */
+      video?: false;
+      /**
        * サーバが PMT を読んで、TS に HEVC を入れて送る 4K の局と分かったときだけ `hevc`。画面はその局を開いている間、
        * 「放送のまま」を HEVC の詰め替えとして扱う (`Tuned.broadcast`)。放送のままをリクエストしても、答えは `hevc` になる
        * (`server/live.ts` の `servedFormat`)
        */
       broadcast?: BroadcastCodec;
+    }
+  | {
+      /**
+       * **選べる音声が変わった** (`server/live.ts` の `followAudios`)。`tuned` の `audios` を置き換える。
+       * `tuned` は PMT を読む前に番組表だけで組んで送るので、PMT を読んで番組表に無い音声の ES が分かったときと、
+       * 番組が替わったときに来る。エンコードしている音声 (`tuned` の `audio`) は変わらない
+       */
+      type: "audios";
+      audios: AudioTrack[];
     }
   | {
       /** 選べる字幕。ffmpeg が入口で読んだストリーム一覧から分かるので、1 枚も届いていなくても来る (`captions.ts` の `TrackList`) */
@@ -280,7 +294,7 @@ export type Notice =
     } & Pace)
   | {
       /**
-       * **チューナーから外された** (読んでいたストリームが、こちらが畳む前に途切れた)。セッションはここで畳む。
+       * **チューナーから外された** (読んでいたストリームが、こちらが閉じる前に途切れた)。セッションはここで閉じる。
        *
        * いちばん多いのは録画にチューナーを取り上げられたとき (ライブは録画にだけ譲る。docs/agent.md「選ぶ順の約束」)。
        * 画面は同じ局をリクエストし直す。使ってよいチューナーが空いていればそこに入り、見ているものは変わらない。
@@ -292,12 +306,28 @@ export type Notice =
     }
   | {
       /**
-       * **番組が替わって映像・音声・字幕の並び (PMT) が変わった。** セッションはここで畳む (`server/live.ts` の `restart`)。
+       * **番組が替わって映像・音声・字幕の並び (PMT) が変わった。** セッションはここで閉じる (`server/live.ts` の `restart`)。
        * ffmpeg は起きたときの並びのまま音声・字幕を選んでいるので、作り直さないと追従しない。
        * 画面はすぐ同じ局をリクエストし直す (音声を選び直したときと同じ)。追っかけは届いたぶんを観終えてから、
        * 観ていた位置をリクエストし直す (`live-player.svelte.ts` の `resumeChase`)
        */
       type: "restart";
+    }
+  | {
+      /**
+       * **サーバが入れ替えで止まる** (`server/live.ts` の `announceRestart`。止まる合図を受けて、録画を待ち終えてから)。
+       * このあと接続が切れ、届かない間ができる。回線が細いのではないので、画面は繋ぎ直して映り始めてしばらくは段を下げない
+       * (`live-player.svelte.ts` の `HOLD_AFTER_RECONNECT`)
+       */
+      type: "restarting";
+    }
+  | {
+      /**
+       * **この局を選局したエージェントが復号に使うカードの番号** (10 進 16 桁。`server/agent-cards.ts` の `cardIdOf`)。
+       * 画面はデータ放送の `getIRDID` に渡す (双方向がオンのときだけ。`DataBroadcast` の `cardId`)。カードが無ければ来ない
+       */
+      type: "card";
+      id: string;
     }
   | {
       type: "error";
@@ -441,7 +471,7 @@ type TuneCommand = {
    */
   raw?: boolean;
   /**
-   * **デバッグ用に、このチューナーだけで選局する** (エージェントの `tuner`。設定の「この端末」で選ぶ。`live-tuner.svelte.ts`)。
+   * **デバッグ用に、このチューナーだけで選局する** (エージェントの `tuner`。設定の「その他」の「この端末」で選ぶ。`live-tuner.svelte.ts`)。
    * 省くとエージェントが選ぶ。使えなければ、ほかへ振り替えずに理由を返す
    */
   tuner?: string;
@@ -493,8 +523,8 @@ export interface Tuned {
 }
 
 /**
- * 前回見ていた局を覚えておく cookie (`/live` にだけ付ける。中身は局・音声と、コーデックのメニューで選んだもの (`choice`。
- * `#lib/live-choice.ts`) の JSON。前の形式の `codec`・`raw` は読まない)。サーバが読んで、繋いでくる前に
+ * 前回見ていた局を覚えておく cookie (`/live` にだけ付ける)。中身は局・音声と、コーデックのメニューで選んだもの (`choice`。
+ * `#lib/live-choice.ts`) の JSON で、前の形式の `codec`・`raw` は読まない。サーバが読んで、繋いでくる前に
  * エンコードし始める (`server/live.ts` の `warm`)。どの局を開くかはサーバ側 1 箇所で決める (`server/viewing.ts` の `liveStart`)。
  * localStorage と二重に持つと、先にエンコードしたものが使われず別の局が開いていた
  */

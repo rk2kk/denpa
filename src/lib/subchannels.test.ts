@@ -25,6 +25,7 @@ function station(
   channel: string,
   type = "GR",
   networkId = 0x7fe0,
+  serviceType = 1,
 ): Station {
   return {
     id,
@@ -32,6 +33,7 @@ function station(
     transport_stream_id: tsOf(channel),
     type,
     network_id: networkId,
+    service_type: serviceType,
   };
 }
 
@@ -405,7 +407,7 @@ describe("マスを組む", () => {
     ]);
   });
 
-  test("マスの鍵は重ならない", () => {
+  test("マスのキーは重ならない", () => {
     const keys = layout([
       program(TX.id, 4, 8),
       program(TX2.id, 5, 6, "野球"),

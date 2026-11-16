@@ -16,9 +16,9 @@ Mirakurun や EDCB、メディアサーバは要りません。番組表から�
 
 <table>
   <tr>
-    <td align="center"><a href="docs/screens.md#録画"><img src="docs/images/dashboard.webp" alt="録画" width="380"></a><br><sub><b>録画</b> — 予約と録画を 1 本の一覧に。サムネ付きで、押せばその場で観る</sub></td>
-    <td align="center"><a href="docs/screens.md#ライブ"><img src="docs/images/live.webp" alt="ライブ" width="380"></a><br><sub><b>ライブ</b> — 字幕もデータ放送も。止めれば追っかけ</sub></td>
-    <td align="center"><a href="docs/screens.md#録画を観る"><img src="docs/images/watch.webp" alt="録画を観る" width="380"></a><br><sub><b>観る</b> — 放送どおりの字幕、CM は自動で飛ばす</sub></td>
+    <td align="center"><a href="docs/screens.md#録画"><img src="docs/images/dashboard.webp" alt="録画" width="380"></a><br><sub><b>録画</b><br>予約と録画を 1 本の一覧に。サムネイル付きで、押せばその場で観る</sub></td>
+    <td align="center"><a href="docs/screens.md#ライブ"><img src="docs/images/live.webp" alt="ライブ" width="380"></a><br><sub><b>ライブ</b><br>字幕もデータ放送も。止めれば追っかけ</sub></td>
+    <td align="center"><a href="docs/screens.md#録画を観る"><img src="docs/images/watch.webp" alt="録画を観る" width="380"></a><br><sub><b>観る</b><br>放送どおりの字幕、CM は自動で飛ばす</sub></td>
   </tr>
 </table>
 
@@ -39,15 +39,15 @@ denpa は、**自分の B-CAS カードで、自分の世帯の中で、私的�
 
 ## できること
 
-- **予約** — 番組表から押すか、検索から作るルールで自動で。同じ回は最初の放送だけ録る
-- **録画** — CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする (GPU があれば H.265 も)。字幕は放送の ARIB 字幕のまま入れる。GPU (Intel・AMD・NVIDIA・Rockchip) があれば使う
-- **ライブ** — 放送から 1 秒ほどで。止めれば追っかけ、二カ国語・解説放送も選べる ([docs/watch.md](docs/watch.md#ライブ))
-- **データ放送** — テレビと同じ BML がブラウザで動く (d ボタン)。ライブでも録画でも
-- **観る** — 行を押せばその場で再生。CM は 1 コマも見せずに飛ばし、続きから・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存)
-- **字幕と放送の字** — 字幕は放送どおりの位置に描き、番組名・局名も含めて Denpa Font で外字まで崩さない
-- **端末に保存して観る** — 電波の無いところでも ([docs/offline.md](docs/offline.md))
-- **EPGStation・EDCB から引き継ぐ** — ルール・予約・録画 (EDCB は録画の履歴) ([docs/migrate.md](docs/migrate.md))
-- **別の機械へ移す** — ルール・予約・録画の一覧・設定を書き出して、新しい機械の denpa に取り込む ([docs/migrate.md](docs/migrate.md#別の機械へ移す))
+- 番組表から押すか、検索から作るルールで自動で予約する。同じ回は最初の放送だけ録る
+- 録画は CM を見つけてチャプターにし、AV1 / H.264 の mkv にエンコードする (GPU があれば H.265 も)。字幕は放送の ARIB 字幕のまま入れる。GPU (Intel・AMD・NVIDIA・Rockchip) があれば使う
+- ライブは放送から 1 秒ほどで観られる。止めれば追っかけになり、二カ国語・解説放送も選べる ([docs/watch.md](docs/watch.md#ライブ))
+- データ放送は、テレビと同じ BML がブラウザで動く (d ボタン)。ライブでも録画でも使える
+- 録画は行を押せばその場で再生する。CM は 1 コマも見せずに飛ばし、続きからの再生・倍速 (×1〜×2)・切り抜き (字幕・コメントごとサーバに保存) もできる
+- 字幕は放送どおりの位置に描く。番組名・局名も含めて Denpa Font で描き、外字まで崩さない
+- 録画を端末に保存すれば、電波の無いところでも観られる ([docs/offline.md](docs/offline.md))
+- EPGStation からはルール・予約・録画を、EDCB からはルール・予約・録画の履歴を引き継げる ([docs/migrate.md](docs/migrate.md))
+- ルール・予約・録画の一覧・設定を書き出して、新しい機械の denpa に取り込める ([docs/migrate.md](docs/migrate.md#別の機械へ移す))
 
 部品はチューナーで選局して素の TS を流す **チューナーエージェント** と、それ以外の全部 (番組表・予約・録画・
 エンコード・配信) をやる **denpa** の 2 つだけです ([docs/architecture.md](docs/architecture.md))。
@@ -74,27 +74,27 @@ curl -fsSL https://raw.githubusercontent.com/danything/denpa/main/install.sh | s
 irm https://raw.githubusercontent.com/danything/denpa/main/install.ps1 | iex
 ```
 
-OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書き場所は [docs/install.md](docs/install.md#1行で入れる)。
+OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書き場所は [docs/install.md](docs/install.md#1-行で入れる)。
 
 ### 3. 開く
 
 - <http://denpa.localhost> (Linux で [genkan](https://github.com/danything/genkan) を入れられたとき) か
   `http://<IP>:3000` (Mac と Windows は <http://localhost:3000>)。LAN のほかの機器 (テレビ・スマホ) からも `http://<IP>:3000`
-- **誰を通すか** — 設定するまで全部断ります。compose の `TRUSTED_NETWORKS` の初期値は家の中 (私設網) で、
+- 誰を通すかを設定するまでは、全部断ります。compose の `TRUSTED_NETWORKS` の初期値は家の中 (私設網) で、
   ここからはログインなしで通ります。範囲の変え方と、画面をログイン (OIDC) で守るときは
   [docs/install.md](docs/install.md#誰を通すか)
 - 設定の「受信」の「チューナー」で見つかったチューナーを確かめ、「チャンネル」で**スキャン**を押します (局が 1 つも無いうちは、録画・番組表・ライブの上に案内が出ます)。衛星は最初から局が入っていて、
   地上波は十数分。終わると番組表を集めるので (数分)、あとは番組表から予約するだけです
-- **カードリーダーが NG のまま録ると、中身はスクランブルされたままです** (設定の「受信」の「チューナー」に出ます)
+- **カードリーダーが「エラー」のまま録ると、中身はスクランブルされたままです** (設定の「受信」の「チューナー」に出ます)
 
 1 コンテナ (`denpa-aio`)・Helm・リバースプロキシの後ろに置くとき・困ったときは [docs/install.md](docs/install.md)、
 ログインの細かいことは [docs/auth.md](docs/auth.md)。
 
 ## 観る
 
-- **ブラウザ** — ホーム画面にも置ける ([docs/watch.md](docs/watch.md#ホーム画面に置く))
-- **テレビ** (Android TV / Fire TV) — [denpa-tv](https://github.com/danything/denpa-tv)。テレビに出る QR をスマホで読めば繋がる
-- **外から使う API** — 局・録画の一覧、ライブ、音声だけ (Home Assistant やスクリプト向け。[docs/api.md](docs/api.md))
+- ブラウザで観る。ホーム画面にも置ける ([docs/watch.md](docs/watch.md#ホーム画面に置く))
+- テレビ (Android TV / Fire TV) は [denpa-tv](https://github.com/danything/denpa-tv)。テレビに出る QR をスマホで読めば繋がる
+- 外から使う API で、局・録画の一覧、ライブ、音声だけを取れる (Home Assistant やスクリプト向け。[docs/api.md](docs/api.md))
 
 ## もっと詳しく
 
@@ -130,7 +130,7 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 **運用**
 
 - [docs/config.md](docs/config.md) — **環境変数** (一覧と、前のバージョンから上げるとき)
-- [docs/auth.md](docs/auth.md) — **誰を通すか** (OIDC・信頼したネットワーク・ペアリング)
+- [docs/auth.md](docs/auth.md) — **誰を通すか** (OIDC・信頼するネットワーク・ペアリング)
 
 **外から使う**
 
@@ -170,33 +170,17 @@ OS ごとの置き場、Compose を手で置くとき、上げ方と設定の書
 
 **手を入れてくれた人** (ありがとうございます):
 
-- [@Khronos31](https://github.com/Khronos31) ([#188](https://github.com/danything/denpa/issues/188))
-- [@unlimish](https://github.com/unlimish) ([#431](https://github.com/danything/denpa/issues/431) [#1843](https://github.com/danything/denpa/issues/1843))
-- [@fetburner](https://github.com/fetburner) ([#662](https://github.com/danything/denpa/issues/662))
-- [@sirius128](https://github.com/sirius128) ([#775](https://github.com/danything/denpa/issues/775))
-- [@chiroru27](https://github.com/chiroru27) ([#1681](https://github.com/danything/denpa/issues/1681) [#1724](https://github.com/danything/denpa/issues/1724) [#1822](https://github.com/danything/denpa/issues/1822) [#1838](https://github.com/danything/denpa/issues/1838) [#2197](https://github.com/danything/denpa/issues/2197))
-- [@minetaro12](https://github.com/minetaro12) ([#1850](https://github.com/danything/denpa/issues/1850))
-- [@haruki0420](https://github.com/haruki0420) ([#2190](https://github.com/danything/denpa/issues/2190) [#2191](https://github.com/danything/denpa/issues/2191) [#2192](https://github.com/danything/denpa/issues/2192) [#2193](https://github.com/danything/denpa/issues/2193) [#2230](https://github.com/danything/denpa/issues/2230) [#2231](https://github.com/danything/denpa/issues/2231) [#2286](https://github.com/danything/denpa/issues/2286) [#2315](https://github.com/danything/denpa/issues/2315) [#2369](https://github.com/danything/denpa/issues/2369))
+<table>
+<tr><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3AKhronos31"><img src="https://github.com/Khronos31.png?size=96" width="48" height="48" alt=""><br><sub>@Khronos31</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Aunlimish"><img src="https://github.com/unlimish.png?size=96" width="48" height="48" alt=""><br><sub>@unlimish</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Afetburner"><img src="https://github.com/fetburner.png?size=96" width="48" height="48" alt=""><br><sub>@fetburner</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Asirius128"><img src="https://github.com/sirius128.png?size=96" width="48" height="48" alt=""><br><sub>@sirius128</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Achiroru27"><img src="https://github.com/chiroru27.png?size=96" width="48" height="48" alt=""><br><sub>@chiroru27</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Aminetaro12"><img src="https://github.com/minetaro12.png?size=96" width="48" height="48" alt=""><br><sub>@minetaro12</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/pulls?q=is%3Apr+is%3Amerged+author%3Aharuki0420"><img src="https://github.com/haruki0420.png?size=96" width="48" height="48" alt=""><br><sub>@haruki0420</sub></a></td></tr>
+</table>
 
 **報告や提案をくれた人** (ありがとうございます):
 
-- [@Khronos31](https://github.com/Khronos31) ([#184](https://github.com/danything/denpa/issues/184) [#195](https://github.com/danything/denpa/issues/195) [#376](https://github.com/danything/denpa/issues/376) [#377](https://github.com/danything/denpa/issues/377))
-- [@unlimish](https://github.com/unlimish) ([#417](https://github.com/danything/denpa/issues/417) [#1834](https://github.com/danything/denpa/issues/1834))
-- [@kametani-mikihiro](https://github.com/kametani-mikihiro) ([#437](https://github.com/danything/denpa/issues/437) [#471](https://github.com/danything/denpa/issues/471) [#480](https://github.com/danything/denpa/issues/480) [#481](https://github.com/danything/denpa/issues/481) [#503](https://github.com/danything/denpa/issues/503) [#505](https://github.com/danything/denpa/issues/505) [#509](https://github.com/danything/denpa/issues/509) [#2157](https://github.com/danything/denpa/issues/2157) [#2754](https://github.com/danything/denpa/issues/2754))
-- [@fetburner](https://github.com/fetburner) ([#668](https://github.com/danything/denpa/issues/668))
-- [@shino-zxc](https://github.com/shino-zxc) ([#1210](https://github.com/danything/denpa/issues/1210) [#1713](https://github.com/danything/denpa/issues/1713) [#2209](https://github.com/danything/denpa/issues/2209) [#2729](https://github.com/danything/denpa/issues/2729))
-- [@eggplants](https://github.com/eggplants) ([#1617](https://github.com/danything/denpa/issues/1617) [#1709](https://github.com/danything/denpa/issues/1709) [#1930](https://github.com/danything/denpa/issues/1930) [#1931](https://github.com/danything/denpa/issues/1931) [#2152](https://github.com/danything/denpa/issues/2152) [#2386](https://github.com/danything/denpa/issues/2386))
-- [@ogatomo21](https://github.com/ogatomo21) ([#1708](https://github.com/danything/denpa/issues/1708))
-- [@yuki-untitled](https://github.com/yuki-untitled) ([#1806](https://github.com/danything/denpa/issues/1806))
-- [@orijie](https://github.com/orijie) ([#2188](https://github.com/danything/denpa/issues/2188))
-- [@emuiak](https://github.com/emuiak) ([#2189](https://github.com/danything/denpa/issues/2189) [#2218](https://github.com/danything/denpa/issues/2218) [#2387](https://github.com/danything/denpa/issues/2387) [#2488](https://github.com/danything/denpa/issues/2488) [#2604](https://github.com/danything/denpa/issues/2604) [#2605](https://github.com/danything/denpa/issues/2605))
-- [@haruki0420](https://github.com/haruki0420) ([#2221](https://github.com/danything/denpa/issues/2221) [#2239](https://github.com/danything/denpa/issues/2239) [#2343](https://github.com/danything/denpa/issues/2343) [#2346](https://github.com/danything/denpa/issues/2346) [#2367](https://github.com/danything/denpa/issues/2367) [#2385](https://github.com/danything/denpa/issues/2385) [#2443](https://github.com/danything/denpa/issues/2443) [#2474](https://github.com/danything/denpa/issues/2474))
-- [@masa592](https://github.com/masa592) ([#2342](https://github.com/danything/denpa/issues/2342))
-- [@tukiboshi389](https://github.com/tukiboshi389) ([#2654](https://github.com/danything/denpa/issues/2654))
-- [@strugglecrow](https://github.com/strugglecrow) ([#2684](https://github.com/danything/denpa/issues/2684))
-- [@iwkta](https://github.com/iwkta) ([#2727](https://github.com/danything/denpa/issues/2727) [#2728](https://github.com/danything/denpa/issues/2728))
-- [@junhayasaka](https://github.com/junhayasaka) ([#2755](https://github.com/danything/denpa/issues/2755))
-- [@pixnook](https://github.com/pixnook) ([#2771](https://github.com/danything/denpa/issues/2771))
+<table>
+<tr><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3AKhronos31"><img src="https://github.com/Khronos31.png?size=96" width="48" height="48" alt=""><br><sub>@Khronos31</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aunlimish"><img src="https://github.com/unlimish.png?size=96" width="48" height="48" alt=""><br><sub>@unlimish</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Akametani-mikihiro"><img src="https://github.com/kametani-mikihiro.png?size=96" width="48" height="48" alt=""><br><sub>@kametani-mikihiro</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Afetburner"><img src="https://github.com/fetburner.png?size=96" width="48" height="48" alt=""><br><sub>@fetburner</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Ashino-zxc"><img src="https://github.com/shino-zxc.png?size=96" width="48" height="48" alt=""><br><sub>@shino-zxc</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aeggplants"><img src="https://github.com/eggplants.png?size=96" width="48" height="48" alt=""><br><sub>@eggplants</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aogatomo21"><img src="https://github.com/ogatomo21.png?size=96" width="48" height="48" alt=""><br><sub>@ogatomo21</sub></a></td></tr>
+<tr><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Ayuki-untitled"><img src="https://github.com/yuki-untitled.png?size=96" width="48" height="48" alt=""><br><sub>@yuki-untitled</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aorijie"><img src="https://github.com/orijie.png?size=96" width="48" height="48" alt=""><br><sub>@orijie</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aemuiak"><img src="https://github.com/emuiak.png?size=96" width="48" height="48" alt=""><br><sub>@emuiak</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aharuki0420"><img src="https://github.com/haruki0420.png?size=96" width="48" height="48" alt=""><br><sub>@haruki0420</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Amasa592"><img src="https://github.com/masa592.png?size=96" width="48" height="48" alt=""><br><sub>@masa592</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Atukiboshi389"><img src="https://github.com/tukiboshi389.png?size=96" width="48" height="48" alt=""><br><sub>@tukiboshi389</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Astrugglecrow"><img src="https://github.com/strugglecrow.png?size=96" width="48" height="48" alt=""><br><sub>@strugglecrow</sub></a></td></tr>
+<tr><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aiwkta"><img src="https://github.com/iwkta.png?size=96" width="48" height="48" alt=""><br><sub>@iwkta</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Ajunhayasaka"><img src="https://github.com/junhayasaka.png?size=96" width="48" height="48" alt=""><br><sub>@junhayasaka</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Apixnook"><img src="https://github.com/pixnook.png?size=96" width="48" height="48" alt=""><br><sub>@pixnook</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Aono-setai-13"><img src="https://github.com/ono-setai-13.png?size=96" width="48" height="48" alt=""><br><sub>@ono-setai-13</sub></a></td><td align="center"><a href="https://github.com/danything/denpa/issues?q=author%3Apachiris"><img src="https://github.com/pachiris.png?size=96" width="48" height="48" alt=""><br><sub>@pachiris</sub></a></td></tr>
+</table>
 
 <!-- thanks:end -->
 

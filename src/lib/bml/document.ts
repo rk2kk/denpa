@@ -98,6 +98,11 @@ export class BmlElement implements Cascade {
     return this.attrs.get("id") ?? "";
   }
 
+  /** `type` 属性を小文字にしたもの (object の種類は大文字小文字を区別しない)。無ければ "" */
+  get type(): string {
+    return (this.attrs.get("type") ?? "").toLowerCase();
+  }
+
   get classes(): string[] {
     return (this.attrs.get("class") ?? "")
       .split(/\s+/)
@@ -264,8 +269,8 @@ function isWide(c: string | undefined): boolean {
  * - 制御符号だけの文字列は文字にしない。span と span のあいだの空白 1 つもここで消える
  *   (同 5.3.4 も、ノードのあいだに空白と改行だけがあるとき、それを持つノードを作らないと書いている)
  * - 開始タグの直後と終了タグの直前の並びは消す
- * - 2 バイト文字どうしのあいだの並びは消す。それ以外の字のあいだの並びは 0x20 1 つにする
- * - p の中では、span・a の終了タグの直後と、span・a・br の開始タグの直前の並びを 0x20 1 つにする
+ * - 2 バイト文字どうしのあいだの並びは消す。それ以外の字にはさまれた並びは 0x20 1 つにする
+ * - p の中では、span・a の終了タグの直後と、span・a・br の開始タグの直前にある並びを 0x20 1 つにする
  *   (br の終了タグの直後は上の「開始タグの直後」と同じく消す)
  *
  * 前から 1 回走査して組み立てる。正規表現で末尾の空白を探すと、空白の後ろに字が続くとき 2 乗かかる

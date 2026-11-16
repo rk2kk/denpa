@@ -15,11 +15,13 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import type { Audio } from "../arib";
-import type {
-  ChannelType,
-  ReservationState,
-  Transport,
-  VideoLoss,
+import {
+  type ChannelType,
+  DIGITAL_TV,
+  hasVideo,
+  type ReservationState,
+  type Transport,
+  type VideoLoss,
 } from "../types";
 import type { Range } from "./cm";
 import { config } from "./config";
@@ -28,14 +30,8 @@ import { config } from "./config";
  * **テーブルの定義はここにしか無い** (drizzle)。
  *
  * - 行の型はここから導く (`types.ts` の `Recording` など)
- * - DB を作る SQL もここから出す: 変えたら `bun run db:generate` で `drizzle/` に
+ * - DB を作る SQL もここから出す。変えたら `bun run db:generate` で `drizzle/` に
  *   マイグレーションが出るので、一緒にコミットする。当てるのは起動時 (`db.ts`)
- *
- * 前は SQL の文字列 (`CREATE TABLE IF NOT EXISTS` + 後から足した列の一覧) と
- * TS の interface を別々に書いていた。列を足すときに 3 箇所を直すことになり、
- * 片方だけ直しても TS は何も言わなかった (`queryOne<Recording>` はキャスト)。
- * 実際に本番が 500 を返したこともある (列を SQL に書いただけで、動いている DB には
- * 足されていなかった)。
  *
  * 真偽を 0/1 で持つ列 (`enabled` / `manual` / `encode` / `has_logo` / `is_free` など)
  * は `{ mode: 'boolean' }` で読み書きする。DB の中は今までどおり 0/1 で、既定値も
@@ -49,9 +45,9 @@ import { config } from "./config";
 const flag = (name: string) => integer(name, { mode: "boolean" });
 
 /**
- * JSON を文字列で持つ列。読むときにデコードし、書くときに畳む。**読み取り関数は列ごとに書く。**
+ * JSON を文字列で持つ列。読むときにデコードし、書くときにエンコードする。**読み取り関数は列ごとに書く。**
  *
- * drizzle の `{ mode: 'json' }` は使わない。あれは読めない行で例外を投げるが、
+ * drizzle の `{ mode: 'json' }` は使わない。あれは読めない行で例外を出すが、
  * ここに入っているのは放送から取得したものや、取り込みの時期によって形式が違うもの
  * (古い行は `''`、EPGStation から来たジャンルは数の並び) で、1 行が読めないせいで
  * 一覧ごと出なくなるのは困る。読めない行はその列を「持っていない」ことにして、
@@ -66,7 +62,7 @@ function json<T>(name: string, read: (value: unknown) => T) {
       try {
         value = JSON.parse(raw);
       } catch {
-        // 壊れた行。read が「持っていない」の形に落とす
+        // 壊れた行。read が「持っていない」ときの値にする
       }
       return read(value);
     },
@@ -211,15 +207,43 @@ export const webhooks = sqliteTable("webhooks", {
   created_at: integer("created_at").notNull(),
 });
 
+// テレビの局の種別と映像のある局の決まりは、画面 (サブチャンネルの束ね方) も使うので `types.ts` に置く
+export { DIGITAL_TV, hasVideo };
+
+/** ラジオの局のサービス種別 (ARIB STD-B10 のデジタル音声)。映像が無く、音声 (と、あればデータ放送) を流す */
+const DIGITAL_AUDIO = 2;
+
 /**
- * テレビの局のサービス種別 (ARIB STD-B10 のデジタル TV)。録画できるのはこの種別だけ。
- *
- * スキャンはデータ放送 (NHKデータ1、Gガイド) もワンセグ (tvkワンセグ1) も
- * ラジオも同じ一覧に入れる。これらを録っても映像は入っておらず、
- * データ放送は番組表上「24 時間ぶんの 1 番組」になっていたりする。
- * ルールが引っかけて録画が失敗するので、取り込む時点で落とす (`epg.syncServices`)
+ * データ放送の局のサービス種別 (ARIB STD-B10 のデータ/ワンセグ)。データ放送だけの局 (NHKデータ1) と、
+ * 部分受信の局 (ワンセグ。tvkワンセグ1) のどちらもこの種別。映像が無く、音声も無いことがある
  */
-export const DIGITAL_TV = 1;
+const DIGITAL_DATA = 0xc0;
+
+/** **取り込むサービス種別** (`importedService`)。テレビ・ラジオ・データ放送。エンジニアリング (0xA4) などは取り込まない */
+export const IMPORTED_SERVICE_TYPES: ReadonlySet<number> = new Set([
+  DIGITAL_TV,
+  DIGITAL_AUDIO,
+  DIGITAL_DATA,
+]);
+
+/**
+ * **控えの局を取り込むか** (`epg.syncServices`)。取り込む種別 (`IMPORTED_SERVICE_TYPES`) のうち、部分受信の局 (ワンセグ) を除いたもの。
+ *
+ * ワンセグは本放送と同じ番組を流すので、取り込むと地上波の番組表に同じ番組の列が増える。部分受信かはスキャンが
+ * NIT の部分受信記述子 (0xFB) から控えに書く (`AgentChannel` の `partialReception`)。記述子の無いネットワークでは
+ * どの局も部分受信でないと書く (ケーブルの NIT に記述子が残るかは確かめていない)。
+ * **書く前の控え (`partialReception` が無い) のデータ放送の局は、ワンセグかもしれないので落とす。** スキャンし直すと入る
+ */
+export function importedService(service: {
+  serviceType: number;
+  partialReception?: boolean | undefined;
+}): boolean {
+  if (!IMPORTED_SERVICE_TYPES.has(service.serviceType)) return false;
+  if (service.partialReception === true) return false;
+  return (
+    service.serviceType !== DIGITAL_DATA || service.partialReception === false
+  );
+}
 
 export const services = sqliteTable("services", {
   /** 局の内部 ID (tuner.ts の serviceKey) */
@@ -230,7 +254,7 @@ export const services = sqliteTable("services", {
   type: text("type").$type<ChannelType>().notNull(),
   /**
    * ARIB のサービス種別 (STD-B10)。1 = デジタル TV、2 = デジタル音声、
-   * 192 = データ/ワンセグ、164 = エンジニアリング。録るのは 1 だけ
+   * 192 = データ/ワンセグ、164 = エンジニアリング。取り込むのは 1・2・192 で、192 のうちワンセグは落とす (`importedService`)
    */
   service_type: integer("service_type").notNull().default(DIGITAL_TV),
   /**
@@ -364,17 +388,17 @@ export const channelChanges = sqliteTable("channel_changes", {
 export const cardContracts = sqliteTable(
   "card_contracts",
   {
-    /** カード番号 (16桁の文字列) */
+    /** カード番号 (16 桁の文字列) */
     card_id: text("card_id").notNull(),
     /** 局の内部 ID (services.id) */
     service_id: integer("service_id").notNull(),
-    /** 契約状態: subscribed(契約中) / unsubscribed(未契約) / expired(期限切れ) */
+    /** 契約状態: subscribed (契約中) / unsubscribed (未契約) / expired (期限切れ) */
     state: text("state")
       .$type<"subscribed" | "unsubscribed" | "expired">()
       .notNull(),
     /** B-CAS 契約確認コマンド (0x90 0x3C) の返り値コード (0x0800 等) */
     code: integer("code"),
-    /** 契約の有効期限（epoch ms）。判定できた場合 */
+    /** 契約の有効期限 (epoch ms)。判定できた場合 */
     valid_until: integer("valid_until"),
     /** 実ストリームでの復号可否 (true: 成功, false: スクランブル残存, null: 未確認) */
     decode_ok: flag("decode_ok"),
@@ -425,7 +449,7 @@ export const programs = sqliteTable(
     copy_never: flag("copy_never")
       .notNull()
       .default(sql`0`),
-    /** CA契約情報記述子 (0xCB) の verificationData (Base64)。有料放送の契約確認・復号判定に使う */
+    /** CA 契約情報記述子 (0xCB) の verificationData (Base64)。有料放送の契約確認・復号判定に使う */
     contract_verification: text("contract_verification"),
     /*
      * **シリーズ** (EIT のシリーズ記述子)。載せる局のぶんだけ入り、載っていない番組は全部 NULL。
@@ -482,7 +506,7 @@ export const rules = sqliteTable("rules", {
     .default(sql`1`),
   /**
    * チューナーが足りないとき、どの予約を残すか。大きいほうが残る (conflict.ts)。
-   * **エージェントに渡すチューナーの取り合いの優先度 (`config.priority`) とは別物** (docs/agent.md)。
+   * **エージェントに渡すチューナーの取り合いの順 (`config.priority`) とは別物** (docs/agent.md)。
    * ルールは 1、手動予約は 2。比べる相手は予約どうしだけなので小さいところから数える
    */
   priority: integer("priority").notNull().default(1),
@@ -647,7 +671,7 @@ export const recordings = sqliteTable(
     series: text("series").notNull().default(""),
     subtitle: text("subtitle").notNull().default(""),
     description: text("description").notNull().default(""),
-    /** 詳細(拡張形式)。JSON {見出し:本文}。番組詳細の画面に概要と続けて出す */
+    /** 詳細 (拡張形式)。JSON {見出し:本文}。番組詳細の画面に概要と続けて出す */
     extended: json("extended", record),
     start_at: integer("start_at").notNull(),
     end_at: integer("end_at").notNull(),
@@ -800,7 +824,7 @@ const ENCODE_STATES = [
 export const ENCODE_PHASES = ["descramble", "remux", "cm", "encode"] as const;
 
 /**
- * ジョブの種類。`encode` はエンコードする (CM 検出も一緒に行う)、`cm` は**CM 検出だけやり直す**
+ * ジョブの種類。`encode` はエンコードする (CM 検出も一緒にする)、`cm` は**CM 検出だけやり直す**
  * (エンコードしたものにはチャプターを書き直すだけ。`encoder.runCmJob`)。同じ待ち行列に並べ、同時に走る本数も一緒に数える
  */
 export const ENCODE_KINDS = ["encode", "cm"] as const;
@@ -814,10 +838,10 @@ export const encodeJobs = sqliteTable(
     state: text("state", { enum: ENCODE_STATES }).notNull().default("queued"),
     phase: text("phase", { enum: ENCODE_PHASES }).notNull().default("encode"),
     percent: real("percent").notNull().default(0),
-    /** 残り時間の見込み(ms)。ffmpeg の speed から出す。分からない間は NULL */
+    /** 残り時間の見込み (ms)。ffmpeg の speed から出す。分からない間は NULL */
     eta_ms: integer("eta_ms"),
     log: text("log").notNull().default(""),
-    /** ジョブを取り出した回数 (`encoder.pump`)。1 回の実行の中の ffmpeg の起こし直しは数えない (`config.encodeMaxAttempts`) */
+    /** ジョブを取り出した回数 (`encoder.pump`)。1 回の実行の中で ffmpeg を起動し直したぶんは数えない (`config.encodeMaxAttempts`) */
     attempts: integer("attempts").notNull().default(0),
     error: text("error"),
     created_at: integer("created_at").notNull(),

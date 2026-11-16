@@ -14,7 +14,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
  *
  * denpa から触れないものが 3 つある。
  *
- * - B-CASカード … USB のリーダーも IT930x の機材の内蔵リーダーも CECH-ZD1 J・PIX-DT295 の差し込み口も、こちらが直接扱う (CardLinks.cs。
+ * - B-CAS カード … USB のリーダーも IT930x の機材の内蔵リーダーも CECH-ZD1 J・PIX-DT295 の差し込み口も、こちらが直接扱う (CardLinks.cs。
  *   macOS / Windows の USB リーダーだけは OS の PC/SC 越し)
  * - チューナーデバイス … `/dev/dvb/*` と `/dev/bus/usb` が見えているのはこちらだけ
  * - 選局そのもの … デバイスを使って ioctl で選局する (Tuning.cs)。
@@ -195,7 +195,7 @@ var pool = new TunerPool(tuners, () => events.Emit("tuners"), tune) { Detected =
 
 /*
  * **asicen-userland の筐体の asicend を起動する。** 顔ぶれ (設定か、自動で見つけたもの) のうち、使う受信機がある筐体ぶん。
- * 使う受信機が無くなった筐体の asicend は止める (UserlandDaemon.Prepare)。
+ * 使う受信機が無くなった筐体の asicend は止める (AsicenDaemon.Prepare)。
  * 画面からの書き換えと抜き差しで同時に呼ばれても、あとから呼んだほうが最後の設定で揃えるよう 1 つずつ通す
  */
 var daemonsGate = new Lock();
@@ -208,7 +208,7 @@ void PrepareDaemons()
         if (daemonsStopped) return;
         // asicen-userland の筐体の asicend (Asicen.cs)。配布物が無ければ顔ぶれにも出ない。LNB 15V の設定は起動の引数に効くので先に控える
         AsicenUserland.Configure(pool.Tuners);
-        UserlandDaemon.Prepare<AsicenDaemon>([.. AsicenUserland.IdsIn(pool.Tuners)], AsicenDaemon.For);
+        AsicenDaemon.Prepare([.. AsicenUserland.IdsIn(pool.Tuners)], AsicenDaemon.For);
     }
 }
 
@@ -388,6 +388,16 @@ app.MapGet("/denpa/stream", async (HttpContext http) =>
         await Respond.Error(http, error.Message, 409);
         return;
     }
+    catch (TunerUnusableException error)
+    {
+        /*
+         * 選んだチューナーが、電源を入れ直すまで使えない (IT930x のブリッジの溢れ)。**503 で返す。**
+         * スキャンはこれでそのチューナーを外し、同じ機材のエラーでチャンネルを 1 つずつ落とさない (denpa の scan.ts)
+         */
+        Log.Write($"{type} {channel} ({use}): {error.Message}");
+        await Respond.Error(http, error.Message, 503);
+        return;
+    }
     catch (Exception error)
     {
         /*
@@ -401,7 +411,7 @@ app.MapGet("/denpa/stream", async (HttpContext http) =>
         return;
     }
 
-    // 溜めない。数パケット届いたらそのまま流す (64KB 貯めると 25ms 積み上がる)
+    // 溜めない。数パケット届いたらそのまま流す (64 KB 貯めると 25 ms 積み上がる)
     http.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
     /*
@@ -419,7 +429,7 @@ app.MapGet("/denpa/stream", async (HttpContext http) =>
         await foreach (var chunk in sink.Reader.ReadAllAsync(http.RequestAborted))
         {
             /*
-             * **Content-Type と ISDB-C の TSMF の有効な TS の数は、最初の塊を書く前にヘッダーに入れる** (docs/agent.md「/denpa/stream」)。
+             * **Content-Type と ISDB-C の TSMF の有効な TS の数は、最初の塊を書く前にヘッダーに入れる** (docs/agent.md「通信は HTTPS」)。
              * レスポンスヘッダーは最初に書いたときに送られ、塊が届くのは選局と TSMF の判定が終わってから。
              * 選局の途中で共有に入った利用者は Open から先に戻るので、戻った時点ではまだ値が無いことがある。
              * TSMF から選んだ TS が分割 TLV なら、組み立てた TLV のバイト列を application/x-arib-tlv で流す (Sink.Format)
@@ -437,7 +447,7 @@ app.MapGet("/denpa/stream", async (HttpContext http) =>
         }
 
         /*
-         * **チューナーを取り上げられたなら、正常終了として畳まない。**
+         * **チューナーを取り上げられたなら、正常終了として閉じない。**
          *
          * 送っている途中の本文をきれいに閉じると、読む側には「録り終えた」
          * ように届く。実際それで、チューナーを取り上げられた録画が尻切れのまま成功扱いに
@@ -691,7 +701,7 @@ app.MapPost("/denpa/card/confirm", async (HttpContext http) =>
     var date = body?["date"] is JsonValue value && value.TryGetValue<int>(out var mjd) ? mjd : -1;
     if (verification is not { Length: >= 1 and <= CardWire.MaxVerification } || date is < 0 or > 65535)
     {
-        await Respond.Error(http, "verification (Base64 で 1〜253 バイト) と date (MJD) が必要です", 400);
+        await Respond.Error(http, $"verification (Base64 で 1〜{CardWire.MaxVerification} バイト) と date (MJD) が必要です", 400);
         return;
     }
     try
@@ -797,7 +807,7 @@ app.Lifetime.ApplicationStopping.Register(() => StopSteps.Run(
     ("IT930x の機材を閉じる", It930xDevice.Shutdown),
     ("選局を離す", pool.CloseAll)));
 /*
- * ほかの機材を畳むのは、応答を流し終えてから (`ApplicationStopped` は Kestrel が止まったあとに来る)。
+ * ほかの機材を閉じるのは、応答を流し終えてから (`ApplicationStopped` は Kestrel が止まったあとに来る)。
  * 止まり際に滑り込んだ選局もここで離す。1 つが失敗しても残りは通す
  */
 app.Lifetime.ApplicationStopped.Register(() => StopSteps.Run(
@@ -811,7 +821,7 @@ app.Lifetime.ApplicationStopped.Register(() => StopSteps.Run(
     ("asicend を止める", () =>
     {
         lock (daemonsGate) daemonsStopped = true;
-        UserlandDaemon.StopAll();
+        AsicenDaemon.StopAll();
     })));
 
 /*
@@ -886,14 +896,14 @@ internal static class Respond
 ///
 /// <para>
 /// **合図をこちらで受け取る。** 既定の受け取り役 (ConsoleLifetime) に任せると、
-/// その場でホストが畳みに入り、**Kestrel が開いている応答への書き込みを止める**
+/// その場でホストが終了処理に入り、**Kestrel が開いている応答への書き込みを止める**
 /// (実測: 合図の直後からバイトが 1 つも進まなくなる)。止めるかどうかを決める前に
 /// 止まってしまうので、受け取り役ごと差し替える。
 /// </para>
 ///
 /// <para>
 /// 待つのは録画だけ (<see cref="TunerPool.Recording"/>)。待ち終えたら
-/// <c>StopApplication</c> を呼んで、いつもどおり畳ませる。**待っている間に 2 回目の合図が来たら、待たずに畳む**
+/// <c>StopApplication</c> を呼んで、いつもどおり終了させる。**待っている間に 2 回目の合図が来たら、待たずに終了する**
 /// (docs/agent.md「止められたら録画が終わるまで待つ」)。
 /// </para>
 ///
@@ -901,7 +911,7 @@ internal static class Respond
 /// **待っている間も、新しい選局は断らない** (denpa の scheduler.ts の「止められている最中でも始める」と同じ考え)。
 /// <c>Recreate</c> なので新しい Pod はこちらが終わるまで立たず、断ってもその間に始まる録画の先頭が欠けるだけ。
 /// 来た録画は録り終えるまで待つ (待ちは伸びるが <c>SHUTDOWN_WAIT</c> が歯止め)。ライブや番組表は受けるが
-/// 待たず、録画が終われば一緒に切れる。**録画が無ければすぐ畳む。** 待っても入れ替えの隙間が伸びるだけ。
+/// 待たず、録画が終われば一緒に切れる。**録画が無ければすぐ終了する。** 待っても入れ替えの隙間が伸びるだけ。
 /// </para>
 /// </summary>
 internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetime lifetime)
@@ -924,7 +934,7 @@ internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetim
 
     private void Handle(PosixSignalContext context)
     {
-        // 既定ではその場で終了する。それを止め、畳むのはこちらから指示する
+        // 既定ではその場で終了する。それを止め、終了はこちらから指示する
         context.Cancel = true;
         if (Interlocked.Exchange(ref _stopping, 1) == 0)
         {
@@ -936,8 +946,8 @@ internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetim
          * 手で動かしているときの Ctrl+C も SIGTERM も効かず、SHUTDOWN_WAIT (既定 6 時間) まで止まらなかった。
          * 録画のストリームは切れる (denpa はエージェントがまた動いてから終了時刻まで録り続ける)
          */
-        // 録画を待っていたときだけ記録に出す (待たずに畳んでいる途中の合図では出さない)
-        if (_waiting.TrySetResult() && _holding) Log.Write("止まれの合図をもう一度受けたので、録画を待たずに畳みます");
+        // 録画を待っていたときだけ記録に出す (待たずに終了している途中の合図では出さない)
+        if (_waiting.TrySetResult() && _holding) Log.Write("止まれの合図をもう一度受けたので、録画を待たずに終了します");
     }
 
     /// <summary>録画が終わるのを待っている間だけ true</summary>
@@ -948,13 +958,13 @@ internal sealed class Drain(TunerPool pool, long waitMs, IHostApplicationLifetim
         if (waitMs > 0 && pool.Recording)
         {
             _holding = true;
-            Log.Write($"止まれの合図。録画が終わるまで待ちます (上限 {waitMs / 1000} 秒。もう一度合図を送ると待たずに畳みます)");
+            Log.Write($"止まれの合図。録画が終わるまで待ちます (上限 {waitMs / 1000} 秒。もう一度合図を送ると待たずに終了します)");
             var until = DateTime.UtcNow.AddMilliseconds(waitMs);
             while (pool.Recording && DateTime.UtcNow < until && !_waiting.Task.IsCompleted)
             {
                 await Task.WhenAny(_waiting.Task, Task.Delay(1000));
             }
-            if (!_waiting.Task.IsCompleted) Log.Write(pool.Recording ? "待つ上限を過ぎたので畳みます" : "録画が終わったので畳みます");
+            if (!_waiting.Task.IsCompleted) Log.Write(pool.Recording ? "待つ上限を過ぎたので終了します" : "録画が終わったので終了します");
         }
         _waiting.TrySetResult();
         lifetime.StopApplication();

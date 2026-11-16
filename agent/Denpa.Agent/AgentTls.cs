@@ -181,7 +181,7 @@ public sealed class AgentTls
 
     /// <summary>
     /// <c>POST /denpa/pair</c> の本文の上限 (バイト)。中身は指紋 (64 字) と proof (43 字) だけで 130 バイトほど。
-    /// **組む前の相手からも受ける**ので、Kestrel の既定 (30MB) のままにせず、要る大きさに余裕を足したところで切る
+    /// **組む前の相手からも受ける**ので、Kestrel の既定 (30 MB) のままにせず、要る大きさに余裕を足したところで切る
     /// </summary>
     public const int PairBodyLimit = 1024;
 
@@ -336,7 +336,7 @@ public sealed class AgentTls
 }
 
 /// <summary>
-/// 組んだ denpa の指紋 (<c>tls/clients</c>。1 行に 1 つ)。読むのは起動したときだけで、足すたびに丸ごと書き直す
+/// 組んだ denpa の指紋 (<c>tls/clients</c>。1 行に 1 つ)。読むのは起動したときだけで、足す・消すたびに丸ごと書き直す
 /// </summary>
 public sealed class PairedClients
 {
@@ -371,7 +371,7 @@ public sealed class PairedClients
         lock (_gate)
         {
             if (!_known.Remove(fingerprint)) return false;
-            AgentTls.WritePrivate(_file, string.Concat(_known.Order().Select(line => line + "\n")));
+            Save();
             return true;
         }
     }
@@ -382,8 +382,11 @@ public sealed class PairedClients
         lock (_gate)
         {
             if (!_known.Add(fingerprint)) return false;
-            AgentTls.WritePrivate(_file, string.Concat(_known.Order().Select(line => line + "\n")));
+            Save();
             return true;
         }
     }
+
+    /// <summary>丸ごと書き直す。<see cref="_gate"/> の中で呼ぶ</summary>
+    private void Save() => AgentTls.WritePrivate(_file, string.Concat(_known.Order().Select(line => line + "\n")));
 }

@@ -34,7 +34,6 @@ import {
   type Recording,
   undecodableReason,
 } from "../types";
-import { fileSize } from "./chase";
 import {
   chapterArgs,
   chapterMetadata,
@@ -67,7 +66,7 @@ import {
   UNMEASURED,
   windowLabel,
 } from "./fps";
-import { pruneEmptyDirs, removeIfExists } from "./fsx";
+import { fileSize, pruneEmptyDirs, removeIfExists } from "./fsx";
 import { hwArgs, hwChain, hwReady, type HwWay } from "./hwenc";
 import {
   encodedFiles,
@@ -84,7 +83,7 @@ import {
 } from "./metadata";
 import { remuxMmts } from "./mmts";
 import { saveRecordedBml } from "./recorded-bml";
-import { recordedBroadcast } from "./recorded-broadcast";
+import { recordedBroadcast, recordedMedia } from "./recorded-broadcast";
 import { recordingSummary, tsHeadOf } from "./recording";
 import { recordingInput } from "./recording-io";
 import { encodeJobs, programs, recordings, services } from "./schema";
@@ -272,7 +271,7 @@ function videoArgs(
    * 実測は docs/encode.md「10bit では出しません」
    *
    * **H.265 はソフトウェアでエンコードしない** (libx265 を組んでいない。GPU が全部落ちたら、その 1 本は失敗にする。
-   * `runJob` の `encodeWays`)。ここに来るのは呼ぶ側の誤りなので、黙って別のコーデックにせず投げる
+   * `runJob` の `encodeWays`)。ここに来るのは呼ぶ側の誤りなので、別のコーデックにせず例外にする
    */
   if (codec === "hevc")
     throw new Error("H.265 はソフトウェアではエンコードしません");
@@ -487,7 +486,7 @@ export function buildArgs(
    * チャプター (CM の位置) はここでは入れない。境目はエンコードし終えてから決まるので、どのコーデックも
    * エンコードしたあとに `-c copy` で書き足す (`cm.chapterArgs`)
    */
-  // map で解決できない (型が不明な) ストリームは黙ってスキップする。エンコード自体を止めないため
+  // map で解決できない (型が不明な) ストリームは読み飛ばす。エンコード自体を止めないため
   args.push("-ignore_unknown");
   // 入れ物の title に番組名を入れる (プレイヤーの履歴・通知用)
   if (options.mediaTitle !== undefined && options.mediaTitle !== "") {
@@ -496,7 +495,7 @@ export function buildArgs(
   // インタレ解除 (bwdif は yadif よりコーミング残りが少ない)。
   // なめらかさの指定でコマ数が変わる (videoArgs)
   args.push("-vf", video.filter);
-  // 映像のストリーム (? はラジオ相当の映像の無い録画でも失敗しないようにするため)
+  // 映像のストリーム。映像の無い録画 (ラジオ・データ放送の局) は runJob が先に断るので、ここには来ない
   args.push("-map", "0:v?", "-c:v", ...video.encoder);
 
   if (audioType === DUAL_MONO) {
@@ -537,8 +536,8 @@ export function buildArgs(
    * **音声にも名前を付ける** (`arib.audioTitles`)。番組表と同じ言い方にするので、
    * 「主音声」「解説」がそのままプレイヤーの切り替えに出る。
    *
-   * **多すぎても困らない。** 番組表が言っている本数と実際に入っている本数は
-   * 食い違いうるが、ffmpeg は在りもしないトラックへの指定を黙って読み飛ばす
+   * **多すぎても困らない。** 番組表の本数と実際に入っている本数は
+   * 食い違いうるが、ffmpeg は無いトラックへの指定をエラーにせず読み飛ばす
    * (実機で確認)。言語はデュアルモノのところで別に付けてある
    */
   (options.audioTitles ?? []).forEach((title, index) => {
@@ -617,8 +616,8 @@ export function enqueue(
 }
 
 /**
- * 中止を指示したジョブが畳み終わるのを待っている呼び出し。
- * 畳み終わり (`pump` の finally) で呼ばれる
+ * 中止を指示したジョブの後始末が終わるのを待っている呼び出し。
+ * 後始末が終わったところ (`pump` の finally) で呼ばれる
  */
 const stopping = new Map<number, (() => void)[]>();
 
@@ -626,12 +625,12 @@ const stopping = new Map<number, (() => void)[]>();
  * 中止を待つ上限。**押した人を待たせすぎない。**
  *
  * ffmpeg は SIGTERM から 1 秒ほどで終わる (実測 923ms / 1078ms)。この待ちは
- * その 1 秒を待って**畳んだ結果を返す**ためのもので、間に合わなければ待つのをやめて
- * 返す。あとは畳み終わりの通知 (SSE) が追いつく
+ * その 1 秒を待って**後始末の済んだ結果を返す**ためのもので、間に合わなければ待つのをやめて
+ * 返す。あとは後始末が終わったときの通知 (SSE) が追いつく
  */
 const CANCEL_WAIT_MS = 5_000;
 
-/** 畳み終わるまで待つ。上限を超えたら待つのをやめる (中止は続く) */
+/** 後始末が終わるまで待つ。上限を超えたら待つのをやめる (中止は続く) */
 function settled(jobId: number): Promise<void> {
   if (!runningJobs.has(jobId)) return Promise.resolve();
   return new Promise((resolve) => {
@@ -647,14 +646,14 @@ function settled(jobId: number): Promise<void> {
   });
 }
 
-/** 畳み終わったことを、待っている呼び出しに伝える */
+/** 後始末が終わったことを、待っている呼び出しに伝える */
 function wakeStopping(jobId: number): void {
   for (const done of stopping.get(jobId) ?? []) done();
   stopping.delete(jobId);
 }
 
 /**
- * エンコードを中止する。**畳み終わってから返す。**
+ * エンコードを中止する。**後始末が終わってから返す。**
  *
  * 中止を伝えるだけで返すと、押した直後の読み直しは ffmpeg が終わる前に届き、画面が変わらない。
  * ffmpeg は SIGTERM から 1 秒ほどで終わるので、待ってから返せば押した人の画面は
@@ -695,9 +694,9 @@ export async function cancel(jobId: number): Promise<void> {
 }
 
 /**
- * 中止を指示されて、まだ畳み終わっていないか。
+ * 中止を指示されて、まだ後始末が終わっていないか。
  *
- * 一覧の行に添えて、中止のボタンを**畳み終わるまで回したままにする**ための
+ * 一覧の行に添えて、中止のボタンを**後始末が終わるまで回したままにする**ための
  * もの。押した返事 (`cancel`) は上限で切り上げることがあるので、返事だけで
  * ボタンを戻すと「回るのが止まったのにまだエンコード中」になる
  */
@@ -723,7 +722,7 @@ function setPhase(jobId: number, phase: EncodePhase, log: string): void {
  * 段階の名前 (「CM 検出中」) だけでは、進んでいるのか止まっているのかが分からない。
  *
  * **中止を指示された後は書き換えない**。`cancel` が書いた「中止しています」を、
- * 畳むまでの間に通る段階が上書きしないように
+ * 後始末が終わるまでの間に通る段階が上書きしないように
  */
 function setStep(jobId: number, log: string): void {
   if (canceled.has(jobId)) return;
@@ -1293,7 +1292,7 @@ function markFailed(jobId: number, reason: string): void {
  * エンコードの失敗を記録して知らせる。
  *
  * **録画の行には何も書かない。** 落ちたのは再エンコードのほうで、元の録画は無事なので、
- * 録画そのものを「失敗」にすると観られるはずのものが観られなくなる (実際にそうなっていた)。
+ * 録画そのものを「失敗」にすると観られるはずのものが観られなくなる。
  * 理由はジョブが持ち、一覧は最新のジョブを見て出す
  */
 function fail(
@@ -1316,7 +1315,7 @@ function fail(
  * 中止で終わったときの後始末。
  *
  * 出来かけの作業ファイルだけ捨てて、元の録画には触らない。
- * どの段階で止めても同じやり方で畳めるように 1 か所にまとめてある。
+ * どの段階で止めても同じやり方で後始末できるように 1 か所にまとめてある。
  */
 function finishCanceled(jobId: number, working: string | null): void {
   removeIfExists(working);
@@ -1427,6 +1426,11 @@ async function runJob(jobId: number): Promise<void> {
     fail(jobId, recording, "元の TS がありません");
     return;
   }
+  // 映像の無い録画 (ラジオ・データ放送の局) はエンコードしない。元の TS のまま観る画面で再生する (`recorder.finish`)
+  if (!recordedMedia(input, aribServiceId(recording.service_id)).video) {
+    fail(jobId, recording, NO_VIDEO);
+    return;
+  }
 
   // 前の回が落ちて取り残した中間ファイルを片付けてから始める (この元の TS のぶんだけ)
   clearScratch(input);
@@ -1509,7 +1513,7 @@ async function runJob(jobId: number): Promise<void> {
     const result = await descramble(input, target, signal);
     if (!result.ok) {
       removeIfExists(target);
-      // 中止で切ったときは失敗にしない。下の後始末で canceled として畳む
+      // 中止で切ったときは失敗にしない。下の後始末で canceled として終える
       if (canceled.has(jobId)) return finishCanceled(jobId, target);
       // 有料の番組が、カードは読めているのに掛かったまま。その局は次の回から録らない (`contracts.noteStillScrambled`)
       if (result.stillScrambled === true && paidRecording(recording))
@@ -1796,8 +1800,8 @@ async function runJob(jobId: number): Promise<void> {
         /*
          * ffmpeg の起こし直しは `encode_jobs.attempts` に数えない。あれはジョブを取り出した回数で、上限 (`encodeMaxAttempts`)
          * はジョブのやり直しにだけ当てる。1 回の実行の中の起こし直しは `encodeAttempts` の並び (方式ごとに 2 回) で尽きるので、上限は要らない。
-         * 数えていた頃は、コーデックをいくつも選んで GPU からソフトウェアへ倒れた 1 回の実行だけで上限の 5 に届き、
-         * その実行の途中でポッドが止まると、起動したときに 1 度もやり直さず失敗にしていた
+         * 数えると、コーデックをいくつも選んで GPU からソフトウェアへ切り替えた 1 回の実行だけで上限に届き、
+         * その実行の途中でポッドが止まると、起動したときに 1 度もやり直さずに失敗にしてしまう
          */
         const before = attempts[i - 1]!.hardware;
         if (attempt.hardware !== before) {
@@ -1811,7 +1815,7 @@ async function runJob(jobId: number): Promise<void> {
       // ロゴの点は読むたびに一から数える (落ちた回の途中までを持ち越さない)
       const want = extra.analysis ? reading?.want() : undefined;
       const reader = want === undefined ? undefined : scanReader(want);
-      // 起動できずに投げたときも、書き出しの一時フォルダは片付ける
+      // 起動できずに例外になったときも、書き出しの一時フォルダは片付ける
       const pending = runFfmpeg(
         jobId,
         report,
@@ -1963,7 +1967,7 @@ async function runJob(jobId: number): Promise<void> {
   /**
    * 1 本目。CM を一緒に探し、エンコードし終えたら境目を決め、仕上げる。ほかのコーデックはこれが終わるのを待ってから
    * 仕上げる (境目が要る)。1 本目が落ちたら CM は分からないまま (ほかは CM 無しで置く。
-   * あとから「CM 検出をやり直す」でチャプターを入れられる)
+   * あとから「CM の再検出」でチャプターを入れられる)
    */
   const [lead, ...rest] = codecs as [HwCodec, ...HwCodec[]];
   const firstTask = (async (): Promise<Made | null> => {
@@ -2003,7 +2007,7 @@ async function runJob(jobId: number): Promise<void> {
       outTimeUs: done.result.outTimeUs,
     });
   });
-  // 1 本が投げても、ほかが終わるまで待ってから畳む (動いている ffmpeg と作業ファイルを残さない)
+  // 1 本が例外になっても、ほかが終わるまで待ってから後始末する (動いている ffmpeg と作業ファイルを残さない)
   const settledTasks = await Promise.allSettled([firstTask, ...otherTasks]);
   const thrown = settledTasks.find((task) => task.status === "rejected");
   if (thrown !== undefined) {
@@ -2113,7 +2117,10 @@ async function runJob(jobId: number): Promise<void> {
    * ソフトウェアデコードで数百コマぶん重い。元の TS の MPEG-2/H.264 なら軽い。
    * 位置は元の TS の時刻で決める (`thumbnailPlace`)。CM があれば本編の最初の区間から取る (CM の映像を避ける)
    */
-  const duration = (recording.end_at - recording.start_at) / 1000;
+  // 測った元の TS の尺。途中で切れた録画は予定の尺より短く、予定の尺で決めると位置が尺を超えて何も出ない
+  const duration = Number.isFinite(measured.duration)
+    ? measured.duration
+    : (recording.end_at - recording.start_at) / 1000;
   const content =
     detection !== null && detection.cm.length > 0
       ? own(primary.skip).keep[0]
@@ -2233,7 +2240,7 @@ async function runJob(jobId: number): Promise<void> {
 }
 
 /**
- * **CM 検出だけやり直す** (録画の詳細の「その他…」→「CM 検出をやり直す」)。再エンコードしない。
+ * **CM 検出だけやり直す** (録画の詳細の「その他…」→「CM の再検出」)。再エンコードしない。
  *
  * - 元の TS があれば元の TS から、無ければエンコードしたもの (mkv) から読む。どちらからでもロゴ・切れ目・無音は取れる
  *   (エンコードしたものは映像の大きさが違うので、ロゴは大きさごとに覚えたものを使う。`logo-own.modelFile`)
@@ -2259,6 +2266,15 @@ async function runCmJob(jobId: number): Promise<void> {
   // エンコードせずに置いた録画 (「エンコードしない」) は、置き場の TS が元の TS そのもの (`tsPathOf`)
   const raw = tsPathOf(recording);
   const files = encodedFiles(recording).map((entry) => entry.path);
+  // 映像の無い録画 (ラジオ・データ放送の局) は CM を検出しない (CM 検出は映像のロゴと場面の切り替わりを読む)
+  if (
+    raw !== null &&
+    files.length === 0 &&
+    !recordedMedia(raw, aribServiceId(recording.service_id)).video
+  ) {
+    fail(jobId, recording, NO_VIDEO_CM, what);
+    return;
+  }
   /*
    * **4K の録画 (`.mmts`) は、エンコードしたものがあればそちらから読む。** 無ければ MP4 に詰め替えてから読む
    * (`remuxForEncode`。ffmpeg は TLV を読めない)。詰め替えた MP4 の時刻は録画の物差し (`mmts.ts`) と同じなので、
@@ -2430,7 +2446,7 @@ async function detectCm(
     }
     for (const [i, file] of files.entries()) renameSync(outputs[i]!, file);
   } finally {
-    // 投げたときも書きかけ (`.post`) を残さない。片付け (`files.orphan`) も消すが、消すのは書いてから 1 時間経ったあと (`files.SETTLE`)
+    // 例外のときも書きかけ (`.post`) を残さない。片付け (`files.orphan`) も消すが、消すのは書いてから 1 時間経ったあと (`files.SETTLE`)
     discard();
     removeIfExists(chapters);
   }
@@ -2450,6 +2466,12 @@ export const CM_CUT_ALREADY =
 /** 映像コーデックをどれも選んでいない (「エンコードしない」)。エンコードするジョブも、ホームの再エンコードも断る */
 export const NO_CODEC =
   "映像コーデックが選ばれていません。設定で選んでください";
+
+/** 映像の無い録画 (ラジオ・データ放送の局) のエンコードを断る理由。元の TS のまま観られる (`recorder.finish`) */
+const NO_VIDEO = "映像の無い録画はエンコードしません。元の TS のまま観られます";
+
+/** 映像の無い録画の CM 検出を断る理由 */
+const NO_VIDEO_CM = "映像の無い録画は CM を検出しません";
 
 /**
  * 段階の中の進み具合 (CM 検出だけやり直すとき)。読んだコマの時刻 ÷ 尺。
@@ -2502,7 +2524,7 @@ export function pump(): void {
       .get();
     if (next === undefined) return;
 
-    // **試し過ぎたジョブは失敗にする。** プロセスごと落とす毒ジョブは running→queued
+    // **試し過ぎたジョブは失敗にする。** プロセスごと落とすジョブは running→queued
     // へ戻り続け、id 順なので毎回ここで先頭に来る。上限を超えたら failed に
     // して後ろを進める。failed の確定は runJob を呼ぶ前なので、直後にまた落ちても
     // 同じジョブを取り直すことはない
@@ -2547,7 +2569,7 @@ export function pump(): void {
     // 待機中が動き出したことも伝える。押した直後に何も変わらないと止まって見える
     emit("recordings");
     void (next.kind === "cm" ? runCmJob(jobId) : runJob(jobId))
-      // 中止したあとに投げたものは失敗にしない (中止として畳む)
+      // 中止したあとの例外は失敗にしない (中止として終える)
       .catch((error) =>
         canceled.has(jobId)
           ? finishCanceled(jobId, null)
@@ -2558,7 +2580,7 @@ export function pump(): void {
         procs.delete(jobId);
         aborts.delete(jobId);
         canceled.delete(jobId);
-        // 中止を押して待っている人に、畳み終わったことを伝える
+        // 中止を押して待っている人に、後始末が終わったことを伝える
         wakeStopping(jobId);
         emit("recordings");
         // 持ち枠を返す。空いた枠に次のジョブが入る (`slots` の `onFree` が pump を呼ぶ)

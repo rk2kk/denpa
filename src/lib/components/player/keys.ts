@@ -5,14 +5,13 @@ import { SKIP } from "#lib/ts/watch.js";
  * 画面やエンコードの前後で押し方を変えない)。その画面でできないことは、押しても何も起きない (速さはライブの
  * 追っかけ中だけ、など。決めるのは画面のほう)。
  *
- * **修飾キー付きは取らない。** Ctrl+C (コピー) を `c` (字幕) として横取りして
- * いた頃は、観ながら番組名や URL を写せなかった。Ctrl+F (検索) → 全画面、
- * Ctrl+S (保存) → 切り抜きも同じ。Shift だけは通す (`<` `>` は Shift 込みで
- * 打つ)。IME 変換中のキーも渡さない。
+ * **修飾キー付きは取らない。** Ctrl+C (コピー) を `c` (字幕) として横取りすると、
+ * 観ながら番組名や URL を写せない。Ctrl+F (検索) → 全画面、Ctrl+S (保存) → 切り抜きも同じ。
+ * Shift だけは通す (`<` `>` は Shift 込みで打つ)。IME 変換中のキーも渡さない。
  *
  * 入力欄 (テキストエリア・選択・編集できる要素も)・ボタン・リンク・メニューの上では取らない。空白でボタンを押せなくなる
  */
-export interface PlayerKeys {
+interface PlayerKeys {
   /** 空白 / k */
   togglePlay: () => void;
   /** ← → (10 秒。`ts/watch.ts` の端 2 回タップと同じ幅) */
@@ -83,7 +82,7 @@ export function isShiftD(event: KeyboardEvent): boolean {
 /**
  * **データ放送を出している間に、あちらのリモコンへ譲るキー** (空白・十字キー。`bml/engine.ts` の `aribKey`)。
  * ライブと観る画面で同じ。譲らないと、空白で再生/一時停止と文書の決定が同時に起きる。
- * `f` は譲らずに全画面にする。エンジンは `f` (データ 2) をどのキーの組 (used-key-list) にも入れないので、譲っても文書に届かない
+ * `f` は譲らずに全画面にする。データ 2 のキーはどのキーの組 (used-key-list) にも無く、譲っても文書に届かない (`keyGroup`)
  */
 export function dataRemoteKey(event: KeyboardEvent): boolean {
   return event.key === " " || event.key.startsWith("Arrow");

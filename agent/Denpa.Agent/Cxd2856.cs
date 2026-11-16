@@ -70,7 +70,7 @@ internal readonly record struct CxdIsdbcSignal(
     byte Search, byte Ts, byte? Modulation, int CnRaw, byte[]? Per, byte[]? Locked, byte BerLength, byte[]? Ber, byte[]? Uncorrected, int IfAgc);
 
 /// <summary>
-/// ISDB-C でほかに読める値 (仕様書 9.5)。出どころは PLEX の公開ドライバに入っている Sony の手順だけ (仕様書 13)。PX-MLT5PE の実機で読めたが、値が正しいかはほかの受信機と比べていない。<c>--tune</c> の出力にだけ出す。値が無ければ null
+/// ISDB-C でほかに読める値 (仕様書 9.5)。出どころは PLEX の公開ドライバに入っている Sony の手順だけ (仕様書 13)。PX-MLT5PE の実機で読めたが、値が正しいかはほかの受信機と比べていない。<c>--tune</c> の出力と、ISDB-C がロックしなかったときの記録 (<see cref="CxdIsdbcLockFailure"/>) に出す。値が無ければ null
 /// </summary>
 /// <param name="Inverted">復調器がスペクトルの反転を見つけたか</param>
 /// <param name="CarrierOffsetKhz">搬送波のずれ (kHz)</param>
@@ -79,6 +79,61 @@ internal readonly record struct CxdIsdbcSignal(
 /// <param name="Uncorrected">RS で直せなかったパケットの数</param>
 /// <param name="IfAgc">IF の AGC の出力 (12 ビット)</param>
 public sealed record CxdIsdbcDetail(bool? Inverted, double? CarrierOffsetKhz, double? SymbolRateMsps, double? PreRsBer, int? Uncorrected, int IfAgc);
+
+/// <summary>受信機の前の選局 (<see cref="CxdIsdbcLockFailure.Previous"/>)</summary>
+/// <param name="Mode">方式 (<c>ISDB-T</c>・<c>ISDB-S</c>・<c>J.83B</c>・<c>ISDB-C</c>)</param>
+/// <param name="Khz">周波数 (kHz。衛星は IF)</param>
+/// <param name="Locked">ロックしたか</param>
+/// <param name="BeforeMs">前の選局を始めてから、いまの選局を始めるまで (ms)</param>
+public sealed record CxdPreviousTune(string Mode, uint Khz, bool Locked, long BeforeMs);
+
+/// <summary>
+/// ISDB-C の選局がロックしなかったときに読んだ状態 (仕様書 8.6・9.5)。ロックが不安定な理由を探すため、常駐の記録と <c>--tune</c> に 1 行で出す。
+/// どこまでロックしたかは、仕様書にあるビット (バンク <c>40</c> の <c>88</c> の bit0 と <c>10</c> の bit5) だけで見る。AGC や搬送波がどの状態にあるかを示すビットと、
+/// チューナーの PLL のロックを読むレジスタは仕様書に無いので読まない。チューナーの AGC (仕様書 9.7) は、読むとチューナーの状態を動かすので読まない
+/// </summary>
+/// <param name="Khz">選局した中心周波数 (kHz)</param>
+/// <param name="Retuned">ISDB-C のまま選局し直したか (仕様書 8.4 の手順 2)。false なら起動から選局した</param>
+/// <param name="WaitMs">ロックを確かめ始めてから、最後に読むまで (ms)</param>
+/// <param name="DemodLockMs">復調のロック (<c>88</c> の bit0) が初めて立った時刻 (ロックを確かめ始めてから ms)。立たなければ -1</param>
+/// <param name="TsLockMs">TS のロック (<c>10</c> の bit5) が初めて立った時刻。立たなければ -1</param>
+/// <param name="DemodLocked">最後に読んだ <c>88</c> の bit0</param>
+/// <param name="TsLocked">最後に読んだ <c>10</c> の bit5</param>
+/// <param name="IfAgc">復調器の IF の AGC の出力 (<c>49</c>〜<c>4A</c> の 12 ビット。仕様書 9.5)。読めなければ null</param>
+/// <param name="CarrierOffsetKhz">搬送波のずれ (kHz。仕様書 9.5)。自動の探索がロックしていなければ null</param>
+/// <param name="SinceInitMs">受信機を初期化してから、この選局を始めるまで (ms)</param>
+/// <param name="TunesSinceInit">初期化してから何回目の選局か (1 から数える。どの方式も数え、地上波のプリセットを外した選局し直しと、ずらした周波数の試し直しも 1 回と数える)</param>
+/// <param name="Previous">この受信機の前の選局。受信機を作ってから初めての選局なら null</param>
+/// <param name="Modulation">復調器が見分けた変調 (<c>64QAM</c> など。バンク <c>40</c> の <c>19</c>。仕様書 9.4)。自動の探索がロックしていないか、読めなければ null</param>
+/// <param name="CnDb">C/N (dB。仕様書 9.4)。自動の探索がロックしていないか、読めなければ null</param>
+/// <param name="SymbolRateMsps">シンボルレート (Msps。仕様書 9.5)。自動の探索がロックしていなければ null</param>
+/// <param name="PreRsBer">誤り訂正の前の BER (仕様書 9.5)。測り終えていなければ null</param>
+/// <param name="Uncorrected">訂正できなかったパケットの数 (仕様書 9.5)。読めなければ null</param>
+public sealed record CxdIsdbcLockFailure(
+    uint Khz, bool Retuned, long WaitMs, long DemodLockMs, long TsLockMs, bool DemodLocked, bool TsLocked,
+    int? IfAgc, double? CarrierOffsetKhz,
+    long SinceInitMs, int TunesSinceInit, CxdPreviousTune? Previous,
+    string? Modulation = null, double? CnDb = null, double? SymbolRateMsps = null, double? PreRsBer = null, int? Uncorrected = null)
+{
+    /// <summary>記録と <c>--tune</c> に出す 1 行</summary>
+    public string Describe()
+    {
+        static string At(long ms) => ms < 0 ? "立たなかった" : $"{ms} ms";
+        static string Bit(bool on) => on ? "1" : "0";
+        var previous = Previous is { } p
+            ? $"{p.Mode} {p.Khz} kHz ({(p.Locked ? "ロックした" : "ロックしなかった")}、{p.BeforeMs} ms 前に開始)"
+            : "なし";
+        return $"ISDB-C がロックしませんでした ({Khz} kHz、{(Retuned ? "選局し直し" : "起動して選局")})  "
+            + $"待ち {WaitMs} ms  復調のロック (88 の bit0) {At(DemodLockMs)}  TS のロック (10 の bit5) {At(TsLockMs)}  "
+            + $"最後に読んだ値 bit0={Bit(DemodLocked)} bit5={Bit(TsLocked)}  "
+            + $"復調器の IF の AGC {(IfAgc is { } agc ? $"{agc}" : "-")}  "
+            + $"搬送波のずれ {(CarrierOffsetKhz is { } offset ? $"{offset:F1} kHz" : "-")}  "
+            + $"変調 {Modulation ?? "-"}  C/N {(CnDb is { } cn ? $"{cn:F1} dB" : "-")}  "
+            + $"シンボルレート {(SymbolRateMsps is { } rate ? $"{rate:F4} Msps" : "-")}  "
+            + $"誤り訂正の前の BER {(PreRsBer is { } ber ? $"{ber:E2}" : "-")}  訂正できなかったパケット {(Uncorrected is { } bad ? $"{bad}" : "-")}  "
+            + $"初期化から {SinceInitMs} ms・{TunesSinceInit} 回目の選局  前の選局 {previous}";
+    }
+}
 
 /// <summary>TS を止める復調器のレジスタ 4 つ (仕様書 3.5。どれもバンク 00)</summary>
 public readonly record struct CxdTsOutput(byte C3, byte R81, byte R32, byte C4)
@@ -1057,7 +1112,7 @@ internal sealed class Cxd2856(CxdLink link)
     }
 
     /// <summary>
-    /// 衛星の入力のレベル (dB。仕様書 9.7 の衛星): 利得 (dB × 100) = <c>v × (-1400) / 403 + 9700</c> (四捨五入)、レベル = -利得 / 100
+    /// 衛星の入力のレベル (dB。仕様書 9.7 の衛星)。利得 (dB × 100) = <c>v × (-1400) / 403 + 9700</c> (四捨五入)、レベル = -利得 / 100
     /// </summary>
     public static double IsdbsLevelDb(int agc)
     {
@@ -1145,6 +1200,21 @@ public sealed class Cxd2856Frontend
     /// </summary>
     private State _started = State.Sleep;
 
+    /// <summary>いまの (最後に始めた) 選局の方式・周波数・始めた時刻。次の選局を始めるときに <see cref="_previous"/> へ移す</summary>
+    private (State Mode, uint Khz, long At)? _current;
+
+    /// <summary>いまの選局の前の選局 (<see cref="CxdIsdbcLockFailure.Previous"/>)。初期化をまたいで残す</summary>
+    private CxdPreviousTune? _previous;
+
+    /// <summary>最後に初期化を終えた時刻 (ms)</summary>
+    private long _initAt;
+
+    /// <summary>最後の初期化から始めた選局の数 (どの方式も数える)</summary>
+    private int _tunes;
+
+    /// <summary>いまの選局が、同じ方式のままの選局し直しか (false なら起動から)</summary>
+    private bool _retuned;
+
     /// <param name="bus">この受信機のバス</param>
     /// <param name="busLock">同じバスの受信機で 1 つのロック</param>
     /// <param name="demodAddress">復調器の T のアドレス (7 ビット。仕様書 1.2)</param>
@@ -1191,6 +1261,9 @@ public sealed class Cxd2856Frontend
     /// <summary>ISDB-C で最後に <see cref="Signal"/> を読んだときの、ほかに読める値 (仕様書 9.5)。<c>--tune</c> の出力にだけ出す。読んでいなければ null</summary>
     public CxdIsdbcDetail? IsdbcDetail { get; private set; }
 
+    /// <summary>最後の ISDB-C の選局がロックしなかったときに読んだ状態 (<see cref="CxdIsdbcLockFailure"/>)。ロックしたか、最後の選局が ISDB-C でなければ null</summary>
+    public CxdIsdbcLockFailure? IsdbcLockFailure { get; private set; }
+
     /// <summary>待機中の地上波の RF 入力の整合を保つ設定になっているか (仕様書 4.8。<see cref="KeepMatching"/>)。テストのため。受信機の操作のロックを取るので、選局の間は待つ</summary>
     internal bool KeepsMatching
     {
@@ -1222,6 +1295,8 @@ public sealed class Cxd2856Frontend
             }
             _state = State.Sleep;
             _started = State.Sleep;
+            _initAt = _nowMs();
+            _tunes = 0;
         }
     }
 
@@ -1310,7 +1385,7 @@ public sealed class Cxd2856Frontend
     {
         var entered = _nowMs();
         long tuned = 0;
-        Tune(State.Isdbt, () => { }, () =>
+        Tune(State.Isdbt, khz, () => { }, () =>
         {
             _tuner.TuneTerrestrial(khz);
             tuned = _nowMs();
@@ -1378,7 +1453,7 @@ public sealed class Cxd2856Frontend
         lock (_op)
         {
             ClearReadings();
-            Tune(State.Isdbs, () => _demod.SelectTs(stream), () => _tuner.TuneSatellite(khz));
+            Tune(State.Isdbs, khz, () => _demod.SelectTs(stream), () => _tuner.TuneSatellite(khz));
             _khz = khz;
             // ロックしなかったときも、復調器は ISDB-S で動作中のまま残す (仕様書に無い)。次の選局が方式に合わせて選局し直すか起動し直し、
             // 受信機を閉じるときは Sleep がスリープにするので、ここでスリープにしなくても次の手順は変わらない
@@ -1398,7 +1473,7 @@ public sealed class Cxd2856Frontend
         lock (_op)
         {
             ClearReadings();
-            Tune(State.J83b, () => { }, () => _tuner.TuneCable(khz));
+            Tune(State.J83b, khz, () => { }, () => _tuner.TuneCable(khz));
             _khz = khz;
             return WaitJ83b();
         }
@@ -1417,7 +1492,7 @@ public sealed class Cxd2856Frontend
         lock (_op)
         {
             ClearReadings();
-            Tune(State.Isdbc, () => { }, () => _tuner.TuneIsdbc(khz));
+            Tune(State.Isdbc, khz, () => { }, () => _tuner.TuneIsdbc(khz));
             _khz = khz;
             return WaitIsdbc();
         }
@@ -1430,15 +1505,17 @@ public sealed class Cxd2856Frontend
         CableModulation = null;
         CablePer = null;
         IsdbcDetail = null;
+        IsdbcLockFailure = null;
         _tuneLines.Clear();
     }
 
     /// <summary>
     /// 選局の書き込み (仕様書 5.4・6.3・7.4・8.4 の手順のうち、ロックを待つ前まで)。<paramref name="select"/> (ISDB-S の TS を選ぶ書き込み) →
     /// 選局し直しか方式の起動 (ほかの方式で動作中なら、その方式のスリープを先に。仕様書 10.1) → 中継の中で <paramref name="tune"/> (チューナーの周波数) →
-    /// <paramref name="beforeFinish"/> (ISDB-T のプリセット。仕様書 5.8) → 選局を終える 3 行 (仕様書 2.3)
+    /// <paramref name="beforeFinish"/> (ISDB-T のプリセット。仕様書 5.8) → 選局を終える 3 行 (仕様書 2.3)。
+    /// <paramref name="khz"/> は、ロックしなかったときの記録 (<see cref="CxdIsdbcLockFailure.Previous"/>) のために控えるだけで、機材には書かない
     /// </summary>
-    private void Tune(State target, Action select, Action tune, Action? beforeFinish = null)
+    private void Tune(State target, uint khz, Action select, Action tune, Action? beforeFinish = null)
     {
         if (_state == State.Unknown)
         {
@@ -1449,6 +1526,13 @@ public sealed class Cxd2856Frontend
             if (_started is State.J83b or State.Isdbc) Sleep();
             Init();
         }
+        // ロックしなかったときの記録のために、前の選局と、初期化から何回目かを控える (機材には書かない)。前の選局のロックは LockMs で分かるので、控えてから消す
+        var now = _nowMs();
+        _previous = _current is { } last ? new CxdPreviousTune(ModeName(last.Mode), last.Khz, LockMs >= 0, now - last.At) : null;
+        _current = (target, khz, now);
+        _tunes++;
+        _retuned = _state == target;
+        LockMs = -1;
         try
         {
             lock (_busLock)
@@ -1600,9 +1684,74 @@ public sealed class Cxd2856Frontend
 
     /// <summary>
     /// ISDB-C のロックを待つ (仕様書 8.6)。J.83B と同じレジスタを 10 ms ごとに読み、復調のロック (バンク <c>40</c> の <c>88</c> の bit0) と TS のロック (<c>10</c> の bit5) がどちらも立てばロック、1 秒で時間切れ。
-    /// ロックのあとの待ちは無い (仕様書 8.6)
+    /// ロックのあとの待ちは無い (仕様書 8.6)。読む間隔と時間切れは <see cref="WaitLock"/> と同じ。
+    /// ロックしなければ、待つ間に立ったビットの時刻と復調器の状態を <see cref="IsdbcLockFailure"/> に入れる (<see cref="ReadIsdbcLockFailure"/>)
     /// </summary>
-    private bool WaitIsdbc() => WaitLock(() => Cxd2856.J83bLocked(_demod.IsdbcStatus()), IsdbcLockTimeoutMs);
+    private bool WaitIsdbc()
+    {
+        LockMs = -1;
+        var started = _nowMs();
+        long demodLock = -1, tsLock = -1;
+        while (true)
+        {
+            (byte Search, byte Ts) status;
+            lock (_busLock) status = _demod.IsdbcStatus();
+            var elapsed = _nowMs() - started;
+            var demod = (status.Search & 0x01) != 0;
+            var ts = (status.Ts & 0x20) != 0;
+            if (demodLock < 0 && demod) demodLock = elapsed;
+            if (tsLock < 0 && ts) tsLock = elapsed;
+            if (Cxd2856.J83bLocked(status))
+            {
+                LockMs = elapsed;
+                return true;
+            }
+            if (elapsed >= IsdbcLockTimeoutMs)
+            {
+                IsdbcLockFailure = ReadIsdbcLockFailure(elapsed, demodLock, tsLock, demod, ts);
+                return false;
+            }
+            _sleep(LockPollMs);
+        }
+    }
+
+    /// <summary>
+    /// ISDB-C がロックしなかったときに、復調器の IF の AGC と搬送波のずれ (仕様書 9.5) を読む (読み方は <see cref="Signal"/> と同じ)。
+    /// チューナーは読まない。チューナーの AGC を読むにはチューナーの CPU を起こして待機に戻すことになり、ロックしない選局のたびにチューナーの状態を動かすため。
+    /// 読めなければ (I2C の失敗) その値を null にして、ロックしなかった結果を返す (この読み出しで選局の結果を変えない。I2C が壊れていれば次の操作が失敗する)
+    /// </summary>
+    private CxdIsdbcLockFailure ReadIsdbcLockFailure(long waited, long demodLock, long tsLock, bool demod, bool ts)
+    {
+        CxdIsdbcDetail? detail = null;
+        CxdIsdbcSignal? read = null;
+        try
+        {
+            lock (_busLock) read = _demod.ReadIsdbcSignal();
+            detail = Cxd2856.IsdbcDetail(read.Value);
+        }
+        catch (IOException)
+        {
+            // 読めなかった値は出さない
+        }
+        return new CxdIsdbcLockFailure(
+            _khz, _retuned, waited, demodLock, tsLock, demod, ts,
+            detail?.IfAgc, detail?.CarrierOffsetKhz,
+            (_current?.At ?? _nowMs()) - _initAt, _tunes, _previous,
+            // 変調と C/N で、変調を取り違えているのか C/N が足りないのかを分ける (復調はロックしても TS のロックが立たない搬送波があった)
+            read?.Modulation is { } modulation ? Cxd2856.J83bModulationName(modulation) : null,
+            read?.Modulation is { } named ? Cxd2856.IsdbcCnDb(named, read.Value.CnRaw) : null,
+            detail?.SymbolRateMsps, detail?.PreRsBer, detail?.Uncorrected);
+    }
+
+    /// <summary>方式の名前 (<see cref="CxdPreviousTune.Mode"/>)</summary>
+    private static string ModeName(State mode) => mode switch
+    {
+        State.Isdbt => "ISDB-T",
+        State.Isdbs => "ISDB-S",
+        State.J83b => "J.83B",
+        State.Isdbc => "ISDB-C",
+        _ => mode.ToString(),
+    };
 
     /// <summary><paramref name="locked"/> が true を返すまで <see cref="LockPollMs"/> ごとに読む。<paramref name="timeoutMs"/> を過ぎたら false。読むのはバスのロックの中</summary>
     private bool WaitLock(Func<bool> locked, int timeoutMs)

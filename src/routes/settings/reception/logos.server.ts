@@ -3,7 +3,7 @@ import { type Actions, fail } from "@sveltejs/kit";
 import { parseId } from "#lib/id.js";
 import { forgetMaterials } from "#lib/server/cm-material-store.js";
 import { orm } from "#lib/server/db.js";
-import { currentServices, typeRank } from "#lib/server/epg.js";
+import { currentServices } from "#lib/server/epg.js";
 import {
   forgetLogoData,
   learnedAt,
@@ -18,7 +18,7 @@ import {
   sweepNow,
   sweepState,
 } from "#lib/server/logo.js";
-import { DIGITAL_TV, services } from "#lib/server/schema.js";
+import { hasVideo, services } from "#lib/server/schema.js";
 import type { ChannelType } from "#lib/types.js";
 
 /**
@@ -64,19 +64,17 @@ function stationLogos() {
    * サブチャンネルの枠は束ねて 1 局にする (覚えたものは写し合うので、束ねないと同じ画像が 2 つ並ぶ)
    */
   const cmShown = new Set(
-    stations(rows.filter((row) => row.service_type === DIGITAL_TV)).map(
+    stations(rows.filter((row) => hasVideo(row.service_type))).map(
       (row) => row.id,
     ),
   );
-  return rows
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      type: row.type as ChannelType,
-      logo: logoOf(row),
-      cm: cmShown.has(row.id) ? learnedAt(row.id) : null,
-    }))
-    .sort((a, b) => typeRank(a.type) - typeRank(b.type));
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type as ChannelType,
+    logo: logoOf(row),
+    cm: cmShown.has(row.id) ? learnedAt(row.id) : null,
+  }));
 }
 
 export function load() {
@@ -85,8 +83,7 @@ export function load() {
     /*
      * 局ロゴを何局ぶん持っているか。
      *
-     * ロゴは放送波から取得するしかないが、取得できたかどうかを確かめる場所が
-     * どこにも無かった。番組表にロゴが出ないとき、取れていないのか
+     * ロゴは放送波から取得するしかない。番組表にロゴが出ないとき、取れていないのか
      * 出し方が悪いのかを見分けられるようにする
      */
     logos: logoStats(),

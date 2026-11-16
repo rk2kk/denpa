@@ -30,9 +30,9 @@ import { fromTsTime, type Ruler } from "./watch";
 
 export interface TimedMessage {
   /**
-   * 放送の実時刻 (TDT/TOT 由来, unix ms)。**先頭で時計を見る前のものは null。**
+   * 放送の実時刻 (TDT/TOT 由来、unix ms)。**先頭で時計を見る前のものは null。**
    *
-   * TDT は数秒おきにしか来ないので、間のメッセージは「最後に見た時刻」を負う。
+   * TDT は数秒おきにしか来ないので、間のメッセージには「最後に見た時刻」を付ける。
    * データ放送は秒単位で変わるものなので、この粒度で足りる
    */
   at: number | null;
@@ -45,7 +45,7 @@ export interface TimedMessage {
  * タイムラインは放送の実時刻 (TDT) で並ぶが、再生時に突き合わせたいのは
  * 動画の再生位置。2 段で直す。
  *
- * 1. **元の TS の物差しへ。** `headUnixMs` は「元の TS の先頭の放送実時刻」
+ * 1. **元の TS の物差しへ。** `headUnixMs` は「元の TS が始まる所の放送実時刻」
  *    (`DataBroadcastCapture.head`)。番組の始まり (`start_at`) ではない。録画は
  *    前のマージンのぶん早く始まるので、そちらを基準にすると番組連動がマージン (既定 10 秒) ぶん早く出る
  * 2. **エンコードしたものの物差しへ** (`ruler`。観る画面の `Ruler` と同じもの)。
@@ -60,7 +60,7 @@ export function playbackMsAt(
   return Math.round(fromTsTime((atUnixMs - headUnixMs) / 1000, ruler) * 1000);
 }
 
-/** 再生位置 (ms) を負ったメッセージ。サイドカーに書くのはこの形式 */
+/** 再生位置 (ms) を付けたメッセージ。サイドカーに書くのはこの形式 */
 export interface PlacedMessage {
   /** 動画の再生位置 (ms)。先頭の準備 (`at === null`) は 0 に寄せる */
   at: number;

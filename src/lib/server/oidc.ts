@@ -6,7 +6,7 @@
  * 認証まわりで「中で何をしているか分からない」を抱えることになります。
  *
  * 相手は Entra ID を想定していますが、OIDC の標準しか使っていないので
- * Keycloak でも Google でも同じはずです (実機で当てたのは Entra だけ)。
+ * Keycloak でも Google でも同じはずです (実際に確かめたのは Entra だけ)。
  *
  * **ここは「誰か」を確かめ、グループとロールでログインさせるかを決めます** (`allowed`)。
  * どのリクエストを通すかは `auth.ts` が決めます。
@@ -87,16 +87,11 @@ export function forget(): void {
 const encoder = new TextEncoder();
 
 function base64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return Buffer.from(bytes).toString("base64url");
 }
 
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return new Uint8Array(Buffer.from(value, "base64url"));
 }
 
 /** ID トークンの 1 節 (base64url の JSON) を開く */
@@ -256,14 +251,20 @@ async function publicKey(kid: string): Promise<CryptoKey> {
       typeof e !== "string"
     )
       continue;
-    const key = await crypto.subtle.importKey(
-      "jwk",
-      { kty, n, e, key_ops: ["verify"], ext: true },
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      true,
-      ["verify"],
-    );
-    keys.set(name, key);
+    try {
+      keys.set(
+        name,
+        await crypto.subtle.importKey(
+          "jwk",
+          { kty, n, e, key_ops: ["verify"], ext: true },
+          { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+          true,
+          ["verify"],
+        ),
+      );
+    } catch {
+      // 中身の読めない RSA の鍵も飛ばす。ほかの鍵でのログインを止めない
+    }
   }
   const found = keys.get(kid);
   if (found === undefined)
@@ -381,7 +382,7 @@ export function allowed(
   if (held.length === 0) {
     /*
      * **グループが多い人はここに来ます。** Entra はクレームが大きくなりすぎると
-     * `groups` の代わりに `_claim_names` を入れて「Graph を呼んで取れ」と言う。
+     * `groups` の代わりに `_claim_names` を入れ、Graph から取得するよう示す。
      * 黙って弾くと「なぜか自分だけ入れない」になるので、理由を出す
      */
     const overflow = claims._claim_names?.["groups"] !== undefined;

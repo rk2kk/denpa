@@ -1,7 +1,7 @@
 /**
  * 画面 (`engine.ts`) と worker (`worker.ts`) の取り決め。**両側から読む。**
  *
- * 分け方: TS をデコードする・映像をデコードして描く・音をデコードするのは worker、**音を鳴らすのと時計は画面**
+ * TS をデコードする・映像をデコードして描く・音をデコードするのは worker で、**音を鳴らすのと時計は画面**
  * (Web Audio は worker から触れない)。時計は画面から worker へ流す (`clock`)。
  */
 
@@ -46,7 +46,7 @@ export type ToWorker =
    */
   | { type: "data"; buffer: ArrayBuffer; offset: number }
   /**
-   * いま鳴っている PTS (90kHz。伸ばしたもの) と、それが鳴った時刻 (`performance.timeOrigin +
+   * いま鳴っている PTS (90 kHz。伸ばしたもの) と、それが鳴った時刻 (`performance.timeOrigin +
    * performance.now()` の ms)。**null は「止まっている」**。映像もそこで止める
    */
   | { type: "clock"; pts: number | null; at: number }
@@ -56,17 +56,17 @@ export type ToWorker =
    */
   | { type: "vsync"; at: number }
   /**
-   * 選局し直した・録画で飛んだ。**前の局のものは全部捨てる。** `from` (90kHz。届くものの PTS の物差しで、
+   * 選局し直した・録画で飛んだ。**前の局のものは全部捨てる。** `from` (90 kHz。届くものの PTS の物差しで、
    * 元の TS なら一周の中) があれば、それより前のコマはデコードするだけで描かない。サーバは飛び先の少し手前
    * (キーフレーム・1 秒前) から流すので、手前の映像 (CM を飛ばしたなら CM の映像) を出さないため
    */
   | { type: "reset"; from?: number | null }
-  /** もう届かない (録画の末尾まで読んだ。`engine.ts` の `finish`)。Matroska は待たせているコマを出しきる (`mkv.ts`) */
+  /** もう届かない (録画の末尾まで読んだ。`engine.ts` の `finish`)。Matroska は待たせているコマを出しきり (`mkv.ts`)、fMP4 と Matroska の映像はデコーダに残ったフレームを出させる (`fmp4.ts` の `finish`) */
   | { type: "end" }
   /** 何本目の音声をデコードするか (`AudioTrack.stream`) */
   | { type: "audio"; index: number }
   /**
-   * いま出しているコマを 1 枚ください (切り抜き)。**映像は worker の canvas にあって、
+   * いま出しているコマを 1 枚返させる (切り抜き)。**映像は worker の canvas にあって、
    * 画面の側からは画素を読めない** (`transferControlToOffscreen` で渡したので)。
    * `id` は返事 (`frame`) と組にするため。
    *
@@ -83,7 +83,7 @@ export type ToWorker =
   | { type: "pipFlow"; on: boolean }
   /**
    * 画面が見えているか (`visibilitychange`)。**見えていない間は映像をデコードしない** (放送のままの MPEG-2 のとき)。同じ端末で 2 本見ていると、
-   * 裏に回したほうも 1 コマ 10ms 前後デコードし続けて、見ているほうが間に合わなくなっていた。音は流し続ける
+   * 裏に回したほうも 1 コマ 10 ms 前後デコードし続けて、見ているほうが間に合わなくなっていた。音は流し続ける
    */
   | { type: "visible"; on: boolean }
   /**
@@ -113,7 +113,7 @@ export type FromWorker =
   | { type: "shown" }
   /**
    * 描いている映像の大きさ (見せる大きさ。画素の縦横比を掛けたもの)。**変わったときだけ** 送る。
-   * canvas は worker に渡してあるので、画面の側からは映像の形が分からない (`PlayerStage` が枠をこの形にする)
+   * canvas は worker に渡してあるので、画面の側からは映像の縦横比が分からない (`PlayerStage` が枠をこの縦横比にする)
    */
   | { type: "size"; width: number; height: number }
   /**

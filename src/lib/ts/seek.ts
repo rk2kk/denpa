@@ -1,7 +1,7 @@
 /**
  * **録画の TS の中で、時刻からバイトの位置を引く** (`/api/recordings/<id>/stream` で元の TS を流す経路)。
  *
- * TS には索引が無い。位置を当てるには中を読むしかないが、先頭から読むと 1 時間の BS で 7GB になる。
+ * TS には索引が無い。位置を当てるには中を読むしかないが、先頭から読むと 1 時間の BS で 7 GB になる。
  * そこで**決まった位置の PES の PTS を見て二分探索する** (1 回に読むのは数百 KB、30 回ほどで当たる)。
  * 追っかけの当て方 (`server/chase.ts` の `chasePlan`。バイト比例) より正確で、録り終えた録画なら末尾まで使える。
  *
@@ -35,7 +35,7 @@ const BEFORE_HEAD = 600;
 interface PesMark {
   /** stream_id */
   id: number;
-  /** 90kHz。一周の中 */
+  /** 90 kHz。一周の中 */
   pts: number;
   /** その PES が始まる TS パケットの位置 (渡したバイト列の先頭から) */
   at: number;
@@ -72,17 +72,17 @@ export function* pesMarks(bytes: Uint8Array): Generator<PesMark> {
   }
 }
 
-/** 0〜一周の手前に置き直す (90kHz) */
+/** 0〜一周の手前に置き直す (90 kHz) */
 export const inWrap = (value: number) => ((value % WRAP) + WRAP) % WRAP;
 
-/** 一周の中の差 `a - b` を、-半周〜+半周に置き直す (90kHz) */
+/** 一周の中の差 `a - b` を、-半周〜+半周に置き直す (90 kHz) */
 function delta(a: number, b: number): number {
   const d = inWrap(a - b);
   return d >= WRAP / 2 ? d - WRAP : d;
 }
 
 /**
- * **入れ物の始まり (90kHz)。** 録画の先頭のバイト列から。読めなければ null。
+ * **入れ物の始まり (90 kHz)。** 録画の先頭のバイト列から。読めなければ null。
  *
  * ffmpeg の `start_time` と同じ決め方にする (libavformat の `update_stream_timings`)。
  * 映像と音声の最初の PTS のうち早いほう。字幕などの PTS は、それより 1 秒以内に早いときだけ使う
@@ -112,11 +112,18 @@ export function sinceHead(pts: number, head: number): number {
   return (d > WRAP - BEFORE_HEAD * CLOCK ? d - WRAP : d) / CLOCK;
 }
 
-/** 映像の PES の、いちばん後ろの PTS。録画の末尾のバイト列から尺を出すのに使う。無ければ null */
-export function lastVideoPts(bytes: Uint8Array): number | null {
-  let last: number | null = null;
-  for (const mark of pesMarks(bytes)) if (isVideo(mark.id)) last = mark.pts;
-  return last;
+/**
+ * 映像の PES の、いちばん後ろの PTS。録画の末尾のバイト列から尺を出すのに使う。
+ * **映像の PES が 1 つも無ければ音声の PES のもの** (映像の無い局の録画。ラジオ)。どちらも無ければ null
+ */
+export function lastMediaPts(bytes: Uint8Array): number | null {
+  let video: number | null = null;
+  let audio: number | null = null;
+  for (const mark of pesMarks(bytes)) {
+    if (isVideo(mark.id)) video = mark.pts;
+    else if (isAudio(mark.id)) audio = mark.pts;
+  }
+  return video ?? audio;
 }
 
 /** ファイルを少しずつ読む関数。`length` より短く返ってよい (末尾) */
@@ -130,21 +137,25 @@ export async function readHead(read: ReadAt): Promise<number | null> {
   return tsHead(await read(0, HEAD_BYTES));
 }
 
-/** 1 回に読む量。放送の 1 秒ぶん (地上波 17Mbps ≒ 2MB) より短い間に映像の PES は何度も来る */
+/** 1 回に読む量。放送の 1 秒ぶん (地上波 17 Mbps ≒ 2 MB) より短い間に映像の PES は何度も来る */
 const WINDOW = 256 * 1024;
-/** 映像の PES を探して読み進める上限。これだけ読んで無ければ、その位置には無いことにする */
+/** PES を探して読み進める上限。これだけ読んで無ければ、その位置には無いことにする */
 const SEARCH = 4 * 1024 * 1024;
 /** これより狭くなったら二分探索をやめる。数十 ms ぶん */
 const NARROW = PACKET * 256;
 
 /**
- * `offset` から先で最初の映像の PES。`at` はファイルの先頭からの位置。無ければ null
+ * `offset` から先で最初の `clock` (映像か音声) の PES。`at` はファイルの先頭からの位置。無ければ null
  */
-async function videoAt(read: ReadAt, offset: number): Promise<PesMark | null> {
+async function pesAt(
+  read: ReadAt,
+  offset: number,
+  clock: (id: number) => boolean,
+): Promise<PesMark | null> {
   for (let from = offset; from < offset + SEARCH; from += WINDOW - PACKET * 3) {
     const bytes = await read(from, WINDOW);
     for (const mark of pesMarks(bytes)) {
-      if (isVideo(mark.id)) return { ...mark, at: from + mark.at };
+      if (clock(mark.id)) return { ...mark, at: from + mark.at };
     }
     if (bytes.length < WINDOW) return null;
   }
@@ -154,9 +165,9 @@ async function videoAt(read: ReadAt, offset: number): Promise<PesMark | null> {
 /**
  * **先頭から `target` 秒のところを読みはじめる位置。** その時刻より前で、いちばん近い映像の PES の先頭。
  *
- * 決まった位置を読み、そこから先で最初に来る映像の PES の PTS で比べる二分探索。時刻は映像の
- * PES でしか見ない (音声は映像より 0.数秒ずれて多重化されている)。先頭より前を指定されたら先頭から。
- * 映像の PES が 1 つも無ければ null
+ * 決まった位置を読み、そこから先で最初に来る映像の PES の PTS で比べる二分探索。映像があれば時刻は映像の
+ * PES だけで見る (音声は映像より 0.数秒ずれて多重化されている)。先頭より前を指定されたら先頭から。
+ * **先頭に映像の PES が無ければ音声の PES で比べる** (映像の無い局の録画。ラジオ)。どちらも無ければ null
  *
  * @param size ファイルの大きさ (バイト)
  * @param head 入れ物の始まり (`tsHead`)
@@ -167,7 +178,12 @@ export async function seekTs(
   head: number,
   target: number,
 ): Promise<PesMark | null> {
-  const first = await videoAt(read, 0);
+  let clock = isVideo;
+  let first = await pesAt(read, 0, clock);
+  if (first === null) {
+    clock = isAudio;
+    first = await pesAt(read, 0, clock);
+  }
   if (first === null) return null;
   if (target <= sinceHead(first.pts, head)) return first;
   let best = first;
@@ -175,7 +191,7 @@ export async function seekTs(
   let hi = size;
   while (hi - lo > NARROW) {
     const mid = lo + Math.floor((hi - lo) / 2 / PACKET) * PACKET;
-    const mark = await videoAt(read, mid);
+    const mark = await pesAt(read, mid, clock);
     if (mark === null || mark.at >= hi) {
       hi = mid;
       continue;
@@ -187,10 +203,10 @@ export async function seekTs(
       hi = mid;
     }
   }
-  // 狭めた残りは順に読んで、いちばん近い映像の PES まで詰める
+  // 狭めた残りは順に読んで、いちばん近い映像 (映像の無い録画は音声) の PES まで詰める
   const base = best.at;
   for (const mark of pesMarks(await read(base, hi - base + WINDOW))) {
-    if (!isVideo(mark.id)) continue;
+    if (!clock(mark.id)) continue;
     if (sinceHead(mark.pts, head) > target) break;
     best = { ...mark, at: base + mark.at };
   }

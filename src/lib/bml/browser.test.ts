@@ -70,6 +70,9 @@ function setup(
     },
     subscribed: (element) => subscribed.push(element),
     stream: () => {},
+    setMainAudio: () => false,
+    mainAudioRef: () => "/10",
+    objectChanged: () => {},
   };
   const dom = new Dom(host);
   const kept = new Map<string, string>();

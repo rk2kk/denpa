@@ -87,7 +87,7 @@
     official ? "ニコニコ実況に書きます" : "NX-Jikkyo に書きます",
   );
   const BEHIND = "ライブに戻ると書けます";
-  const WAIT = `${POST_GAP / 1000} 秒待ってください`;
+  const WAIT = `続けて送るには ${POST_GAP / 1000} 秒あけてください`;
   const CLOSED = "実況に繋がっていないため、書けません";
   const UNLINKED =
     "ニコニコとの連携が切れました。設定の「連携」で連携し直してください";
@@ -140,7 +140,7 @@
   const caught = $derived(caughtUp(lag, paused));
   const why = $derived(refusal(text));
   const left = $derived(MAX_LENGTH - graphemes(text.trim()));
-  /** 先頭の 1 行。結果 → 書けない理由 → 中身の断り → いつもの表示 の順 */
+  /** 先頭の 1 行。結果 → 書けない理由 → 中身を断る理由 → いつもの表示 の順 */
   const line = $derived(
     note !== ""
       ? note

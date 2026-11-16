@@ -159,7 +159,7 @@ public class It930xIsdbcTests
             await Assert.That(tuner.IsdbcLocked).IsTrue();
             await Assert.That(tuner.Tsmf!.Decision).IsEqualTo(TsmfDecision.Missing);
             await Assert.That(tuner.IsdbcFailedSignal!.Locked).IsTrue();
-            // 止めるのは出口だけで、ブリッジの入力は閉じない (閉じる書き込みは、開いたときの TS の経路の設定の 1 回だけ)
+            // 止めるのは出口だけで、ブリッジの入力は閉じない (閉じる書き込みは、開いたときに TS の経路を設定する 1 回だけ)
             int closes;
             lock (usb.Log) closes = usb.Log.Count(line => line == $"W {TsEnable:X4}=00");
             await Assert.That(closes).IsEqualTo(1);
@@ -200,7 +200,7 @@ public class It930xIsdbcTests
     }
 
     [Test]
-    public async Task C24_から_C27_は表の周波数でロックしなければ_2_MHz_ずらした周波数を試す()
+    public async Task QC24_から_QC27_は表の周波数でロックしなければ_2_MHz_ずらした周波数を試す()
     {
         await Task.Yield();
         var (usb, _, bus3) = Fake();
@@ -221,12 +221,19 @@ public class It930xIsdbcTests
                 // 231000 kHz = 0x38658、233000 kHz = 0x38E28
                 "65 U 68=0084000221001A1C588603FF01D90F2487", "65 U 68=0084000221001A1C288E03FF01D90F2487",
             });
+            // ロックしなかった周波数ごとに、試した順に状態を残す (常駐の記録と --tune が 1 行ずつ出す)。2 つ目の前の選局は 1 つ目
+            await Assert.That(tuner.IsdbcLockFailures.Select(failure => failure.Khz)).IsEquivalentTo(new uint[] { 231000, 233000 }, TUnit.Assertions.Enums.CollectionOrdering.Matching);
+            await Assert.That(tuner.IsdbcLockFailures[1].Previous!.Khz).IsEqualTo(231000u);
+            await Assert.That(tuner.IsdbcLockFailures[1].Previous!.Locked).IsFalse();
+            await Assert.That(tuner.IsdbcLockFailures[1].Retuned).IsTrue();
 
             // ずらした周波数でだけロックする
             demod.CableStatus = _ => TunedKhz(demod) == 233000 ? (byte)0x01 : (byte)0x00;
             tuner.Tune(ChannelTable.Parse("QC24")!);
             await Assert.That(tuner.CableFrequency).IsEqualTo(233_000_000u);
             await Assert.That(tuner.Tsmf!.Decision).IsEqualTo(TsmfDecision.Passthrough);
+            // ずらした周波数でロックすれば、表の周波数がロックしなかったことは残さない (記録に出さない)
+            await Assert.That(tuner.IsdbcLockFailures).IsEmpty();
         }
         finally
         {

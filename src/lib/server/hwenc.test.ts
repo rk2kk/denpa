@@ -194,7 +194,7 @@ describe("ICQ を持たないドライバの AV1 (i965・Mesa)", () => {
   });
 
   test("AV1 の CQP は -qp を受けないので -global_quality の 75 で", () => {
-    // AV1 の量子化の値は 0〜255。`-qp` は黙って無視されるので使わない
+    // AV1 の量子化の値は 0〜255。`-qp` はエラーにならずに無視されるので使わない
     expect(
       hwArgs({ device: C.path, kind: "vaapi", cqp: true }, "av1").encoder,
     ).toEqual([
@@ -361,7 +361,7 @@ describe("Rockchip MPP", () => {
     expect(p720).toBeGreaterThan(sd60);
     expect(hwBitrate("h264", { height: Number.NaN, smooth: true })).toBe(hd60);
     expect(hwBitrate("h264", { height: Number.NaN, smooth: false })).toBe(hd30);
-    // MPP が受ける幅 (1K〜100M bit/s)。外れると MPP は黙って既定の 2 Mbit/s に戻す
+    // MPP が受ける幅 (1K〜100M bit/s)。外れると MPP はエラーにせず既定の 2 Mbit/s に戻す
     for (const bps of [hd30, hd60, p720, sd60]) {
       expect(bps).toBeGreaterThan(1000);
       expect((bps * 17) / 16).toBeLessThan(100_000_000);
@@ -555,7 +555,7 @@ describe("NVIDIA NVENC", () => {
     });
   });
 
-  test("同時に開ける数を超えて降りたかを、ffmpeg のエラー文で見分ける", () => {
+  test("同時に開ける数を超えて失敗したかを、ffmpeg のエラー文で見分ける", () => {
     // 新しいドライバと古いドライバのエラー文 (FFmpeg の nvenc.c が出す形式)
     expect(
       nvencBusy(
@@ -567,7 +567,7 @@ describe("NVIDIA NVENC", () => {
         "Stream mapping:\n[av1_nvenc @ 0x1] OpenEncodeSessionEx failed: incompatible client key (21): (no details)\n[av1_nvenc @ 0x1] No capable devices found\n",
       ),
     ).toBe(true);
-    // ほかの理由で降りたものは GPU のせい (覚えて外す)
+    // ほかの理由で失敗したものは GPU のせい (覚えて外す)
     expect(
       nvencBusy(
         "[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: unsupported device (2): (no details)",
@@ -715,7 +715,7 @@ describe("Mac の VideoToolbox", () => {
       "-g",
       "250",
     ]);
-    // H.265 は既定の Main のまま。ソフトウェアのエンコーダに倒れる指定 (-allow_sw) は渡さない
+    // H.265 は既定の Main のまま。ソフトウェアのエンコーダに切り替わる指定 (-allow_sw) は渡さない
     const hevc = hwArgs(V, "hevc", picture).encoder;
     expect(hevc[0]).toBe("hevc_videotoolbox");
     expect(hevc).not.toContain("-profile:v");
@@ -834,7 +834,7 @@ describe("Android の MediaCodec", () => {
     expect(hwChain("av1", {}, 0, [device])).toEqual([]);
   });
 
-  test("アプリが渡した名前を読む。知らないコーデック・使わない文字・2 つ目は捨てる", () => {
+  test("アプリが渡した名前を読む。HW_CODECS に無いコーデック・使わない文字・2 つ目は捨てる", () => {
     expect(parseMediacodecEncoders("")).toEqual({});
     expect(
       parseMediacodecEncoders(

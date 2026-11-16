@@ -30,7 +30,7 @@ import {
   stepOrder,
   SWITCH_NOTE,
 } from "#lib/adapt.js";
-import type { AudioTrack } from "#lib/arib.js";
+import { type AudioTrack, broadcastTrack } from "#lib/arib.js";
 import { canvasVideo, driveNoticeSeen } from "#lib/canvas-video.js";
 import { CaptionPainter } from "#lib/components/player/caption-draw.js";
 import {
@@ -57,11 +57,13 @@ import { writeCookie } from "#lib/cookie.js";
 import { broadcastHevcPlayable, browserHevcProbe } from "#lib/hevc-4k.js";
 import { forget, read, write } from "#lib/keep.js";
 import {
+  holdsDown,
   LagMeter,
   PROBE_GIVE_UP,
   probeBytes,
   probeRate,
   replacesWarning,
+  RESTARTING_MOST,
   retryAfterMs,
   rungFields,
   servedStep,
@@ -215,6 +217,13 @@ const KEY_SLACK = 0.001;
  * を細かく読めて、塊ごと (毎秒 20 個) には回さない
  */
 const ADAPT_EVERY = 500;
+/**
+ * **繋ぎ直して `tuned` が来てから、回線が細いとして段を下げない間 (ms)** (`act`)。サーバの入れ替え (`restarting`) や切れた接続の
+ * 前後は届かない間ができ、新しいサーバは起動の直後に忙しい。それを回線の細さに数えて下げ、下げた段のまま観続けていた
+ */
+const HOLD_AFTER_RECONNECT = 30_000;
+/** 接続が切れる前のこの間 (ms) に回線が細いとして下げていたら、下げる前の段で繋ぎ直す (`ws.onclose`)。切れる前の止まりは回線の細さとは限らない */
+const UNDO_BEFORE_CLOSE = 10_000;
 /** 0.1 秒刻みに丸める (画面に出す値。細かく書き換えて描き直させない) */
 const tenth = (value: number): number => Math.round(value * 10) / 10;
 
@@ -235,7 +244,11 @@ function remember(target: Tuned, choice: LiveChoice): void {
       channelType: target.channelType,
       channel: target.channel,
       serviceId: target.serviceId,
-      ...(target.audio === undefined ? {} : { audio: target.audio }),
+      // データ放送が選んだ音声 (`N:es`) は覚えない。次に開いたときは、データ放送が選び直すまでふだんの音声
+      ...(target.audio === undefined ||
+      broadcastTrack(target.audio) !== undefined
+        ? {}
+        : { audio: target.audio }),
       choice,
     }),
   );
@@ -346,7 +359,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   let live = $state(true);
   /**
    * 追っかけ再生か (わざと遅れて見ている)。止めたときと、シークバーを後ろへ戻したときに立つ。
-   * 立っている間は放送の今を追いかけず、選ばれた速さで進む。追いついたら自分で下りる
+   * 立っている間は放送の今を追いかけず、選ばれた速さで進む。追いついたら自分で外れる
    */
   let chasing = $state(false);
   /** 追っかけ中の速さ。ライブに戻れば 1 に戻す */
@@ -375,7 +388,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   /** AV1 を受け取れなかった (`start`)。**この画面を開いている間は**自動で AV1 を選ばない。選び直せば試し直す */
   let av1GaveUp = false;
   /**
-   * H.265 を受け取れなかった (`start`)、またはサーバが GPU でエンコードできずに降りた (`error`)。AV1 と同じく、
+   * H.265 を受け取れなかった (`start`)、またはサーバが GPU でエンコードできずに失敗した (`error`)。AV1 と同じく、
    * **この画面を開いている間は**自動で H.265 を選ばない。選び直せば試し直す
    */
   let hevcGaveUp = false;
@@ -392,13 +405,30 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * 決めるのは `adapt.ts` の `RungAdapter` で、ここは測った値を渡し、決まった段でリクエストし直すだけ (`adapt`)。
    * 段を動かすのは**メニューで「自動」を選んでいるときだけ**。段 0 は自動で決まった形式 (家の中なら MPEG-2) で、
    * 段 1〜3 はサーバが選んだコーデックの変換、`audio` は音声だけ。互換モード (canvas に描くエンコードしたもの) でも同じに動かし、
-   * サーバには canvas に描けるコーデックだけを渡す (`playable`。H.265 は描かない)。デコードが間に合うかは `raw/budget.ts` が見て、
+   * サーバには canvas に描けるコーデックだけを渡す (`playable`。H.265 は描かない)。デコードが間に合うかは `raw/budget.ts` が決め、
    * 回線とは混ぜない
    */
   /** いま再生中の段 (`tuned` の答え)。メニューの「自動 (H.264 540p)」に出す */
   let served = $state<Step>(0);
   /** リクエストする段。局を変えても、追っかけのシークでも持ち越す */
   let asked: Step = 0;
+  /** サーバが入れ替えで止まると知らせてきた時刻 (`restarting`)。繋ぎ直すまで、回線が細いとして下げない (`live-adapt.holdsDown`)。来ていなければ null */
+  let restartingAt: number | null = null;
+  /** 切れた接続を繋ぎ直している。次の `tuned` から `HOLD_AFTER_RECONNECT` の間は下げない */
+  let rejoining = false;
+  /** この時刻 (ms) までは、回線が細いとして下げない (`HOLD_AFTER_RECONNECT`) */
+  let holdDownUntil = 0;
+  /** 最後に回線が細いとして下げたとき (下げる前の段と時刻)。切れる直前なら取り消す (`UNDO_BEFORE_CLOSE`) */
+  let lastDown: { from: Step; at: number } | null = null;
+  /**
+   * いま開いているのが映像の無い局・録画か (`tuned` の `video` が false)。サーバは音声だけを送るので、段を動かさず (`adapt`)、
+   * 音声だけになったことを段の切り替えにも数えない (`asked` は局を替えたときのために持ち越す)
+   */
+  let videoless = false;
+  /** 選局したエージェントのカードの番号 (`card`)。データ放送の `getIRDID` に渡す。局を替えたら null に戻す */
+  let cardId = $state<string | null>(null);
+  /** 映像の無い局でデータ放送を自動で開いたか。閉じたあとに開き直さない。局を替えたら (`tune` の `keepList` が false) 下ろす */
+  let openedVideoless = false;
   const adapter = new RungAdapter();
   /** 受け取りの速さ (`AdaptSample.throughput`)。リクエストし直すたびに測り直す */
   const throughput = new Throughput();
@@ -466,7 +496,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   let awaiting = false;
   /** 詰まっているか。`<video>` は `waiting` から `playing` まで、canvas は詰まった次の刻みまで (`adapt`) */
   let stuck = false;
-  /** 段を下げた変換で GPU が降りたコーデック (AV1・H.265 はソフトウェアに降りない)。段を下げるときの `playable` から外す */
+  /** 段を下げた変換で GPU のエンコードが失敗したコーデック (AV1・H.265 はソフトウェアに切り替えない)。段を下げるときの `playable` から外す */
   const rungOff = new Set<LiveCodec>();
   /** `encode`・`pinned` の断り書きと、最後に出した時刻。その状態が `ADAPT_HOLD` のあいだ来なければ消す */
   let standing: { text: string; at: number } | null = null;
@@ -862,7 +892,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     // 飛んだ直後の 1 コマは測らない (`unslipper`)。選局し直しの追いつき (`pacing` の `seek`) も含む
     video.addEventListener("seeking", () => unslipping.seeked());
     eachFrame(video, (frame) => {
-      // 別の映像に移ったら、こちらは畳む
+      // 別の映像に移ったら、こちらは閉じる
       if (following !== video) return false;
       // 映した 1 枚の時刻と再生位置の差 (`slip`)。`requestVideoFrameCallback` を持つブラウザでだけ測れる
       if (frame !== undefined) {
@@ -986,6 +1016,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * ただし上げた段が映り始めるまでの待ちは数える (`PROBE_START`)
    */
   function adapt(): void {
+    if (videoless) return;
     if (left || paused) {
       // 止めている間の先の無さを、再開したときの詰まりに数えない (`stuckNow`)
       starvedSince = null;
@@ -1003,7 +1034,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
         const from = upAsk.from;
         upAsk = null;
         adapter.abandon(now);
-        act({ step: from, reason: "slow" }, now);
+        // 上げた段が映らないので戻す。回線の細さで下げるのではないので、繋ぎ直したあとの見送り (`holdsDown`) を通さない
+        act({ step: from, reason: "slow" }, now, true);
       }
       return;
     }
@@ -1044,15 +1076,15 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   }
 
   /**
-   * 詰まっているか (`AdaptSample.waiting`)。canvas は詰まった次の刻み (`stuck`) と、描いたコマが `CANVAS_FROZEN` 増えないとき。`<video>` は `waiting` から `playing` までに
+   * 詰まっているか (`AdaptSample.waiting`)。canvas は詰まった次の刻み (`stuck`) と、描いたコマが `CANVAS_FROZEN` の間増えないとき。`<video>` は `waiting` から `playing` までに
    * 加えて、先を持たない状態が `STUCK_LEAST` 続いたとき。`waiting` は自分で飛んだあと 3 秒数えない (`quiet`) ので、
    * 止まっては飛ぶのを繰り返すと、それだけでは詰まりが見えない
    */
   function stuckNow(now: number): boolean {
     if (canvas) {
       /*
-       * canvas (MPEG-2・互換モード) は、描いたコマ数 (RawEngine の `frameAt`。1 秒ごとに届く) が `CANVAS_FROZEN` 増えなければ、
-       * 音は鳴っているのに映像だけ止まっていると見る。`<video>` の `requestVideoFrameCallback` の代わり
+       * canvas (MPEG-2・互換モード) は、描いたコマ数が `CANVAS_FROZEN` の間増えなければ (RawEngine の `frameAt` は増えた時刻。
+       * コマ数は 1 秒ごとに届く)、音は鳴っているのに映像だけ止まっていると見る。`<video>` の `requestVideoFrameCallback` の代わり
        */
       const at = engine?.frameAt ?? 0;
       const frozen = videoFrozen({
@@ -1173,7 +1205,12 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * 決まったことをする。段を動かすなら断り書きを出してリクエストし直す (前のコマを貼ったまま。`requestAgain`)。
    * `encode`・`pinned` は断り書きだけで、ほかの理由の断り書きは上書きしない (サーバが軽くしたときの文は `encode` で替える。`replacesWarning`)
    */
-  function act(decision: AdaptDecision | null, now: number): void {
+  function act(
+    decision: AdaptDecision | null,
+    now: number,
+    /** 上げた段が映らずに戻すとき。見送り (`holdsDown`) を通さない */
+    revert = false,
+  ): void {
     if (decision === null) {
       if (standing !== null && now - standing.at >= ADAPT_HOLD) {
         if (warning === standing.text) warning = "";
@@ -1190,6 +1227,12 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     }
     const { step } = decision;
     /*
+     * サーバの入れ替え (`restarting`) の前後と、切れた接続を繋ぎ直したあとしばらく (`holdsDown`) は、回線が細いとして下げない。
+     * 届かないのは回線のせいではない。断り書きは出さず、段もそのまま。上げた段を戻すとき (`revert`) は見送らない
+     */
+    if (holdsDown(decision.reason, now, restartingAt, holdDownUntil, revert))
+      return;
+    /*
      * 追っかけには音声だけが無い。段 3 のまま流す。互換モードも同じ (映像の無い fMP4 を canvas に流す経路を
      * 確かめていない)
      */
@@ -1199,6 +1242,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     upAsk = decision.reason === "restored" ? { from: served, at: now } : null;
     // 足りなくて下げるなら、溜まった前の段の映像の後ろに並ばないように繋ぎ直す (`tune`)
     freshSocket = decision.reason === "slow" && chase === null;
+    // 実際に下げたときだけ覚える。切れる直前なら取り消す (`UNDO_BEFORE_CLOSE`)
+    if (decision.reason === "slow") lastDown = { from: served, at: now };
     asked = step;
     // 段を動かした断り書きは、観る画面と同じく少しで引っ込める (`ADAPT_NOTE`)
     note(text, ADAPT_NOTE);
@@ -1558,7 +1603,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       try {
         await video.play();
       } catch {
-        // それでも駄目。画面の再生ボタンを押してもらう
+        // 消音でも断られた。画面の再生ボタンを押してもらう
       }
     }
   }
@@ -1814,7 +1859,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   }
 
   /**
-   * 繋ぎも含めて畳む。**画面を離れるときと、繋ぎ直すとき**
+   * 繋ぎも含めて閉じる。**画面を離れるときと、繋ぎ直すとき**
    *
    * @param keepList 選んでいる字幕を残すか (`forget`)。同じ局へ繋ぎ直すときだけ true
    */
@@ -1915,10 +1960,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     thaw();
     void audioContextForLive?.close().catch(() => undefined);
     audioContextForLive = null;
-    // 字幕を描くものも畳む (canvas の大きさを読む `ResizeObserver` を外す)
+    // 字幕を描くものも破棄する (canvas の大きさを読む `ResizeObserver` を外す)
     painter?.close();
     painter = null;
-    // コマごとの貼り直し (`follow`) も畳む
+    // コマごとの貼り直し (`follow`) も止める
     following = null;
   }
 
@@ -1979,6 +2024,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     // MPEG-2 では再エンコードしない。TS には全部の音声が入っている (`RawEngine.selectAudio`。ライブも追っかけも)
     if (raw && engine !== null) {
       audio = id;
+      // データ放送が選んだ音声は番組表の一覧に無い。選んでいる間は足して「音声」に出し、戻したら外す (サーバの `nowPlaying` と同じ)
+      const chosen = broadcastTrack(id);
+      audios = audios.filter((track) => broadcastTrack(track.id) === undefined);
+      if (chosen !== undefined) audios = [...audios, chosen];
       if (tuned !== null) {
         tuned = { ...tuned, audio: id };
         remember(tuned, choice);
@@ -2245,7 +2294,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
    * 選局する。**繋がっていれば繋ぎ直さない。**
    *
    * @param keepList 選べる字幕の一覧を残すか。**同じ局の中での選び直しだけ
-   *   true** (`forget` の説明)。待たせている字幕はどの道いつも捨てる
+   *   true** (`forget` の説明)。待たせている字幕はいつも捨てる
    */
   async function tune(
     video: HTMLVideoElement,
@@ -2254,6 +2303,9 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   ): Promise<void> {
     chase = null;
     chaseTimeline = null;
+    // 別の局へ移るなら、カードの番号は選局したエージェントから知らされ直す (`card`)
+    if (!keepList) cardId = null;
+    if (!keepList) openedVideoless = false;
     /*
      * 別の局へ移るなら、サーバが選局を受けたら (`tuned`) データ放送を閉じる (`closingOnTune`)。それまでは前の局の
      * データ放送を出したままで、受信のリクエストは `begin` の `syncData` で選局の指示より先にやめる。
@@ -2485,7 +2537,12 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       broadcastHevc = await probeBroadcastHevc();
     }
     await prepareCompat();
-    if (superseded(mine) || !pickFormat()) return;
+    // 繋ぎ直す印 (`freshSocket`) は、後から来た選局が使うので残す。流せる形式が無くて止めるなら下ろす
+    if (superseded(mine)) return;
+    if (!pickFormat()) {
+      freshSocket = false;
+      return;
+    }
     // 数え直す。再エンコードでも MediaSource から作り直しになるので、前の数は続きではない
     stalls = 0;
     /*
@@ -2616,6 +2673,15 @@ export function livePlayer(options: LivePlayerOptions = {}) {
         state = "idle";
         return;
       }
+      /*
+       * 切れる直前に回線が細いとして下げていたら、下げる前の段で繋ぎ直す (`UNDO_BEFORE_CLOSE`)。
+       * 繋ぎ直して `tuned` が来てからしばらくは下げない (`HOLD_AFTER_RECONNECT`)
+       */
+      const now = Date.now();
+      if (lastDown !== null && now - lastDown.at <= UNDO_BEFORE_CLOSE)
+        asked = lastDown.from;
+      lastDown = null;
+      rejoining = true;
       reconnect();
     };
 
@@ -2659,7 +2725,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
             !rungOff.has(codec)
           ) {
             /*
-             * 段を下げた変換で GPU が降りた (AV1・H.265 はソフトウェアに降りない)。段を下げている間はそのコーデックを
+             * 段を下げた変換で GPU のエンコードが失敗した (AV1・H.265 はソフトウェアに切り替えない)。段を下げている間はそのコーデックを
              * `playable` から外し、同じ段をリクエストし直す (サーバが次のコーデックを選ぶ)
              */
             rungOff.add(codec);
@@ -2674,7 +2740,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
             broadcastKind() === "mpeg2"
           ) {
             /*
-             * H.265 でリクエストして降りた (サーバが GPU でエンコードできなかった。ソフトウェアには降りられない)。
+             * H.265 でリクエストして失敗した (サーバが GPU でエンコードできなかった。ソフトウェアには切り替えられない)。
              * この画面を開いている間は H.265 をやめて、次の形式でリクエストし直す (`decideFormat`)。
              * 4K の局の `hevc` は詰め替えで GPU を使わないので、エラーは形式のせいではない。ここには入れない
              */
@@ -2689,6 +2755,11 @@ export function livePlayer(options: LivePlayerOptions = {}) {
            */
           fallback = notice.recording;
           reconnect();
+        } else if (notice.type === "card") {
+          cardId = notice.id;
+        } else if (notice.type === "restarting") {
+          // サーバが入れ替えで止まる。このあと切れて繋ぎ直すまで、届かないのを回線の細さに数えない (`act`)
+          restartingAt = Date.now();
         } else if (notice.type === "restart") {
           /*
            * 番組が替わって音声・字幕の構成が変わった。同じ局をすぐリクエストし直す (前のフレームは貼ったまま)。
@@ -2706,7 +2777,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
               void tune(element, tuned, true);
           }
         } else if (notice.type === "notice") {
-          // 映像は出ている。断り書きに残す (GPU でエンコードできずにソフトウェアへ降りた、サーバが混んでいて段を下げられなかった、など)
+          // 映像は出ている。断り書きに残す (GPU でエンコードできずにソフトウェアへ切り替えた、サーバが混んでいて段を下げられなかった、など)
           note(notice.message);
           standing = null;
         } else if (notice.type === "pace") {
@@ -2716,6 +2787,17 @@ export function livePlayer(options: LivePlayerOptions = {}) {
             dropped: notice.dropped,
             speed: notice.speed,
           };
+        } else if (notice.type === "audios") {
+          /*
+           * サーバが PMT を読んで、選べる音声を組み直した。MPEG-2 のままでは、データ放送が選んだ音声を画面が足している
+           * (`setAudio`) ので、選んでいる間は残す
+           */
+          const chosen = broadcastTrack(audio);
+          audios =
+            chosen === undefined ||
+            notice.audios.some((track) => track.id === audio)
+              ? notice.audios
+              : [...notice.audios, chosen];
         } else if (notice.type === "captions") {
           captionTracks = notice.tracks;
           captionTrack = notice.track;
@@ -2772,10 +2854,22 @@ export function livePlayer(options: LivePlayerOptions = {}) {
         } else if (notice.type === "tuned") {
           if (startup !== null)
             startup.tuned ??= performance.now() - startup.at;
+          // 切れた接続を繋ぎ直した (入れ替えの通知 `restarting` のあとを含む)。ここからしばらくは回線が細いとして下げない (`HOLD_AFTER_RECONNECT`)
+          if (
+            rejoining ||
+            (restartingAt !== null &&
+              Date.now() - restartingAt < RESTARTING_MOST)
+          ) {
+            holdDownUntil = Date.now() + HOLD_AFTER_RECONNECT;
+            rejoining = false;
+            restartingAt = null;
+          }
           // 選べる音声はここで初めて分かる (いま流れている番組次第)
           audios = notice.audios;
           audio = notice.audio;
           awaiting = false;
+          // 映像の無い局・録画は音声だけ。段を動かさない (`adapt`)
+          videoless = notice.video === false;
           /*
            * **サーバが選局を受けた。** 待っていた別の局なら、ここでデータ放送を閉じる (`tunedCloses`)。
            * サーバは `tuned` を次の局のデータ放送より先に送るので、閉じる前に次の局の入口へ d は届かない。
@@ -2792,6 +2886,15 @@ export function livePlayer(options: LivePlayerOptions = {}) {
             }
             closing = null;
             onAir = tuned;
+            /*
+             * **映像の無い局 (ラジオ・データ放送だけの局) は、データ放送を開く。** 観る中身はデータ放送で、開くまではリモコンを出さない
+             * (`DataBroadcast` の `press`) ので、開いていないと、自動で受信した文書を操作できない。閉じれば閉じたまま (局を替えるまで)
+             */
+            if (videoless && !openedVideoless) {
+              // 人が先に開いていても、開いたものとして覚える (閉じたあとに開き直さない)
+              if (!showData) showData = true;
+              openedVideoless = true;
+            }
             syncData();
           }
           /*
@@ -2837,7 +2940,8 @@ export function livePlayer(options: LivePlayerOptions = {}) {
           // 追っかけで音声だけを選んでいたときは、実際には段 3 をリクエストしている (`wantedCommand`)
           const requested =
             chase !== null && asked === "audio" ? LOWEST_RUNG : asked;
-          if (stepOrder(step) < stepOrder(requested)) {
+          // 映像の無い局の音声だけは、混んでいて下げられなかったのではない
+          if (!videoless && stepOrder(step) < stepOrder(requested)) {
             // サーバが混んでいて下げられなかった (理由は続く `notice`)。段の切り替えとして数えられないので、20 秒は同じ段を返させない
             adapter.refused(Date.now());
             asked = step;
@@ -2854,6 +2958,14 @@ export function livePlayer(options: LivePlayerOptions = {}) {
               notice.codecs,
               notice.codec === "audio" ? "h264" : notice.codec,
             );
+          /*
+           * **映像の無い局 (`videoless`) は、前の局のフレームをすぐ剥がす。** 次のコマが来ないので、待つと `HOLD_MOST` まで残る。
+           * canvas に描く経路は canvas に前の局のフレームが残っているので、それも隠す (次の局の 1 枚目で出し直す)
+           */
+          if (videoless) {
+            thaw();
+            if (canvas) engine?.hide();
+          }
         }
         return;
       }
@@ -2943,7 +3055,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
         } catch {
           return; // 壊れた 1 枚。次が来る
         }
-        // 知らないバージョンは描かない (置き場所の読み方が違うかもしれない)
+        // ほかのバージョンは描かない (置き場所の読み方が違うかもしれない)
         if (page.v !== CAPTION_TEXT_VERSION) return;
         cues = insertCue(cues, { at, page });
       }
@@ -2990,7 +3102,7 @@ export function livePlayer(options: LivePlayerOptions = {}) {
     codecs: string,
     baked: LiveCodec,
   ): void {
-    // canvas で描いていたものからエンコードしたものへ戻るとき (打ち切った・選び直した)。canvas を畳んで <video> を出す
+    // canvas で描いていたものからエンコードしたものへ戻るとき (打ち切った・選び直した)。canvas を破棄して <video> を出す
     stopRaw();
     // iPhone の Safari には MediaSource が無く、ManagedMediaSource だけがある (`ts/media-source.ts`)
     const picked = pickMediaSource();
@@ -3188,12 +3300,14 @@ export function livePlayer(options: LivePlayerOptions = {}) {
   /** 選んでいる音声を RawEngine に伝える。**再エンコードしない** (`setAudio`) */
   function pickAudio(): void {
     const track =
-      audios.find((candidate) => candidate.id === audio) ?? audios[0];
+      broadcastTrack(audio) ??
+      audios.find((candidate) => candidate.id === audio) ??
+      audios[0];
     if (engine !== null && track !== undefined)
       engine.selectAudio(track.stream, track.side);
   }
 
-  /** RawEngine を畳む。**エンコードしたものに戻るときと、画面を離れるとき** */
+  /** RawEngine を破棄する。**エンコードしたものに戻るときと、画面を離れるとき** */
   function stopRaw(): void {
     if (rawTimer !== null) clearInterval(rawTimer);
     rawTimer = null;
@@ -3526,6 +3640,10 @@ export function livePlayer(options: LivePlayerOptions = {}) {
       return speed;
     },
     setSpeed,
+    /** 選局したエージェントのカードの番号 (データ放送の `getIRDID` に渡す) */
+    get cardId() {
+      return cardId;
+    },
     /** データ放送を出しているか */
     get showData() {
       return showData;

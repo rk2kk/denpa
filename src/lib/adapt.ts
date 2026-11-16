@@ -13,13 +13,13 @@ import {
  *
  * 画面が刻むたびに測った値を渡し、動かすときだけ次の段と理由を受け取る。決めるだけで、
  * リクエストし直すのは画面の役目。DOM も時計も触らない (時刻は引数で受け取る) ので、ここだけ単体で確かめられる。
- * canvas に描くときに端末のデコードが間に合うかは `raw/budget.ts` が見る。回線とは混ぜない (`<video>` のデコードの遅れは `AdaptSample.behind` で受け取る)。
+ * canvas に描くときに端末のデコードが間に合うかは `raw/budget.ts` が決める。回線とは混ぜない (`<video>` のデコードの遅れは `AdaptSample.behind` で受け取る)。
  *
  * ## 下げる
  *
  * 次のどれかで「足りない」と見る。
  *
- * - 詰まった (`waiting`)
+ * - 詰まった (`waiting`)。観る画面では、先のバッファが 2 秒を切っているときだけ
  * - 先のバッファが 2 秒を切って、減り続けている
  * - サーバの `backlog` が 3 秒続けて伸びた、または映像の塊を捨てた
  * - ライブで、放送に対する遅れ (`lag`) が 4 秒で 0.6 秒以上伸びた。届く速さが流している段の 85% ほどを切ると伸びる。
@@ -54,6 +54,23 @@ import {
  * - サーバのエンコードが実時間に追いつかない (`Pace.speed` が 0 より大きく `ENCODE_SLOW` (0.95) 未満。0 は測れていないと読む) 間は、詰まっても回線のせいにしない。
  *   3 秒続いたら段は下げずに `encode` を返す (画面は断り書きを出すだけ。ライブはサーバが自分で軽い組み合わせに作り直す。
  *   `server/live.ts` の `Session.lighten`)
+ * - 観る画面で、先のバッファが 2 秒以上あるのに詰まったときは、回線のせいにしない (`<video>` のデコードが一瞬遅れた・飛んだ直後)
+ * - 観る画面で、測った速さ × 0.7 がいまの段に足りている間は、詰まりとバッファの減りを回線のせいにしない。
+ *   接続が切れて繋ぎ直している・サーバがファイルを読むのが遅れた、のように下げても直らない詰まりで、
+ *   ローカルネットでも「回線が細い」と出ていた。速さは読んでいる間に測るので、回線が細くなれば 5 秒の窓のうちに下がる
+ * - 観る画面のその場の変換で、届く速さがエンコードに縛られている間は、受け取りの速さだけを回線の速さと読まない。
+ *   サーバが ffmpeg の出力を待っていた割合 (`Pace.wait`) を w とすると、回線は残りの 1 − w の間に受け取ったぶんを
+ *   送れたので、受け取りの速さ ÷ (1 − w) を回線の速さと見て比べる (w の上限は 0.9)。エンコードが実時間の 1.43 倍を
+ *   切る段では、受け取りの速さ × 0.7 が段に届かず、ローカルネットでも 10 秒で「回線が細い」と下げていた。
+ *   回線が細ければサーバは送るのを待たされ、ffmpeg を待たないので w は 0 に近く、これまでどおり下げる。
+ *   上げるときは受け取りの速さだけで決める (エンコードが縛っている間に重い段へ上げると、エンコードがもっと遅れる)。
+ *   足すのは、詰まらずに速さだけで下げるとき (`thin`) だけ。詰まりとバッファの減りは受け取りの速さで見る。サーバと画面の間に
+ *   応答を溜める中継があると、回線が細くてもサーバは送るのを待たされず、割合は 1 に近いままになるため
+ * - 観る画面のファイルの直再生で、ブラウザがファイルを読むのを止めている (`AdaptSample.idle`) 間は、詰まりとバッファの減りを
+ *   回線のせいにしない。ブラウザは先を読み終えたときに止めるので、回線は足りている。直再生は受け取りの速さを測れず、
+ *   ファイルの終わり際にバッファが減るのと、飛んだ先をデコードし終えるまでの詰まりで、ローカルネットでも 720p に下げていた。
+ *   回線が細ければ先が埋まらず、ブラウザは読み続けるので、これまでどおり下げる。いまの位置をまだ読んでいない間
+ *   (読み始める前・読んでいない先へ飛んだ直後) と、飛んでいる最中は止めていても足りている印にしない (`watch-adapt.ts` の `fileIdle`)
  * - 形式を手で選んでいる間は段を動かさず、足りないときに `pinned` だけを返す
  */
 
@@ -102,7 +119,7 @@ export interface AdaptSample {
   throughput: number | null;
   /** 先に溜まっている長さ (秒) */
   ahead: number;
-  /** 詰まって止まっているか */
+  /** 詰まって止まっているか。観る画面では、先 (`ahead`) が 2 秒以上あれば回線のせいにしない */
   waiting: boolean;
   /**
    * サーバから届いた最後の `pace`。無い経路は null。**届くたびに新しいオブジェクトを渡す**
@@ -121,6 +138,12 @@ export interface AdaptSample {
    * (`GET /api/playback/probe`) の速さを足したもの。無ければ null・省略。ライブで上げてよいかを決めるのにだけ使う
    */
   capacity?: { bps: number; at: number } | null;
+  /**
+   * 観る画面のファイルの直再生で、ブラウザがファイルを読むのを止めているか (`networkState` が `NETWORK_IDLE`。
+   * 先を読み終えた・ファイルを読み終えた)。止めている間は、詰まりとバッファの減りを回線のせいにしない。
+   * 測った速さ (`throughput`) があればそちらを使う。省略は false
+   */
+  idle?: boolean;
   /**
    * 端末のデコードが追いついていないか (`unslip.ts` の `DecodeLag`)。省略は false。「自動」なら 1 段下げ、
    * その段から上へはもう上げない (`ceiling`)。手で選んだ段は動かさない
@@ -161,6 +184,11 @@ const FALL_LEAST = 0.5;
 const BACKLOG_GROW = 3_000;
 /** 測った速さのうち、映像と音声に使ってよい割合。残りは揺れとほかの通信のぶん */
 const HEADROOM = 0.7;
+/**
+ * サーバが ffmpeg の出力を待っていた割合 (`Pace.wait`) を、回線の速さの見積もりに使う上限。0.9 なら受け取りの速さの
+ * 10 倍まで。1 に近い値で割ると、塊の届き方の揺れで見積もりがいくらでも大きくなる
+ */
+const WAIT_MOST = 0.9;
 /**
  * 上げるのは、次の段の何倍の速さが続いたときか。観る画面は速さ × 0.7 がいまの段に足りないと下げる (いまの段の 1/0.7 ≈ 1.43 倍未満)。
  * 2 倍ならその間が 4 割ほど空き、上げた直後に速さが揺れても上げる前の段へ戻さない
@@ -214,8 +242,8 @@ export const THIN = 10_000;
 /** エンコードの速さが `ENCODE_SLOW` 未満のままこれだけ続いたら `encode` を返す (ms)。`budget.ts` と同じく 1 回の遅れでは動かない */
 export const ENCODE_LAG = 3_000;
 /**
- * 段 0 のビットレートが分からないときに使う値 (kbit/s)。ふだんのエンコード (1080p60) のハードウェアの固定ビットレート
- * (`hwenc.ts` の `LARGEST`)
+ * 段 0 のビットレートが分からないときに使う値 (kbit/s)。ふだんのエンコード (1080p60) で GPU に渡すビットレート
+ * (`hwenc.ts` の `H264_KBPS` の 1080 の `smooth`。ライブは映像が来る前に決めるので `LARGEST` を使い、この値になる)
  */
 export const BASE_GUESS_KBPS = 10_500;
 
@@ -305,8 +333,15 @@ export class RungAdapter {
   private slowSince: number | null = null;
   /** 観る画面で、測った速さがいまの段に足りなくなった時刻 */
   private thinSince: number | null = null;
-  /** ライブで、足りていたときに測った段ごとの受け取りの速さ (bit/s)。段 0 へ上げてよいかを見るのに使う */
-  private readonly rates = new Map<Step, number>();
+  /**
+   * 観る画面で、サーバが最後に測った「ffmpeg の出力を待っていた割合」(`Pace.wait`)。測れていない `pace` が来ても捨てない
+   * (先が埋まって読まない間はサーバも出さないので null になるが、受け取りの速さ `throughput` も最後に測った値のまま)
+   */
+  private waitShare: number | null = null;
+  /** この刻みの `short` で、詰まりかバッファの減りを回線のせいにしたか。そうなら下げ先を受け取りの速さで選ぶ (`lower`) */
+  private starving = false;
+  /** ライブで、段 0 で足りていたときに測った受け取りの速さ (bit/s)。段 0 へ上げてよいかを見るのに使う */
+  private baseRate: number | null = null;
   /** ライブで、上げる前に測りたい回線の速さ (bit/s。`wantProbe`)。要らなければ null */
   private wanted: number | null = null;
   /**
@@ -324,6 +359,8 @@ export class RungAdapter {
     if (this.last === null) this.reset(now);
     else if (s.current !== this.last) this.switched(now, this.last, s.current);
     this.last = s.current;
+    const wait = s.pace?.wait ?? null;
+    if (s.route === "watch" && wait !== null) this.waitShare = wait;
     if (this.probe !== null && now >= this.probe.until) {
       // 上げたあと 1 分足りていた。ほかの分岐より先に見て、待ちの倍数をその刻みで戻す
       this.probe = null;
@@ -345,8 +382,7 @@ export class RungAdapter {
       this.slowSince ??= now;
     else this.slowSince = null;
     if (this.slowSince !== null) {
-      // バッファが減るのも詰まるのもエンコードが遅いせい。回線のぶんとして数えない
-      // この間にサーバが捨てた塊 (`dropped`) も数えない (回線のせいではない)
+      // バッファの減り・詰まり・サーバが捨てた塊 (`dropped`) はエンコードが遅いせい。回線のぶんとして数えない
       this.clearStreaks();
       this.clearLow();
       this.remember(s);
@@ -394,8 +430,8 @@ export class RungAdapter {
         return this.lowShare(now) ? { step: "audio", reason: "slow" } : null;
       return { step: this.lower(s), reason: "slow" };
     }
-    if (s.route === "live" && s.throughput !== null && s.current !== "audio")
-      this.rates.set(s.current, s.throughput);
+    if (s.route === "live" && s.throughput !== null && s.current === 0)
+      this.baseRate = s.throughput;
 
     const up = upper(s.current);
     if (up === null) return null;
@@ -440,7 +476,7 @@ export class RungAdapter {
 
   /** ライブの段の映像と音声を合わせたビットレート (bit/s)。段 0 は足りていたときに測った値 (無ければ `stepBps`) */
   private liveBps(step: Step, baseKbps: number | null): number {
-    if (step === 0) return this.rates.get(0) ?? stepBps(0, baseKbps);
+    if (step === 0) return this.baseRate ?? stepBps(0, baseKbps);
     return stepBps(step, baseKbps);
   }
 
@@ -472,6 +508,7 @@ export class RungAdapter {
     this.prevAhead = null;
     this.prevBacklog = null;
     this.slowSince = null;
+    this.waitShare = null;
   }
 
   /**
@@ -559,33 +596,68 @@ export class RungAdapter {
         this.grow !== null && this.grow.lastAt - this.grow.from >= BACKLOG_GROW;
       dropped = pace !== this.lastPace && pace.dropped > 0;
     }
+    const watch = s.route === "watch";
+    /*
+     * 観る画面で、回線がいまの段に足りているか。分からなければ null。測った速さ `bps` があれば比べ、無ければ
+     * ブラウザがファイルを読むのを止めている (`idle`) ことを足りている印にする
+     */
+    const fits = (bps: number | null): boolean | null =>
+      !watch
+        ? null
+        : bps !== null
+          ? s.current === "audio" ||
+            bps * HEADROOM >= stepBps(s.current, s.baseKbps)
+          : s.idle === true
+            ? true
+            : null;
+    /*
+     * 詰まり・バッファの減りは、受け取りの速さだけで見る。エンコードを待っていたぶんを足すのは (`rate`)、詰まっていない間に
+     * 速さだけで下げるとき (`thin`) だけ。エンコードが実時間より速ければバッファは増えるので、詰まるのは回線のほうが遅いとき。
+     * サーバと画面の間に応答を溜める中継 (逆プロキシなど) があると、回線が細くてもサーバは送るのを待たされず、
+     * ffmpeg を待っていた割合が 1 に近いままになる。割合で足した速さで詰まりも許すと、詰まり続けても下げなかった
+     */
+    const enough = fits(s.throughput);
+    const roomy = fits(this.rate(s));
     // 先が埋まっている間の速さは高めに出やすい。外れても下げ遅れるほうなので、そのまま比べる
-    if (
-      s.route === "watch" &&
-      s.throughput !== null &&
-      s.current !== "audio" &&
-      s.throughput * HEADROOM < stepBps(s.current, s.baseKbps)
-    )
-      this.thinSince ??= now;
+    if (roomy === false) this.thinSince ??= now;
     else this.thinSince = null;
     const thin = this.thinSince !== null && now - this.thinSince >= THIN;
     // 放送に対する遅れが伸びている。バッファが外に隠れていても、届く速さが足りなければこれが伸びる
     const lagging = s.route === "live" && (s.lag ?? 0) >= LAG_GROW;
+    // 観る画面で、先にバッファがあるのに詰まったときと、測った速さが段に足りている間は回線のせいにしない (冒頭の「下げないとき」)
+    const stalled = s.waiting && (!watch || s.ahead < LOW);
+    const starving = (stalled || falling) && enough !== true;
+    this.starving = starving;
 
-    return s.waiting || falling || growing || dropped || thin || lagging;
+    return starving || growing || dropped || thin || lagging;
   }
 
-  /** 下げ先。速さが分かれば収まるいちばん高い段、分からなければ 2 段下 (段 0 からは段 1) */
+  /**
+   * 下げ先。速さが分かれば収まるいちばん高い段、分からなければ 2 段下 (段 0 からは段 1)。詰まって下げるときは
+   * 受け取りの速さで、速さだけで下げるときはエンコードを待っていたぶんを足した速さ (`rate`) で選ぶ (`short`)
+   */
   private lower(s: AdaptSample): Rung {
     const from = s.current as Rung;
-    if (s.throughput === null) {
+    const rate = this.starving ? s.throughput : this.rate(s);
+    if (rate === null) {
       // 段 0 (MPEG-2 は 16 Mbit/s ほど) から段 1 (3 Mbit/s) で、もう数分の 1 になる
       return from === 0 ? 1 : (Math.min(LOWEST_RUNG, from + 2) as Rung);
     }
-    const room = s.throughput * HEADROOM;
+    const room = rate * HEADROOM;
     for (let r = from + 1; r <= LOWEST_RUNG; r++)
       if (stepBps(r as Rung, s.baseKbps) <= room) return r as Rung;
     return LOWEST_RUNG;
+  }
+
+  /**
+   * 下げるかを決めるときの回線の速さ (bit/s)。測れていなければ null。観る画面では、受け取りの速さを、サーバが
+   * ffmpeg の出力を待っていなかった割合で割る (`waitShare`。上限 `WAIT_MOST`)。待っていた間は回線が空いていたので、
+   * その間も送れていたと見る
+   */
+  private rate(s: AdaptSample): number | null {
+    if (s.throughput === null) return null;
+    if (s.route !== "watch" || this.waitShare === null) return s.throughput;
+    return s.throughput / (1 - Math.min(WAIT_MOST, this.waitShare));
   }
 
   private remember(s: AdaptSample): void {

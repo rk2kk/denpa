@@ -15,9 +15,9 @@
  *
  * ffmpeg は入力で時刻を 0 に寄せ直すが、その寄せ幅は**プロセスごとに違う**。
  * 別々に起動した 2 本はエンコードを始めたときのキーフレームが 0〜0.5 秒ずれる (仕掛けを 5 通り作って
- * -60〜+450ms とばらけた)。`-copyts` で放送の絶対時刻を保っても、**mp4 のマルチプレクサが
+ * -60〜+450 ms とばらけた)。`-copyts` で放送の絶対時刻を保っても、**mp4 のマルチプレクサが
  * その時刻を 0 に詰め直す**ので、受け側から見た 0 がどの放送時刻かは外から知りようがない。
- * 1 本にすれば入力の寄せが 1 回だけになって両方の出力に効く (実機で 1ms 以内で一致)。
+ * 1 本にすれば入力の寄せが 1 回だけになって両方の出力に効く (実機で 1 ms 以内で一致)。
  *
  * 字幕は**デコードせずに写す** (`-c:s copy`)。ffmpeg に字幕のデコーダは要らない。
  *
@@ -123,7 +123,7 @@ export function programSpec(program: number): string {
  * 受け側が合わせる相手は放送の PTS そのもの (ブラウザが自分で PES から読む) なので、
  * 字幕も放送の PTS のまま出せば突き合わせられる。mp4 のマルチプレクサが時刻を 0 に詰め直す
  * 問題は、字幕の出力 (Matroska) には無い。実機の録画で、出てきた字幕の時刻が元の TS の
- * 字幕 PES の PTS と 1ms 単位で一致した (71759.734333 → 71759.734)。
+ * 字幕 PES の PTS と 1 ms 単位で一致した (71759.734333 → 71759.734)。
  *
  * **`-copyts` を外すと合わない。** 映像を出さない ffmpeg は寄せ幅を入力の `start:` とは
  * 違う値にし (同じ録画で 0.3〜0.7 秒ずれた)、それを外から知る方法が無い。
@@ -224,14 +224,26 @@ export function pmtVideo(section: Uint8Array): ServiceVideo | null {
   return null;
 }
 
+/** 音声の stream_type (MPEG-1・MPEG-2 の音声、ADTS と LATM の AAC)。放送の音声は ADTS の AAC (0x0F) */
+const AUDIO_STREAMS: ReadonlySet<number> = new Set([0x03, 0x04, 0x0f, 0x11]);
+
+/** **PMT に音声があるか** (`AUDIO_STREAMS`)。データ放送だけの局は映像も音声も無い */
+function pmtAudio(section: Uint8Array): boolean {
+  for (const [type] of pmtStreams(section))
+    if (AUDIO_STREAMS.has(type)) return true;
+  return false;
+}
+
 /**
- * TS を少しずつ渡して、その局の PMT から字幕の本数 (`captionStreams`) と映像のコーデック (`pmtVideo`) を読む
+ * TS を少しずつ渡して、その局の PMT から字幕の本数 (`captionStreams`)・映像のコーデック (`pmtVideo`)・音声があるか (`pmtAudio`) を読む
  */
 export class PmtPeek {
   private readonly packets = new PacketStream();
   private readonly pmt: PmtTracker;
   /** 読んだ PMT にある映像のコーデック。まだ読んでいないか、映像が無ければ null */
   video: ServiceVideo | null = null;
+  /** 読んだ PMT に音声があるか。まだ読んでいなければ null */
+  audio: boolean | null = null;
 
   /** @param program 放送が名乗っている番号 */
   constructor(program: number) {
@@ -246,6 +258,7 @@ export class PmtPeek {
       for (const section of this.pmt.feed(packet, pid))
         if (section[0] === TABLE_PMT) {
           this.video = pmtVideo(section);
+          this.audio = pmtAudio(section);
           return captionStreams(section);
         }
     }
@@ -254,7 +267,7 @@ export class PmtPeek {
 }
 
 /**
- * PMT を待つ長さ (ms)。本物の電波は PMT を 100ms ごとに流すので、届き始めればすぐ読める。
+ * PMT を待つ長さ (ms)。本物の電波は PMT を 100 ms ごとに流すので、届き始めればすぐ読める。
  *
  * **待っても映像は遅れない。** ffmpeg へ渡すものは局に絞っていて、絞る側 (`ServiceFilter`) は
  * PMT を読むまで 1 バイトも出さない。ここで区切るのは、その局の PMT が来ない放送で待ち続けないため
@@ -285,6 +298,8 @@ export async function peekPmt(
   stream: AsyncGenerator<Uint8Array>;
   count: number | null;
   video: ServiceVideo | null;
+  /** PMT に音声があるか。読めなければ null */
+  audio: boolean | null;
 }> {
   const counter = new PmtPeek(program);
   const head: Uint8Array[] = [];
@@ -320,6 +335,7 @@ export async function peekPmt(
     stream: replay(head, pending, stream),
     count,
     video: counter.video,
+    audio: counter.audio,
   };
 }
 
@@ -436,7 +452,7 @@ export class CaptionText {
 
   /**
    * 出すもの (言語ごとに 0 か 1 枚)。字幕管理データ・送り直し・待ちだけのコマは何も出さない。
-   * **読めないコマは捨てて続ける。** 投げると、受けている側 (ライブの字幕 API) ごと止まる
+   * **読めないコマは捨てて続ける。** 例外を送出すると、受けている側 (ライブの字幕 API) ごと止まる
    */
   feed(frame: MkvFrame): CaptionShown[] {
     const out: CaptionShown[] = [];
@@ -483,7 +499,7 @@ export class CaptionText {
 }
 
 /**
- * 送る形式にする。**中身は JSON** (`CaptionPage`)、先頭の時刻は映像と同じ物差し (90kHz。stream.md#websocket-プロトコル)。
+ * 送る形式にする。**中身は JSON** (`CaptionPage`)、先頭の時刻は映像と同じ物差し (90 kHz。stream.md#websocket-プロトコル)。
  * 前の 1 枚を丸ごと置き換えるので、消すのも同じ種別 (`runs` が空) で送る
  */
 export function textFrame(shown: Pick<CaptionShown, "at" | "page">): {
@@ -547,7 +563,7 @@ const PING = new TextEncoder().encode(JSON.stringify({ type: "ping" }));
 export interface CaptionOut {
   /** WebSocket と同じ形式で 1 フレーム渡す。**字幕 (文字の配置) と、選べる字幕の通知だけ通す** */
   send(kind: number, pts: bigint, payload: Uint8Array): void;
-  /** 終わり (録画を読み切った・セッションが畳まれた) */
+  /** 終わり (録画を読み切った・セッションが終わった) */
   close(): void;
   /** 読まれずに溜まっているか (`CAPTION_FEED_HOLD`)。作る側が待てるなら待つ */
   backedUp(): boolean;
@@ -615,7 +631,7 @@ export function captionFeed(
           finish();
           throw error;
         }
-        // 作っている最中に閉じた (セッションがもう畳まれていた) ら、すぐ後始末する
+        // 作っている最中に閉じた (セッションがもう終わっていた) ら、すぐ後始末する
         if (closed) leave();
         else detach = leave;
       },

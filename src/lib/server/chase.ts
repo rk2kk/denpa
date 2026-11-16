@@ -19,9 +19,10 @@ import { statSync } from "node:fs";
 import { PACKET } from "@danything/arib/psi";
 import { TlvStream } from "@danything/arib/tlv";
 
-import { lastVideoPts, readHead, sinceHead, tsHead } from "#lib/ts/seek.js";
+import { lastMediaPts, readHead, sinceHead, tsHead } from "#lib/ts/seek.js";
 
 import type { Recording } from "../types";
+import { keepNewest } from "./expiring";
 import {
   openRecording,
   openRecordingSync,
@@ -63,7 +64,7 @@ interface ChasePlan {
 /**
  * **番組が替わって作り直したところ** (`live.ts` の `Session.restart`)。録画ごとに覚える。
  *
- * 追っかけのエンコードも、ライブと同じく PMT の並びが変わったら畳んで `restart` を伝える。観ている側は
+ * 追っかけのエンコードも、ライブと同じく PMT の並びが変わったらセッションを終えて `restart` を伝える。観ている側は
  * 届いたぶんを観終えてから、観ていた位置をリクエストし直す (画面もテレビのアプリも)。ただ位置は秒で、
  * バイトへはレートで比例して当てるので、少し手前に当たると前の番組の PMT を読んでからまた変わり、
  * 作り直しを繰り返す。**近くをリクエストされたら、変わったところのバイトから読む** (`resumePlan`)
@@ -247,15 +248,6 @@ export function followFile(
   });
 }
 
-/** いまのファイルの大きさ。無ければ null (消された・まだ書き始めていない) */
-export function fileSize(path: string): number | null {
-  try {
-    return statSync(path).size;
-  } catch {
-    return null;
-  }
-}
-
 /** 読んだ先頭の控え。録画中も先頭は変わらないので、読めたものはパスごとに覚える (追っかけはシークのたびに聞く) */
 const heads = new Map<string, number>();
 /** 控えごとに覚えておく数 (`heads`・`unreadable`・`spans`)。追っかけと字幕で同時に読む録画はいくつもない */
@@ -265,7 +257,7 @@ const unreadable = new Map<string, number>();
 /** 読めなかったあと、読み直すまで控える長さ (ms) */
 const HEAD_RETRY = 5_000;
 
-/** 尺を測るのに先頭と末尾から読む量。映像と音声の最初の PES、最後の映像の PES が入る長さ (`playback.ts` の `probeTs` と同じ) */
+/** 尺を測るのに先頭と末尾から読む量。映像と音声の最初の PES、最後の映像 (映像の無い録画は音声) の PES が入る長さ (`playback.ts` の `probeTs` と同じ) */
 const SPAN_BYTES = 4 * 1024 * 1024;
 
 /** 測った尺の控え。同じファイル (大きさ・更新時刻) なら読み直さない */
@@ -282,7 +274,7 @@ function readRange(
 }
 
 /**
- * **録り終えた元の TS の尺 (秒)。** 先頭の PTS (`tsHead`) から最後の映像の PES まで。観る画面の物差し
+ * **録り終えた元の TS の尺 (秒)。** 先頭の PTS (`tsHead`) から最後の映像の PES まで (映像の無い録画は最後の音声の PES まで。`lastMediaPts`)。観る画面の物差し
  * (`playback.ts` の `probeTs`) と同じ測り方。読めない・PES が見つからなければ null。
  *
  * 追っかけと録画の字幕は、呼ばれたその場で読み始める位置を決めるので同期で読む (先頭と末尾の 4MB ずつ)。
@@ -308,7 +300,7 @@ export function finishedTsSec(path: string): number | null {
       const last =
         head === null
           ? null
-          : lastVideoPts(
+          : lastMediaPts(
               readRange(file, Math.max(0, size - SPAN_BYTES), SPAN_BYTES),
             );
       const span = head === null || last === null ? 0 : sinceHead(last, head);
@@ -319,8 +311,7 @@ export function finishedTsSec(path: string): number | null {
   } catch {
     seconds = null;
   }
-  if (spans.size >= HEADS_MOST) spans.delete(spans.keys().next().value!);
-  spans.set(path, { key, seconds });
+  keepNewest(spans, path, { key, seconds }, HEADS_MOST);
   return seconds;
 }
 
@@ -380,14 +371,11 @@ export async function tsFileHead(
     head = null;
   }
   if (head === null) {
-    if (unreadable.size >= HEADS_MOST)
-      unreadable.delete(unreadable.keys().next().value!);
-    unreadable.set(path, now + HEAD_RETRY);
+    keepNewest(unreadable, path, now + HEAD_RETRY, HEADS_MOST);
     return null;
   }
   unreadable.delete(path);
-  if (heads.size >= HEADS_MOST) heads.delete(heads.keys().next().value!);
-  heads.set(path, head);
+  keepNewest(heads, path, head, HEADS_MOST);
   return head;
 }
 

@@ -28,7 +28,7 @@ import {
   readLineup,
   type SatelliteType,
 } from "./satellite";
-import { channelChanges, DIGITAL_TV } from "./schema";
+import { channelChanges, IMPORTED_SERVICE_TYPES } from "./schema";
 import {
   type AgentChannel,
   getChannels,
@@ -78,7 +78,7 @@ interface LineupDiff {
 }
 
 /**
- * 今の一覧 (`current`) と放送の一覧 (`next`) を比べる。テレビの局 (種別 1) の数を数える。
+ * 今の一覧 (`current`) と放送の一覧 (`next`) を比べる。取り込む種別の局 (テレビ・ラジオ・データ放送。`IMPORTED_SERVICE_TYPES`) の数を数える。
  * チャンネルの名前と、そこに入っている局が全部同じなら違いは無い
  */
 export function lineupDiff(
@@ -89,7 +89,7 @@ export function lineupDiff(
     const map = new Map<string, string>();
     for (const channel of list) {
       for (const service of channel.services) {
-        if (service.serviceType !== DIGITAL_TV) continue;
+        if (!IMPORTED_SERVICE_TYPES.has(service.serviceType)) continue;
         map.set(`${channel.networkId}:${service.serviceId}`, channel.channel);
       }
     }
@@ -256,7 +256,7 @@ const READ_TIMEOUT = 30_000;
 
 /**
  * **衛星の放送の一覧を、中継器を開いて読む** (`satellite.readLineup`)。スキャンの最中でないときに読むもの
- * (再編の読み直しと、`satellite-lineup.ts` の局を入れる回) が使う。チューナーはスキャンと同じ優先度で取る。
+ * (再編の読み直しと、`satellite-lineup.ts` の局を入れる回) が使う。チューナーは取り合いの順をスキャンと同じにして取る。
  * チューナーが塞がっていて開けなかった中継器があれば `busy`
  */
 export async function readFromAir(

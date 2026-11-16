@@ -1,11 +1,10 @@
 /**
- * **局ロゴを自分で覚えて、どのコマに出ているかを当てる。** 以前は logoframe に任せていた。
+ * **局ロゴを自分で覚えて、どのコマに出ているかを当てる。**
  *
- * logoframe はロゴを「色と濃さ (α)」で覚えていた。濃さを測るには**ロゴの後ろが
- * のっぺりしたコマ**が要り、BSテレ東 のように後ろが明るいセットばかりの局では
- * `initial logo estimate contains too few active pixels` で止まっていた (`docs/cm.md`「logoframe から乗り換えた」)。
+ * ロゴを「色と濃さ (α)」で覚えるには**ロゴの後ろがのっぺりしたコマ**が要り、BSテレ東のように
+ * 後ろが明るいセットばかりの局では覚えられない (`docs/cm.md`「logoframe から乗り換えた」)。
  *
- * こちらが覚えるのは**線の向き**だけ。ロゴは後ろが何であれ毎コマ同じ所に同じ向きの
+ * 覚えるのは**線の向き**だけ。ロゴは後ろが何であれ毎コマ同じ所に同じ向きの
  * 縁を出し、中身の縁の向きはコマごとにばらばら。画素ごとに勾配の向きを足し合わせると、
  * ロゴの縁だけ長さが残る (`coherence`)。濃さも色も測らないので、後ろがのっぺり
  * している必要は無い。
@@ -289,7 +288,7 @@ export function score(t: Template, data: Uint8Array): number {
   return on - off / 4;
 }
 
-/** 型の画素の平均の明るさ (0〜255)。ロゴが溶けて見えない明るさを外すのに使う (`byLevel`) */
+/** 型に入れた画素の平均の明るさ (0〜255)。ロゴが溶けて見えない明るさを外すのに使う (`byLevel`) */
 export function level(t: Template, data: Uint8Array): number {
   let sum = 0;
   for (const at of t.points) sum += data[at]!;
@@ -489,15 +488,41 @@ const CONTEXT = 2;
 /** ロゴが出ているはずのコマで、これより多く点が割れる後ろは当てにしない */
 const MISS_MAX = 0.1;
 
+/** ロゴの出ていた区間と、区間の外でロゴが出ているか判断できなかった所 (どちらもコマ番号) */
+export interface LogoReading {
+  spans: Span[];
+  /**
+   * **区間の外で、後ろが見えない段ばかりで判断できなかった所** (`MIN_SPAN` 秒以上)。判断は直前の「消えた」を持ち越しているので、
+   * ロゴが無かったとは言い切れない。白い場面で始まる番組の冒頭のように、ロゴが出ていても溶けて見えない所 (`cm-decide`)
+   */
+  blind: Span[];
+}
+
 /**
- * コマごとの測り (`score`・`level`・`texture`) から、ロゴの出ていた区間を出す。
+ * コマごとの測り (`score`・`level`・`texture`) から、ロゴの出ていた区間と、区間の外で判断できなかった所を出す。
  * 判断できる後ろの決め方は `byLevel`/`byCell`
  */
-export function logoSpans(r: Readings, fps: number): Span[] {
+export function readLogo(r: Readings, fps: number): LogoReading {
   const s = smooth(r.scores);
   const known = flat(r, byLevel(r, fps));
   const first = spansOf(r.scores, s, known, fps);
-  return spansOf(r.scores, s, flat(r, byCell(r, first, known, fps)), fps);
+  const final = flat(r, byCell(r, first, known, fps));
+  const spans = spansOf(r.scores, s, final, fps);
+  const q = peak(r.scores, final, Math.round(PEAK_WINDOW * fps), PEAK_RANK);
+  const inside = new Uint8Array(q.length);
+  for (const span of spans) inside.fill(1, span.start, span.end + 1);
+  const blind: Span[] = [];
+  let from = -1;
+  for (let i = 0; i <= q.length; i++) {
+    const unknown = i < q.length && inside[i] === 0 && Number.isNaN(q[i]!);
+    if (unknown && from < 0) from = i;
+    if (!unknown && from >= 0) {
+      if (i - from >= Math.round(MIN_SPAN * fps))
+        blind.push({ start: from, end: i - 1 });
+      from = -1;
+    }
+  }
+  return { spans, blind };
 }
 
 /**

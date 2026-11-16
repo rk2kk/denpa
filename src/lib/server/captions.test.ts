@@ -492,7 +492,7 @@ describe("アプリ向けの字幕 API", () => {
     expect(notices).toEqual(["clock", "captions"]);
   });
 
-  // 映像が終わった (セッションが畳まれた・エンコードできなくなった) ら、字幕 API も閉じる
+  // 映像が終わった (セッションが終わった・エンコードできなくなった) ら、字幕 API も閉じる
   test("ended / error の通知で閉じて後始末する", async () => {
     for (const type of ["ended", "error"]) {
       let left = 0;
@@ -516,7 +516,7 @@ describe("アプリ向けの字幕 API", () => {
     expect(left).toBe(1);
   });
 
-  // 共有したそばから閉じた (共有する相手がもう畳まれていた) ときも、後始末を取りこぼさない
+  // 共有したそばから閉じた (共有する相手がもう終わっていた) ときも、後始末を取りこぼさない
   test("作っている最中に閉じても後始末する", () => {
     let left = 0;
     captionFeed((out) => {
@@ -527,7 +527,7 @@ describe("アプリ向けの字幕 API", () => {
   });
 
   /*
-   * 中身を作る側が投げた (ffmpeg を起こせない) とき、間を埋める送信 (`CAPTION_PING_MS` ごと) のタイマーが
+   * 中身を作る側が例外を送出した (ffmpeg を起こせない) とき、間を埋める送信 (`CAPTION_PING_MS` ごと) のタイマーが
    * 残っていた。止めてから伝える
    */
   test("中身を作れなかったら、間を埋める送信を止めてから伝える", async () => {
@@ -536,7 +536,7 @@ describe("アプリ向けの字幕 API", () => {
     const cleared = spyOn(globalThis, "clearInterval");
     let failure = "";
     try {
-      // 投げたものは、作るところ (start) か読むところのどちらかで受け取る
+      // 送出した例外は、作るところ (start) か読むところのどちらかで受け取る
       const stream = captionFeed(() => {
         throw new Error("ffmpeg を起こせません");
       });
@@ -617,7 +617,7 @@ describe("pagesFromMkv", () => {
 });
 
 describe("textFrame", () => {
-  test("時刻は 90kHz、中身は JSON", () => {
+  test("時刻は 90 kHz、中身は JSON", () => {
     const page = {
       v: 1 as const,
       plane: [960, 540] as [number, number],

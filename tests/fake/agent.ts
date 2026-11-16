@@ -41,6 +41,10 @@ const knobs: Knobs = {
 /** チューナーが塞がっている状態。取り合いの見え方を確かめる */
 let busyTuners = false;
 /**
+ * 電源を入れ直すまで使えないと答える種別 (`/__control/unusable`)。本物の IT930x のブリッジの溢れのように、チューナーを取ってから 503 で断る
+ */
+let unusableTypes = new Set<string>();
+/**
  * 塞がっているチューナーの受信の状態と C/N と強度 (`GET /denpa/tuners` の `signal`。`POST /__control/signal` で変える)。
  * 本物は C/N が変わっても通知 (`tuners`) を出さないので、変えても出さない。画面は 5 秒ごとに読み直して追う
  */
@@ -398,9 +402,9 @@ function vacate(index: number): void {
  *
  * - 空いているチューナー
  * - 引き継ぐ利用者 (`after`) しかいないチューナー。その利用者は正常に終わらせる
- * - 同じチャンネルを優先度の低い利用者しか読んでいないチューナー。選局し直さずに共有する (`join`)
+ * - 同じチャンネルを取り合いで後に回る利用者しか読んでいないチューナー。選局し直さずに共有する (`join`)
  *
- * **空きが無ければ、自分より優先度の低い利用者しかいないチューナーを取り上げて使う** (約束の 2)。ライブが録画に
+ * **空きが無ければ、取り合いで自分より後に回る利用者しかいないチューナーを取り上げて使う** (約束の 2)。ライブが録画に
  * チューナーを取り上げられる場面 (`34-live-yield.spec.ts`) を作るため。本物は空きがあっても順の前のチューナーを取り上げるが、
  * ここでは**空きが無いときだけ**にしてある。偽エージェントは spec をまたいで共有で、空きがあるのに
  * 取り上げると、裏で回っている番組表の取得やロゴの取得の見え方まで変わる
@@ -512,7 +516,7 @@ function openStream(url: URL, signal: AbortSignal): Response {
     return json({ error: "service は 1〜65535 の番組番号です" }, 400);
   const services = on(type, channel);
 
-  // 優先度が自分と同じか高い利用者が同じチャンネルを読んでいれば選局を共有 (約束の 3)。無ければ選ぶ
+  // 取り合いで自分と同じか先になる利用者が同じチャンネルを読んでいれば選局を共有 (約束の 3)。無ければ選ぶ
   let index = [...leases.entries()].find(
     ([, lease]) =>
       lease.type === type &&
@@ -524,6 +528,16 @@ function openStream(url: URL, signal: AbortSignal): Response {
     if (picked === null)
       return json({ error: `${type} のチューナーに空きがありません` }, 409);
     index = picked.index;
+    if (unusableTypes.has(type)) {
+      emit("tuners");
+      const name = TUNERS[index]?.name ?? `adapter${index}`;
+      return json(
+        {
+          error: `${name}: ブリッジの TS のバッファが溢れたままで、TS が届きません。機材の電源を抜いて入れ直してください`,
+        },
+        503,
+      );
+    }
     /*
      * **放送の無いチャンネルは、チューナーを取ってから選局に落ちる** (本物と同じ順)。1 バイトも送る前なので、
      * 理由を付けて 500 で返す (docs/agent.md「選局は、利用者が切るまで終わらない」)。
@@ -593,6 +607,10 @@ const options: Bun.ServeOptions = {
       const mode = url.searchParams.get("mode");
       aboutMode = mode === "off" || mode === "mac" ? mode : "normal";
       return json({ mode: aboutMode });
+    }
+    if (url.pathname === "/__control/unusable" && request.method === "POST") {
+      unusableTypes = new Set(url.searchParams.getAll("type"));
+      return json({ types: [...unusableTypes] });
     }
     if (url.pathname === "/__control/tuners" && request.method === "POST") {
       busyTuners = url.searchParams.get("busy") === "1";

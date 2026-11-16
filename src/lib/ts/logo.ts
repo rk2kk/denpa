@@ -4,14 +4,14 @@
  * エージェントは TS を 1 バイトも読まないので、**番組表に出す局ロゴは denpa が
  * 自分で取得する**。番組表の取得などで開いた選局を共有して、ついでに読む (`server/logo.ts`)。
  *
- * 地上波は 2 つの表に分かれて流れてくる。
+ * 地上波 (ケーブルの地上波の再送信・自主放送も) は 2 つの表に分かれて流れてくる。
  *
  * - CDT (PID 0x0029) … ロゴの実体。PNG がそのまま入っている
  * - SDT (PID 0x0011) … どのサービスがどのロゴを使うか (logo_transmission_descriptor)
  *
  * 片方だけでは紐付かないので、両方見て初めて「この局のロゴ」になる。
  *
- * **衛星 (BS/CS) は CDT を使わない。** データカルーセル (DSM-CC) で送るので、
+ * **衛星 (BS/CS。ケーブルの再送信も) は CDT を使わない。** データカルーセル (DSM-CC) で送るので、
  * そちらは別仕立て (`logo-dsmcc.ts`)。どちらのロゴも `LogoCollector` が集める。
  */
 
@@ -179,7 +179,7 @@ export class LogoCollector {
   /** 衛星ぶん。地上波の TS では何も出てこないので、開いていても害は無い */
   private readonly dsmcc: DsmccLogoCollector;
 
-  /** logo_id ごとの、いま持っている一番大きいロゴ */
+  /** logo_id ごとの、いま持っているロゴ (種類は `replacesLogo` の順に進める) */
   private readonly logos = new Map<number, LogoData>();
   /** service_id → logo_id */
   private readonly links = new Map<number, number>();

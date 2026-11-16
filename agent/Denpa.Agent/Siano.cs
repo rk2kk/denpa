@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO.Pipelines;
 
 namespace Denpa.Agent;
@@ -83,7 +82,7 @@ public static class Siano
     /// <summary>そのポートの機種。扱う機種でなければ null。**開かない**</summary>
     public static SianoModel? Identify(string port) => UsbHost.Identify(UsbHost.Current, Models, Id, port);
 
-    /// <summary>設定に書いたのと同じ形式で (<c>siano:&lt;USB のポート&gt;</c>)。種別は地上波だけ</summary>
+    /// <summary>挿さっている機材を、設定に書くのと同じ形式 (<c>siano:&lt;USB のポート&gt;</c>) で返す。種別は地上波だけ</summary>
     public static List<TunerSpec> Detect() => Specs(Found(Log.Write));
 
     internal static List<TunerSpec> Specs(IEnumerable<(string Port, SianoModel Model)> found) =>
@@ -277,7 +276,7 @@ internal sealed class SianoStream
     /// <summary>キューに入りきらずに捨てた TS のバイト数</summary>
     public long Dropped => Interlocked.Read(ref _dropped);
 
-    /// <param name="stalled">読む側がいないまま <see cref="Zd1jTuner.StallLimit"/> 経ったときに呼ぶ</param>
+    /// <param name="stalled">読む側がいないまま <see cref="TsBuffer.StallLimit"/> 経ったときに呼ぶ</param>
     public SianoStream(string name, Action stalled)
     {
         _name = name;
@@ -320,7 +319,7 @@ internal sealed class SianoStream
                 ArrayPool<byte>.Shared.Return(chunk.Buffer);
                 ReportDropped();
                 if (_aligner.Packets == before) continue;
-                if (!Zd1jTuner.Flush(writer, () => _stopped || _ended, () =>
+                if (!TsBuffer.Flush(writer, () => _stopped || _ended, () =>
                     {
                         _ended = true;
                         _stalled();

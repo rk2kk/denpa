@@ -9,7 +9,7 @@
  * 止めるが、canvas に描くものは止めない。放送のままの MPEG-2 (worker.ts) と同じ考えで、時計は画面が
  * 鳴らしている音 (`playout.ts`)、ここは番が来たコマを出すだけ。
  *
- * MPEG-2 の経路との違い:
+ * MPEG-2 の経路とは次の点が違う。
  *
  * - **デコードするのはブラウザ** (VideoDecoder)。たいてい GPU 経由で、デコードしたフレームは VideoFrame
  *   (GPU の上のフレーム) として出てくる。**描いたらすぐ閉じる**。閉じずに持つと、デコーダの
@@ -39,7 +39,7 @@ import {
 import { downscale } from "./downscale";
 import type { GrabSize } from "./messages";
 
-/** 番のこれだけ前からデコードする (90kHz)。`worker.ts` の MPEG-2 も同じ (重いコマでもデコードは 10ms 近く) */
+/** 番のこれだけ前からデコードする (90 kHz)。`worker.ts` の MPEG-2 も同じ (重いコマでもデコードは 10 ms 近く) */
 export const AHEAD = 0.3 * CLOCK;
 /**
  * デコードできたフレームと、渡したまま出てきていないフレームを合わせてこれだけまで (VideoFrame は GPU の置き場を使う)。
@@ -49,19 +49,19 @@ export const AHEAD = 0.3 * CLOCK;
  * 実際に抱えるのはこれより 2 枚ほど多い
  */
 const DECODED_MOST = 8;
-/** 圧縮のまま持っておく上限 (90kHz)。止めている間に溜め込まない。`worker.ts` の MPEG-2 も同じ */
+/** 圧縮のまま持っておく上限 (90 kHz)。止めている間に溜め込まない。`worker.ts` の MPEG-2 も同じ */
 export const PENDING_MOST = 8 * CLOCK;
-/** これだけ遅れたら、デコードしながら追いつくのをやめてキーフレーム (MPEG-2 は I フレーム) まで飛ぶ (90kHz)。`worker.ts` も同じ */
+/** これだけ遅れたら、デコードしながら追いつくのをやめてキーフレーム (MPEG-2 は I フレーム) まで飛ぶ (90 kHz)。`worker.ts` も同じ */
 export const BEHIND_MOST = 0.5 * CLOCK;
-/** 1 コマの長さの目安 (90kHz)。59.94 コマ。実際の間隔が分かればそれを使う */
+/** 1 コマの長さの目安 (90 kHz)。59.94 コマ。実際の間隔が分かればそれを使う */
 const FRAME = 1501;
 /**
- * 追っかけ・録画 (`follow`) で圧縮のまま持っておく上限。**時間 (90kHz) とバイト数の小さいほう**。
+ * 追っかけ・録画 (`follow`) で圧縮のまま持っておく上限。**時間 (90 kHz) とバイト数の小さいほう**。
  * サーバは倍速で送り込んでくるので、観ている先が伸び続ける。超えたら受け取るのをやめて
  * `full` を返し、画面が手元の尽きる前に再生している位置からリクエストし直す (エンコードする経路の MSE の `BUDGET` と同じ量)
  */
 const FOLLOW_AHEAD_MOST = 120 * CLOCK;
-/** MPEG-2 の worker の録画 (`worker.ts`) も同じ量で切る */
+/** 追っかけ・録画で圧縮のまま持っておくバイト数の上限 (`FOLLOW_AHEAD_MOST` と組で使う)。MPEG-2 の worker (`worker.ts`) も同じ量で切る */
 export const FOLLOW_BYTES_MOST = 120 * 1024 * 1024;
 /** デコーダが失敗しても開き直す回数。**これより続けて失敗したら打ち切る** (1 コマでも描ければ数え直す) */
 const ERRORS_MOST = 3;
@@ -78,7 +78,7 @@ export function audioCodec(
   return config === null ? null : { codec: "opus", config };
 }
 
-/** 音の 1 コマをデコーダへ渡す形にする。AAC は ADTS のヘッダを付ける (デコーダは ADTS として読む)。付けられなければ null */
+/** 音の 1 コマをデコーダへ渡せるようにする。AAC は ADTS のヘッダを付ける (デコーダは ADTS として読む)。付けられなければ null */
 export function audioFrame(
   track: Fmp4Track,
   data: Uint8Array,
@@ -92,7 +92,7 @@ export function audioFrame(
 interface AudioSink {
   /** 開き直す。`opus` のときは OpusHead を渡す。**開けなければ false** */
   open(codec: "aac" | "opus", config: Uint8Array | null): boolean;
-  /** 1 コマデコードして画面へ。時刻は 90kHz */
+  /** 1 コマデコードして画面へ。時刻は 90 kHz */
   push(data: Uint8Array, pts: number): void;
 }
 
@@ -116,7 +116,7 @@ interface Pending {
 }
 
 /**
- * 映像のコマの dts が、前のコマ (`expected` = 前の dts + 長さ) から飛んだか (90kHz)。1 コマぶんまでは揺れとして許す。
+ * 映像のコマの dts が、前のコマ (`expected` = 前の dts + 長さ) から飛んだか (90 kHz)。1 コマぶんまでは揺れとして許す。
  * 飛んでいたら受け取る側はキーフレームまで捨てる (`Fmp4Video.queue`)
  */
 export function jumped(
@@ -143,12 +143,12 @@ export function newestKey(
   return found;
 }
 
-/** 90kHz に直す */
+/** 90 kHz に直す */
 function ticks(value: number, timescale: number): number {
   return Math.round((value * CLOCK) / timescale);
 }
 
-/** 90kHz を µs (WebCodecs の時刻) に直す */
+/** 90 kHz を µs (WebCodecs の時刻) に直す */
 function micros(value: number): number {
   return Math.round((value * 1_000_000) / CLOCK);
 }
@@ -165,12 +165,12 @@ export class Fmp4Video {
   private frames: VideoFrame[] = [];
   /** キーフレームを待っているか。開き直した・時刻が飛んだ・選局し直した */
   private needKey = true;
-  /** 次に来るはずのコマの時刻 (90kHz)。**飛んだらキーフレームまで捨てる** */
+  /** 次に来るはずのコマの時刻 (90 kHz)。**飛んだらキーフレームまで捨てる** */
   private expected: number | null = null;
   /** 渡した時刻 (µs → performance.now())。デコードするのに掛かった時間を測る */
   private readonly started = new Map<number, number>();
   private errors = 0;
-  /** 追っかけで抱えきれなくなったか。**次の reset (リクエストし直し) まで、届いたものは捨てる** */
+  /** 追っかけ・録画で抱えきれなくなったか。**リクエストし直して reset が来るまで、届いたものは捨てる** */
   private overflowed = false;
   /** 圧縮のまま持っているバイト数 (`FOLLOW_BYTES_MOST`) */
   private pendingBytes = 0;
@@ -181,7 +181,11 @@ export class Fmp4Video {
    */
   private floor: number | null = null;
   private lastPts: number | null = null;
-  /** いま出しているコマの時刻 (90kHz) */
+  /** もう届かない (`finish`)。デコーダに渡す前のチャンクをすべて渡したら、デコーダに残ったフレームを出させる */
+  private ending = false;
+  /** 末尾で `flush` を呼んだ (開き直したら、また呼ぶ) */
+  private flushed = false;
+  /** いま出しているコマの時刻 (90 kHz) */
   current: number | null = null;
   frameTicks = FRAME;
   dropped = 0;
@@ -280,6 +284,7 @@ export class Fmp4Video {
     this.dropFrames();
     this.started.clear();
     this.needKey = true;
+    this.flushed = false;
     const config = this.config;
     if (config === null) return;
     if (this.decoder === null || this.decoder.state === "closed") {
@@ -352,7 +357,7 @@ export class Fmp4Video {
     this.keep(this.pending.slice(found));
     this.decoder?.reset();
     this.open();
-    // 開き直しでキーフレームを待つ印が立つが、先頭はキーフレームなのでそのまま渡せる
+    // 開き直すとキーフレームを待つ印が立つが、先頭はキーフレームなのでそのまま渡せる
     this.needKey = false;
   }
 
@@ -420,7 +425,7 @@ export class Fmp4Video {
     this.frames.splice(at, 0, frame);
   }
 
-  /** 刻むたびに: 番の近いものを渡し、番が来たコマを描く。`at` は時計 (90kHz。止まっていれば null) */
+  /** 刻むたびに呼ぶ。番の近いものを渡し、番が来たコマを描く。`at` は時計 (90 kHz。止まっていれば null) */
   tick(at: number | null): void {
     const decoder = this.decoder;
     if (decoder === null || decoder.state !== "configured") return;
@@ -465,6 +470,14 @@ export class Fmp4Video {
       this.pending[0]!.dts <= at + AHEAD
     ) {
       this.decode(this.take());
+    }
+    /*
+     * 末尾まで渡しきった。B フレームを並べ替えるデコーダは、最後の数枚を次のコマが来るまで持っている
+     * (H.264)。もう次は来ないので、`flush` で出させる。呼ばないと録画の最後の数コマが描かれない
+     */
+    if (this.ending && !this.flushed && this.pending.length === 0) {
+      this.flushed = true;
+      decoder.flush().catch(() => undefined);
     }
 
     const now = micros(at);
@@ -512,6 +525,11 @@ export class Fmp4Video {
     this.host.drew(first);
   }
 
+  /** もう届かない (録画の末尾まで読んだ。`messages.ts` の `end`)。デコーダに渡す前のチャンクをすべて渡したら `flush` する (`tick`) */
+  finish(): void {
+    this.ending = true;
+  }
+
   /** いま出しているコマ (切り抜き)。2D は描いたものが残るので、そのまま写す。`size` があれば縮めて (`messages.ts` の `grab`) */
   async grab(size?: GrabSize): Promise<ImageBitmap | null> {
     if (this.current === null) return null;
@@ -522,12 +540,14 @@ export class Fmp4Video {
 
   /**
    * 選局し直した・録画で飛んだ。**前の局のものは全部捨てる** (出ているフレームは次が出るまで残る)。
-   * `from` (90kHz) を渡すと、それより前のフレームは描かない (`floor`)
+   * `from` (90 kHz) を渡すと、それより前のフレームは描かない (`floor`)
    */
   reset(from: number | null = null): void {
     this.floor = from === null ? null : micros(from);
     this.keep([]);
     this.overflowed = false;
+    this.ending = false;
+    this.flushed = false;
     this.dropFrames();
     this.started.clear();
     this.tracks = [];

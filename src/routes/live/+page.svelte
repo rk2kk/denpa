@@ -4,6 +4,7 @@
   import { MediaQuery } from "svelte/reactivity";
 
   import { submitting } from "#lib/actions.js";
+  import { dataAudio } from "#lib/arib.js";
   import type { Service } from "#lib/bml/engine.js";
   import DriveNotice from "#lib/components/DriveNotice.svelte";
   import { centerTap } from "#lib/components/player/center-tap.js";
@@ -143,7 +144,7 @@
   let mediaBox = $state<HTMLElement | null>(null);
   /** リモコンのキーを渡す関数と、d を文書へ渡す関数 (`DataBroadcast` の press / pressD)。前者があれば指のリモコンを出す */
   let dataPress = $state<((code: number) => void) | null>(null);
-  /** データ放送の映像の上の通知 (`DataBroadcast` の `note`。舞台の通知の列に積む) */
+  /** データ放送が映像の上に出す通知 (`DataBroadcast` の `note`。舞台の通知の列に積む) */
   let dataNote = $state("");
   let dataButton = $state<(() => boolean) | null>(null);
   /** 自動で受信するかを切り替えたときの通知 (`receive-note.svelte.ts`) */
@@ -261,6 +262,15 @@
         : { broadcast: channel.broadcast }),
     });
     return true;
+  }
+
+  /**
+   * データ放送が主音声を替えた (`setMainAudioStream`。J:COM テレビのラジオ選局など)。PMT の音声の何本目か (`N:es`) を選ぶ。
+   * 戻すとき (null) は、まだデータ放送の音声のままならふだんの音声へ。見ている人が「音声」で選び直していれば、そちらを残す
+   */
+  function mainAudioFromData(index: number | null): void {
+    const next = dataAudio(index, player.audio, player.audios);
+    if (next !== null) player.setAudio(next);
   }
 
   /**
@@ -412,7 +422,7 @@
   const fullscreen = stageFullscreen(() => stageEl);
 
   /**
-   * 右の列の「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
+   * 右の列に出す「コメントの一覧」(`JikkyoList`)。流しているときと同じ条件で、映像の右端の列のボタンで出す (端末ごとに覚える)。
    * 書ける間は一覧の下に書き込む 1 行を付ける (上の `canWrite`)。右の列の無い形 (横にしたスマホ・全画面) では出さず、
    * 同じボタンで映像の上の 1 行を開く (書けなければボタンも置かない)
    */
@@ -508,7 +518,7 @@
 
   /**
    * キーでも動かせるようにする。**割り当ては追っかけ・観る画面と共通** (`player/keys.ts`)。
-   * ← → はシークバーと同じく、出しているときだけ (MPEG-2 と録画に譲っている間は無い)。速さは追っかけ中だけ効く
+   * ← → はシークバーと同じく、出しているときだけ (canvas に描いている間と、録画に譲っている間は無い)。速さは追っかけ中だけ効く
    * (`live-player` の `setSpeed`)
    */
   const playerKey = playerKeys({
@@ -527,7 +537,7 @@
       if (player.tuned !== null) toggleDataAuto();
     },
   });
-  /** データ放送を出している間は、空白・十字キーはあちらのリモコン (`bml/engine.ts` の `aribKey`) */
+  /** データ放送を出している間は、空白・十字キーはあちらのリモコン (`player/keys.ts` の `dataRemoteKey`。観る画面と同じ) */
   function keys(event: KeyboardEvent): void {
     if (player.showData && dataRemoteKey(event)) return;
     playerKey(event);
@@ -545,9 +555,24 @@
 
 <svelte:window onkeydown={keys} />
 
+<!-- 実況に書き込む 1 行。映像の上 (一覧を出せない形) とコメントの一覧の下で同じもの -->
+{#snippet compose(panel: boolean, focus: boolean)}
+  <JikkyoCompose
+    feed={jikkyo}
+    air={() => player.airTime()}
+    lag={player.fromAir}
+    paused={player.paused}
+    {panel}
+    {focus}
+    bind:text={draft}
+    official={data.niconico}
+    onclose={closeWriting}
+  />
+{/snippet}
+
 <!--
-    映像を左、局を右 (YouTube の再生画面と同じ形)。広い画面ではページごとスクロールさせず、動くのは右の一覧だけ
-    (`+layout.svelte` の `fill`)。1000px 未満では縦に積む
+  映像を左、局を右 (YouTube の再生画面と同じ形)。広い画面ではページごとスクロールさせず、動くのは右の一覧だけ
+  (`+layout.svelte` の `fill`)。1000px 未満では縦に積む
 -->
 <PlayerLayout testid="live">
   <!-- 舞台と映像の束は追っかけと共通 (PlayerStage / MediaStack) -->
@@ -601,6 +626,8 @@
         prefecture={data.prefecture}
         network={data.bmlNetwork}
         tune={tuneFromData}
+        mainAudio={mainAudioFromData}
+        cardId={player.cardId}
         apps={player.hybridcast}
         serviceName={current?.name ?? ""}
         captions={player.captions}
@@ -610,16 +637,16 @@
       />
 
       <!--
-                出せなかった間も出しておく (逃げ道のコーデックの選び直しは ⚙ にしか無い)。録画に譲って
-                追っかけを観ている間も出す (局をリクエストするものだけ外す)
-            -->
+        出せなかった間も出しておく (逃げ道のコーデックの選び直しは ⚙ にしか無い)。録画に譲って
+        追っかけを観ている間も出す (局をリクエストするものだけ外す)
+      -->
       {#if player.tuned !== null || player.yielded !== null}
-        <!-- 右端の縦の列。観る画面と同じ場所・並び (いちばん上は録画。観る画面では閉じる) -->
+        <!-- 右端の縦の列。観る画面と同じ場所 (上から録画・d・切り抜き・コメントの一覧。観る画面はいちばん上が閉じるで、d は ⚙ の中) -->
         <ControlBar side shown={controls.shown}>
           <!--
-                        いま観ている番組を録る (手動予約と同じ `?/record`。二重にはならない)。
-                        録画に譲っている間は出さない (もう録っている)。データ放送も局のもの
-                    -->
+            いま観ている番組を録る (手動予約と同じ `?/record`。二重にはならない)。
+            録画に譲っている間は出さない (もう録っている)。データ放送も局のもの
+          -->
           {#if player.tuned !== null}
             <form method="POST" action="?/record" use:submitting>
               <input
@@ -650,7 +677,7 @@
             icon={shooter.saved ? CHECK : CAMERA}
             label="この場面を切り抜く"
             testid="live-shot"
-            onclick={() => void snapshot()}
+            onclick={snapshot}
           />
           <!--
             右の列の先頭に「コメントの一覧」(書ける間は下に書き込む 1 行) を出す・しまう (`canList`)。
@@ -671,23 +698,13 @@
         <ControlBar shown={controls.shown} testid="live-controls">
           <!-- 一覧を出せない形で書き込む 1 行 (操作バーのすぐ上。`writing`) -->
           {#if writing}
-            <JikkyoCompose
-              feed={jikkyo}
-              air={() => player.airTime()}
-              lag={player.fromAir}
-              paused={player.paused}
-              panel={false}
-              focus
-              bind:text={draft}
-              official={data.niconico}
-              onclose={closeWriting}
-            />
+            {@render compose(false, true)}
           {/if}
           <!--
-                        上に位置、下に押すもの (観る画面と同じ二段)。放送の今にいる間は右端に張り付かせる
-                        (貯めているぶん後ろにいるが、描くとつまみが左へ動いて見える)。MPEG-2 では出さない
-                        (遡れるほど持っていない)。録画に譲っている間も出さない (戻るのは通知の「ライブに戻る」)
-                    -->
+            上に位置、下に押すもの (観る画面と同じ二段)。放送の今にいる間は右端に張り付かせる
+            (貯めているぶん後ろにいるが、描くとつまみが左へ動いて見える)。canvas に描いている間 (MPEG-2・互換モード) は出さない
+            (遡れるほど持っていない)。録画に譲っている間も出さない (戻るのは通知の「ライブに戻る」)
+          -->
           {#if !player.canvas && player.yielded === null}
             <SeekBar
               value={player.live ? player.newest : player.position}
@@ -718,9 +735,9 @@
               />
 
               <!--
-                        字幕を持っている番組でだけ出す。1 枚も届いていなくても出す (`server/captions.ts` の
-                        `TrackList`。届いてから出すと間隔の空く番組で出なかった)
-                    -->
+                字幕を持っている番組でだけ出す。1 枚も届いていなくても出す (`server/captions.ts` の
+                `TrackList`。届いてから出すと間隔の空く番組で出なかった)
+              -->
               {#if player.hasCaptions}
                 <ControlButton
                   icon={CAPTION}
@@ -732,9 +749,9 @@
               {/if}
 
               <!--
-                        Hybridcast は載っている番組でだけ出す。別のタブで開くだけ (受信機の API が無いので多くは
-                        動かない。[stream.md](../../../docs/stream.md#hybridcast))。中で動くように見せないよう「外へ出ていく」印にする
-                    -->
+                Hybridcast は載っている番組でだけ出す。別のタブで開くだけ (受信機の API が無いので多くは
+                動かない。[stream.md](../../../docs/stream.md#hybridcast))。中で動くように見せないよう「外へ出ていく」印にする
+              -->
               {#if hybridcast !== undefined}
                 <ControlButton
                   icon={OPEN_OUT}
@@ -771,16 +788,16 @@
             >
               {#snippet status()}
                 <!--
-                    項目は「・」で区切り、あいだに空白を入れない (docs/writing.md)。空白が入らないよう {#if} どうしを詰めて書く。
-                    放送からの遅れ (`live-player` の `fromAir`。隣のテレビとの差)。出るまではバッファだけを「遅延」として出す。
-                    手元のバッファ (`buffered.end - currentTime`)。上流は入っていない。
-                    測り直す (`relearn`)。覚えているものがあるときだけ、遅延のすぐ隣に置く。
-                    読みものの行なので丸いボタンにはしない (操作バーが厚くなる)。
-                    途切れは止まったときだけ (`live-player` の `stalls`)。下限は、いま効いている下限と届く間隔のいちばん長いもの。
-                    途切れの報告に添えてもらう (#1210)。コマ落ちは描かれずに捨てられたコマで、映像だけ遅れるときの切り分け
-                    (`live-player` の `dropped`)。映像だけの遅れは開いたままにせず飛び直す (`unslip`) ので、直した回数も出す。
-                    再生の速さは遅延を詰めるのに変えている。Safari は変えるたびにつまずく (`ts/pacing.ts` の `Steering`)。
-                    デコードは MPEG-2 を 1 コマデコードするのに掛かる時間。8 割を 3 秒超え続けたらエンコードしたものに戻る (`raw/budget.ts`)
+                  項目は「・」で区切り、あいだに空白を入れない (docs/writing.md)。空白が入らないよう {#if} どうしを詰めて書く。
+                  放送からの遅れ (`live-player` の `fromAir`。隣のテレビとの差)。出るまではバッファだけを「遅延」として出す。
+                  手元のバッファ (`buffered.end - currentTime`)。上流は入っていない。
+                  測り直す (`relearn`)。覚えているものがあるときだけ、遅延のすぐ隣に置く。
+                  読みものの行なので丸いボタンにはしない (操作バーが厚くなる)。
+                  途切れは止まったときだけ (`live-player` の `stalls`)。下限は、いま効いている下限と届く間隔のいちばん長いもの。
+                  途切れの報告に添えてもらう (#1210)。コマ落ちは描かれずに捨てられたコマで、映像だけ遅れるときの切り分け
+                  (`live-player` の `dropped`)。映像だけの遅れは開いたままにせず飛び直す (`unslip`) ので、直した回数も出す。
+                  再生の速さは遅延を詰めるのに変えている。Safari は変えるたびにつまずく (`ts/pacing.ts` の `Steering`)。
+                  デコードは MPEG-2 を 1 コマデコードするのに掛かる時間。8 割を 3 秒超え続けたらエンコードしたものに戻る (`raw/budget.ts`)
                 -->
                 {#if player.fromAir !== null}<span
                     >放送から {player.fromAir.toFixed(1)} 秒</span
@@ -822,7 +839,7 @@
               {/snippet}
             </InfoBlock>
 
-            <!-- 追っかけ中の速さ。追っかけている間だけ (放送より先は無い。追いついたら自分でライブに戻る) -->
+            <!-- 追っかけ中の速さ。追っかけている間だけ (放送より先は無い。追いついたらライブに戻る) -->
             {#if player.chasing}
               <Extras>
                 <SpeedMenu
@@ -835,9 +852,9 @@
             {/if}
 
             <!--
-                            AV1 を受け取れなければ次の形式に切り替えて理由を出す (`live-player.svelte.ts` の `start`)。
-                            末尾の MPEG-2 はエンコードせずに放送そのままをデコードする経路
-                        -->
+              受け取れない形式 (AV1・H.265) なら次の形式に切り替えて理由を出す (`live-player.svelte.ts` の `start`)。
+              末尾の MPEG-2 はエンコードせずに放送そのままをデコードする経路
+            -->
             <StageTail
               prefix="live"
               {volume}
@@ -904,9 +921,9 @@
 
       {#if player.silenced && player.state === "playing"}
         <!--
-                    押されるまで音は出せない (前回の局で勝手に始めるので、ブラウザが音ありの再生を断る)。
-                    並びの外に 1 つだけ浮かぶので、地は映像の上の通知と同じに自分で敷く
-                -->
+          押されるまで音は出せない (前回の局で勝手に始めるので、ブラウザが音ありの再生を断る)。
+          並びの外に 1 つだけ浮かぶので、地は映像の上の通知と同じに自分で敷く
+        -->
         <button
           type="button"
           class="small unmute {OVERLAY}"
@@ -951,9 +968,9 @@
         >
       {/if}
       <!--
-                    録画に譲った (`live-player` の `giveWay`)。「ライブに戻る」を置くので、この通知だけ押せる形で並べる
-                    (見た目は StageNote と同じ。追っかけの「観る画面で」と同じ扱い)
-                -->
+        録画に譲った (`live-player` の `giveWay`)。「ライブに戻る」を置くので、この通知だけ押せる形で並べる
+        (見た目は StageNote と同じ。追っかけの「観る画面で」と同じ扱い)
+      -->
       {#if player.yielded}
         {@const yielded = player.yielded}
         <span class="stage-note yielded" data-testid="live-yielded">
@@ -988,24 +1005,14 @@
   </PlayerStage>
 
   <!--
-        右の列。幅は固定で、映像側だけ伸ばす。番組表と同じ並びで、高さは残りぜんぶ
-    -->
+    右の列。幅は固定で、映像側だけ伸ばす。番組表と同じ並びで、高さは残りぜんぶ
+  -->
   {#snippet aside()}
-    <!-- 右の列の先頭のコメントの一覧。書ける間は下に書き込む 1 行を付ける (局の一覧・番組の中身のどちらでも同じ) -->
+    <!-- 右の列の先頭に出すコメントの一覧。書ける間は下に書き込む 1 行を付ける (局の一覧・番組の中身のどちらでも同じ) -->
     {#snippet commentList()}
       <JikkyoList feed={jikkyo} air={() => player.airTime()}>
         {#if canWrite}
-          <JikkyoCompose
-            feed={jikkyo}
-            air={() => player.airTime()}
-            lag={player.fromAir}
-            paused={player.paused}
-            panel
-            focus={opened}
-            bind:text={draft}
-            official={data.niconico}
-            onclose={closeWriting}
-          />
+          {@render compose(true, opened)}
         {/if}
       </JikkyoList>
     {/snippet}
@@ -1023,8 +1030,8 @@
     {/snippet}
     {#if detail.current}
       <!--
-            番組の中身は、この列を入れ替えて出す (モーダルにしない。映像に被さると観ながら読めない)
-        -->
+        番組の中身は、この列を入れ替えて出す (モーダルにしない。映像に被さると観ながら読めない)
+      -->
       <FactsAside
         testid="live-detail"
         back={{
@@ -1125,14 +1132,14 @@
                   fallback={Array.from(channel.name.trim())[0] ?? channel.type}
                 />
                 <!--
-                                いま映しているものはほかの選んでいる行と同じく左の縦線と主の色の太字 (`app.css` の `.side-item`。バッジは狭い列で局名を潰した)。
-                                読み上げには `aria-current` と隠した「視聴中」で渡す
-                            -->
+                  いま映しているものはほかの選んでいる行と同じく左の縦線と主の色の太字 (`app.css` の `.side-item`。バッジは狭い列で局名を潰した)。
+                  読み上げには `aria-current` と隠した「視聴中」で渡す
+                -->
                 <span class="channel-text">
                   <!--
-                                    テレビの番号を局名の先頭に添える (地上波はリモコン番号、BS/CS は 3 桁)。
-                                    番号の無い局も幅は取る。局名の先頭がそろう
-                                -->
+                    テレビの番号を局名の先頭に添える (地上波はリモコン番号、BS/CS は 3 桁)。
+                    番号の無い局も幅は取る。局名の先頭がそろう
+                  -->
                   <span class="channel-name broadcast">
                     {#if tuned}<span
                         class="visually-hidden"
@@ -1195,9 +1202,9 @@
 
 <style>
   /*
-     * 右の一覧の列 (幅と高さは `PlayerLayout`)。一覧 (`.channels`) だけは列の端まで広げて中で余白を取る
-     * (スクロールバーを窓の右端に出すため)
-     */
+   * 右の一覧の列 (幅と高さは `PlayerLayout`)。一覧 (`.channels`) だけは列の端まで広げて中で余白を取る
+   * (スクロールバーを窓の右端に出すため)
+   */
   .live-side {
     display: flex;
     flex-direction: column;
@@ -1205,9 +1212,9 @@
     padding: var(--dp-side-top, var(--dp-side-pad, 0)) var(--dp-side-pad, 0) 0;
   }
   /*
-     * 横にしたスマホでは、一覧から選ぶと映像へ滑って戻る (`backToPicture`)。巻くのは外枠 (`PlayerLayout` の `.layout`)。
-     * 局の一覧を出しているこの画面のこの形だけにする (条件は `PHONE_LANDSCAPE` と同じ)
-     */
+   * 横にしたスマホでは、一覧から選ぶと映像へ滑って戻る (`backToPicture`)。巻くのは外枠 (`PlayerLayout` の `.layout`)。
+   * 局の一覧を出しているこの画面のこの形だけにする (条件は `PHONE_LANDSCAPE` と同じ)
+   */
   @media (orientation: landscape) and (max-height: 500px) and (pointer: coarse) and (prefers-reduced-motion: no-preference) {
     :global([data-player-layout]:has(> [data-player-side] > .live-side)) {
       scroll-behavior: smooth;
@@ -1252,7 +1259,7 @@
   .back-live:is(:hover, :focus-visible):not(:disabled) {
     background: var(--dp-on-video-hover);
   }
-  /* 映像の上の焦点の線はテーマで変えない (`app.css` の `--dp-video-focus`。操作バーのボタンと同じ) */
+  /* 映像の上では焦点の線をテーマで変えない (`app.css` の `--dp-video-focus`。操作バーのボタンと同じ) */
   :is(.relearn, .back-live):focus-visible {
     outline-color: var(--dp-video-focus);
   }
@@ -1284,7 +1291,7 @@
   .channels {
     flex: 1;
     margin: 0 calc(-1 * var(--dp-side-pad, 0px));
-    /* 行の面の端は上の種別のタブの端と同じ所。巻き取る箱は列の幅いっぱい (スクロールバーは窓の右端) */
+    /* 行の面の端は、上にある種別のタブの端と同じ所。巻き取る箱は列の幅いっぱい (スクロールバーは窓の右端) */
     padding: 0 var(--dp-side-pad, 0px) var(--dp-side-pad, 0);
     overflow-y: auto;
   }
@@ -1330,9 +1337,9 @@
     cursor: pointer;
   }
   /*
-     * 番号は局名の先頭に小さく淡く。2 桁ぶん取って右に寄せ、局名の先頭をそろえる
-     * (E2E 20 の「種別のタブと下の一覧の端がそろう」)
-     */
+   * 番号は局名の先頭に小さく淡く。2 桁ぶん取って右に寄せ、局名の先頭をそろえる
+   * (E2E 20 の「種別のタブと下の一覧の端がそろう」)
+   */
   .channel-number {
     display: inline-block;
     min-width: 2ch;

@@ -30,7 +30,7 @@ internal sealed class It930xTsDemux
     private readonly It930xTsOutput?[] _outputs;
     private readonly long[] _packets;
     private readonly It930xTsOutput?[] _targets;
-    private byte[] _store = new byte[It930xBridge.TsTransferSize + 2 * PacketSize];
+    private byte[] _store = new byte[It930xBridge.TsRequestSize + 2 * PacketSize];
     private int _used;
     private bool _aligned;
 
@@ -55,6 +55,9 @@ internal sealed class It930xTsDemux
 
     /// <summary>入力ごとに分けたパケットの数</summary>
     public IReadOnlyList<long> Packets => _packets;
+
+    /// <summary>入力 <paramref name="input"/> に分けたパケットの数。<see cref="Push"/> と別のスレッドから読む</summary>
+    public long PacketsOf(int input) => Volatile.Read(ref _packets[input]);
 
     /// <summary>揃っていない間に飛ばしたバイトの数。EP からのバイト列が 188 バイトの並びから外れたときに増える。原因は USB の取りこぼしか、ブリッジの問題</summary>
     public long Skipped { get; private set; }
@@ -135,7 +138,7 @@ internal sealed class It930xTsDemux
 }
 
 /// <summary>
-/// 受信機 1 つぶんの TS の出口。<see cref="Pipe"/> (8 MB) に詰め、読み出し側は <see cref="DeviceStream"/>。Pipe は asicend・CECH-ZD1 J・PIX-DT295・Siano と同じ <see cref="TsBuffer"/> で作る。
+/// 受信機 1 つぶんの TS の出口。<see cref="Pipe"/> (8 MB) に詰め、読み出し側は <see cref="DeviceStream"/>。Pipe は asicen-userland・CECH-ZD1 J・PIX-DT295・Siano の機材と同じ <see cref="TsBuffer"/> で作る。
 /// 選局のたびに新しく作り、前の選局のパケットと混ぜない。
 ///
 /// <para>

@@ -27,6 +27,9 @@ public class TunerPoolTests
         /// <summary>選局すると、電源を入れ直すまで使えないと答える (ブリッジの溢れが立ったままの IT930x の機材)</summary>
         public bool Unusable { get; init; }
 
+        /// <summary>選局すると、ロックしたのにこの受信機だけ TS が届かないと答える (同じ機材のほかの受信機には TS が届いている IT930x の機材)</summary>
+        public bool Stalled { get; init; }
+
         public FakeTuner(string path, TimeSpan tune, TimeSpan read, StreamFormat format = StreamFormat.Ts, byte[]? content = null)
         {
             Path = path;
@@ -69,6 +72,7 @@ public class TunerPoolTests
             {
                 Interlocked.Increment(ref Tunes);
                 if (Unusable) throw new TunerUnusableException("電源を抜いて入れ直してください");
+                if (Stalled) throw new TunerStalledException(It930xTuner.TsMissing);
                 if (Deaf) throw new IOException(ITuneDevice.SyncFailed);
                 Tuning.Set();
                 Thread.Sleep(_tune);
@@ -142,11 +146,16 @@ public class TunerPoolTests
 
         /// <param name="deaf">選局しても同期しないデバイス</param>
         /// <param name="firstTs">最初の TS を待つ上限 (<see cref="TunerPool.FirstTsLimit"/>)。省くと本物と同じ</param>
-        public Rig(IReadOnlyList<TunerSpec> specs, TimeSpan tune, TimeSpan read, StreamFormat format = StreamFormat.Ts, byte[]? content = null, IReadOnlySet<string>? deaf = null, TimeSpan? firstTs = null, IReadOnlySet<string>? unusable = null)
+        public Rig(IReadOnlyList<TunerSpec> specs, TimeSpan tune, TimeSpan read, StreamFormat format = StreamFormat.Ts, byte[]? content = null, IReadOnlySet<string>? deaf = null, TimeSpan? firstTs = null, IReadOnlySet<string>? unusable = null, IReadOnlySet<string>? stalled = null)
         {
             Pool = new TunerPool(specs, () => { }, new TuneOptions(), spec =>
             {
-                var tuner = new FakeTuner(spec.Device!, tune, read, format, content) { Deaf = deaf?.Contains(spec.Device!) == true, Unusable = unusable?.Contains(spec.Device!) == true };
+                var tuner = new FakeTuner(spec.Device!, tune, read, format, content)
+                {
+                    Deaf = deaf?.Contains(spec.Device!) == true,
+                    Unusable = unusable?.Contains(spec.Device!) == true,
+                    Stalled = stalled?.Contains(spec.Device!) == true,
+                };
                 lock (_opened) _opened.Add(tuner);
                 return tuner;
             })
@@ -230,7 +239,7 @@ public class TunerPoolTests
             var clock = System.Diagnostics.Stopwatch.StartNew();
             rig.Pool.Status();
             await Assert.That(replacing.IsCompleted).IsFalse().Because("選局が終わるまで閉じずに待つ");
-            await Assert.That(clock.ElapsedMilliseconds < 300).IsTrue().Because($"{clock.ElapsedMilliseconds}ms 掛かった");
+            await Assert.That(clock.ElapsedMilliseconds < 300).IsTrue().Because($"{clock.ElapsedMilliseconds} ms 掛かった");
 
             await replacing.WaitAsync(TimeSpan.FromSeconds(10), cancel);
             var sink = await opening.WaitAsync(TimeSpan.FromSeconds(10), cancel);
@@ -261,7 +270,7 @@ public class TunerPoolTests
             await FirstChunk(low, cancel);
 
             var high = Background(() => rig.Pool.Open("GR", "T28", 10, "rec 1"));
-            // 取り上げられたら、取り上げた側は前の読み出し (1 回 300ms) が止まるのを待っている
+            // 取り上げられたら、取り上げた側は前の読み出し (1 回 300 ms) が止まるのを待っている
             await Assert.That(await Drain(low, cancel)).IsEqualTo(TunerPool.PreemptedBy("rec 1"));
             rig.Pool.Replace([Spec("B", "fake:b"), Spec("A", "fake:a")]);
 
@@ -406,11 +415,11 @@ public class TunerPoolTests
     private static int Tunes(Rig rig, string path) => rig.Opened(path).Sum(tuner => tuner.Tunes);
 
     /// <summary>
-    /// **最初の TS が上限までに届かなければ、選局を畳んで理由を返し、次の選局では選局し直す** (<see cref="TunerPool.FirstTsLimit"/>)。
+    /// **最初の TS が上限までに届かなければ、選局を終えて理由を返し、次の選局では選局し直す** (<see cref="TunerPool.FirstTsLimit"/>)。
     /// 本番で、名指しのライブが PX-MLT8PE の受信機に入ったまま答えを返さず、同じ名指しのリクエストし直しもその選局を共有して止まり続けた
     /// </summary>
     [Test]
-    public async Task 最初の_TS_が上限までに届かなければ畳んで理由を返し_次は選局し直す(CancellationToken cancel)
+    public async Task 最初の_TS_が上限までに届かなければ選局を終えて理由を返し_次は選局し直す(CancellationToken cancel)
     {
         await Task.Yield();
         // 1 回の読み出しが上限より長く掛かる (TS が届かない受信機)
@@ -432,9 +441,9 @@ public class TunerPoolTests
         }
     }
 
-    /// <summary>**TS が届いた選局は、上限を過ぎても畳まない**</summary>
+    /// <summary>**TS が届いた選局は、上限を過ぎても終えない**</summary>
     [Test]
-    public async Task TS_が届いた選局は上限を過ぎても畳まない(CancellationToken cancel)
+    public async Task TS_が届いた選局は上限を過ぎても終えない(CancellationToken cancel)
     {
         await Task.Yield();
         var rig = new Rig([Spec("A", "fake:a")], TimeSpan.Zero, TimeSpan.FromMilliseconds(10), firstTs: TimeSpan.FromMilliseconds(300));
@@ -500,7 +509,7 @@ public class TunerPoolTests
 
     /// <summary>
     /// **選局し直すのは、同じ組の空いているチューナーだけ。** 受けられる種別の違うチューナー (別の組) へは移らず、
-    /// 優先度の低い利用者がいるチューナーからも取り上げない。名指しとスキャンは選局し直さない。どれも最初の失敗をそのまま返す
+    /// 取り合いで後に回る利用者がいるチューナーからも取り上げない。名指しとスキャンは選局し直さない。どれも最初の失敗をそのまま返す
     /// </summary>
     [Test]
     [Arguments("other group")]
@@ -547,7 +556,7 @@ public class TunerPoolTests
         {
             var first = rig.Pool.Open("GR", "T26", 3, "epg T26");
             await FirstChunk(first, cancel);
-            // 選局を畳み、デバイスも手放す (もう合っているチューナーを先に使う段を外す)
+            // 選局を終え、デバイスも手放す (もう合っているチューナーを先に使う段を外す)
             rig.Pool.CloseAll();
 
             var again = rig.Pool.Open("GR", "T26", 3, "epg T26");
@@ -602,6 +611,70 @@ public class TunerPoolTests
         }
     }
 
+    private static Rig Stalled(IReadOnlyList<TunerSpec> specs, IReadOnlySet<string>? deaf, params string[] stalled) =>
+        new(specs, TimeSpan.Zero, TimeSpan.FromMilliseconds(1), deaf: deaf, stalled: stalled.ToHashSet());
+
+    /// <summary>
+    /// **その受信機だけ TS が届かなかったチューナーは、試した数に入れずに同じ組の空いているチューナーで選局し直す** (IT930x で、並べて選局したほかの受信機には TS が届いている)。
+    /// そのチャンネルでは後ろに回すが、使えないことにはしない (ほかのチャンネルは元の順で試す)
+    /// </summary>
+    [Test]
+    public async Task その受信機だけ_TS_が届かなければ別のチューナーで選局し直し_使えないことにはしない(CancellationToken cancel)
+    {
+        await Task.Yield();
+        var rig = Stalled([Spec("A", "fake:a"), Spec("B", "fake:b"), Spec("C", "fake:c")], null, "fake:a", "fake:b");
+        try
+        {
+            var first = rig.Pool.Open("GR", "T26", 3, "epg T26");
+            await FirstChunk(first, cancel);
+            await Assert.That(Tunes(rig, "fake:a")).IsEqualTo(1);
+            await Assert.That(Tunes(rig, "fake:b")).IsEqualTo(1);
+            await Assert.That(rig.Pool.Status()[2]!["channel"]!["channel"]!.GetValue<string>()).IsEqualTo("T26");
+            first.Leave();
+            rig.Pool.CloseAll();
+
+            // ほかのチャンネルは元の順で A から試す (機材を使えないことにしていない)
+            Assert.Throws<IOException>(() => rig.Pool.Open("GR", "T28", 1, "scan T28"));
+            await Assert.That(Tunes(rig, "fake:a")).IsEqualTo(2);
+        }
+        finally
+        {
+            rig.Pool.CloseAll();
+        }
+    }
+
+    /// <summary>
+    /// **その受信機だけ TS が届かなかったあとで同期しなければ、同期しなかったチューナーだけを 1 台のときの文言で返す** (denpa はこの文言で放送休止を見分ける)。
+    /// 選局し直す先が無ければ、TS が届かなかった理由を返す
+    /// </summary>
+    [Test]
+    public async Task その受信機だけ_TS_が届かなかったチューナーは同期しなかった文に並べない()
+    {
+        await Task.Yield();
+        var mixed = Stalled([Spec("A", "fake:a"), Spec("B", "fake:b"), Spec("C", "fake:c")], new HashSet<string> { "fake:b", "fake:c" }, "fake:a");
+        try
+        {
+            var error = Assert.Throws<IOException>(() => mixed.Pool.Open("GR", "T26", 3, "epg T26"));
+            await Assert.That(error.Message).IsEqualTo($"B・C: {ITuneDevice.SyncFailed}");
+        }
+        finally
+        {
+            mixed.Pool.CloseAll();
+        }
+
+        var only = Stalled([Spec("A", "fake:a")], null, "fake:a");
+        try
+        {
+            var error = Assert.Throws<IOException>(() => only.Pool.Open("GR", "T26", 3, "epg T26"));
+            await Assert.That(error.Message).IsEqualTo($"A: {It930xTuner.TsMissing}");
+            await Assert.That(error is TunerUnusableException).IsFalse();
+        }
+        finally
+        {
+            only.Pool.CloseAll();
+        }
+    }
+
     /// <summary>
     /// **使えないチューナーのあとで同期しなければ、同期しなかったチューナーだけを 1 台のときの文言で返す** (denpa はこの文言で放送休止を見分ける)。
     /// 使えないチューナーしか無ければ、その理由を返し、次の選局でも機材に確かめ直す (電源を入れ直したあとなら選局できる)
@@ -615,6 +688,8 @@ public class TunerPoolTests
         {
             var error = Assert.Throws<IOException>(() => mixed.Pool.Open("GR", "T26", 3, "epg T26"));
             await Assert.That(error.Message).IsEqualTo($"B: {ITuneDevice.SyncFailed}");
+            // 最後に同期しなかったのは使えるチューナーなので、使えないチューナーの型 (HTTP の 503) にはしない
+            await Assert.That(error is TunerUnusableException).IsFalse();
             await Assert.That(Tunes(mixed, "fake:a")).IsEqualTo(1);
         }
         finally
@@ -627,8 +702,11 @@ public class TunerPoolTests
         {
             var error = Assert.Throws<IOException>(() => only.Pool.Open("GR", "T26", 3, "epg T26"));
             await Assert.That(error.Message).IsEqualTo("A: 電源を抜いて入れ直してください");
+            // 使えないチューナーで終わったことは型で返す (HTTP の 503。スキャンはそのチューナーを外す)
+            await Assert.That(error is TunerUnusableException).IsTrue();
+            await Assert.That(Assert.Throws<IOException>(() => only.Pool.Open("GR", "T28", 3, "scan T28")) is TunerUnusableException).IsTrue();
             Assert.Throws<IOException>(() => only.Pool.Open("GR", "T27", 3, "epg T27"));
-            await Assert.That(Tunes(only, "fake:a")).IsEqualTo(2);
+            await Assert.That(Tunes(only, "fake:a")).IsEqualTo(3);
         }
         finally
         {

@@ -8,8 +8,8 @@
  * - SDT (PID 0x0011) … その TS に入っているサービスの ID と種別。衛星はほかの TS のぶん
  *   (SDT[other]) も流れている (`SdtReader`)
  *
- * 局名も SDT から読む。ARIB の文字符号は独自だが、番組表を自分で集めるなら
- * どのみち要るので [aribtext.ts](aribtext.ts) に寄せてある。
+ * 局名も SDT から読む。ARIB の文字符号は独自だが、番組表を取得するにも要るので
+ * [aribtext.ts](aribtext.ts) に寄せてある。
  */
 
 import { decodeAribText } from "./aribtext.js";
@@ -42,11 +42,12 @@ const DESC_CABLE_DELIVERY = 0x44;
 const DESC_TERRESTRIAL_DELIVERY = 0xfa;
 const DESC_SERVICE = 0x48;
 const DESC_TS_INFORMATION = 0xcd;
+const DESC_PARTIAL_RECEPTION = 0xfb;
 
 /**
  * スキャンで残すサービス種別。Mirakurun のスキャンが通しているものと同じで、
- * ラジオ (0x02) とデータ (0xc0) も入る。映像の無いものを番組表に並べないのは
- * 取り込むほう (denpa の epg.ts の DIGITAL_TV)
+ * ラジオ (0x02) とデータ (0xc0) も入る。どの種別を番組表に並べるかは
+ * 取り込むほうが決める (denpa の schema.ts の `IMPORTED_SERVICE_TYPES`)
  */
 export const SERVICE_TYPES = new Set([
   0x01, 0x02, 0xa1, 0xa4, 0xa5, 0xad, 0xc0,
@@ -109,12 +110,12 @@ export interface TransportInfo {
 
 export interface NetworkInfo {
   networkId: number;
-  /** 最初の TS のリモコン番号。地上波の NIT は自分の TS 1 つだけを載せる */
+  /** TS 情報記述子を最初に載せていた TS のリモコン番号。地上波の NIT は自分の TS 1 つだけを載せる */
   remoteControlKeyId: number | null;
   transportStreams: NetworkTransport[];
 }
 
-/** 何も組み上がらなかったときの返り。使い回すので `Object.freeze` してある */
+/** 何も組み上がらなかったときの戻り値。使い回すので `Object.freeze` してある */
 const NONE: readonly Uint8Array[] = Object.freeze([]);
 
 /**
@@ -143,8 +144,8 @@ export class SectionAssembler {
   /**
    * パケットを 1 つ渡す。組み上がったセクションを返す。
    *
-   * 返りは**読むだけ**にすること。何も組み上がらないとき (ほとんどのパケット) は
-   * 使い回しの空配列を返す (関係ないパケットのたびに配列を作っていた)
+   * 戻り値は**読むだけ**にすること。何も組み上がらないとき (ほとんどのパケット) は
+   * 使い回しの空配列を返す (関係ないパケットのたびに配列を作らないため)
    */
   feed(packet: Uint8Array): readonly Uint8Array[] {
     // トランスポートエラーが立っているものは信用しない
@@ -361,6 +362,12 @@ export function* descriptors(
 export const DESC_DIGITAL_COPY_CONTROL = 0xc1;
 
 /**
+ * 音声の ES の stream_type (AAC。日本の放送の音声)。主音声の何本目かは、どこでもこの stream_type だけを PMT の順に数える
+ * (pes.ts の `readPmt`・bml.ts の `pmtAudios`・データ放送の主音声)。ffmpeg の `0:a:<n>` ともそろう
+ */
+export const STREAM_AAC = 0x0f;
+
+/**
  * デジタルコピー制御記述子の中身 (タグと長さを除いたもの) から、**コピー禁止か**を読む。
  *
  * 先頭 2 ビットの digital_recording_control_data が 11 なら禁止
@@ -510,7 +517,7 @@ export interface TerrestrialDelivery {
  * ケーブルの分配の記述子 (0x44)。どの周波数で、どう変調して流れているか。
  *
  * **並びは推定。** 有線の告示にある 0x44 の本文は読めていない。同じ系統の有線複数搬送波伝送分配システム記述子 (0xF3。総務省の告示の改正案) は
- * 周波数 (32)・0xFF (8)・多重フレーム型式番号 (4)・外符号 (4)・変調 (8)・シンボルレート (28)・内符号 (4) の並びで、0x44 も同じと見ている。
+ * 周波数 (32)・0xFF (8)・多重フレーム型式番号 (4)・外符号 (4)・変調 (8)・シンボルレート (28)・内符号 (4) の並びで、0x44 も同じとみなしている。
  * DVB (EN 300 468) では、多重フレーム型式番号の 4 ビットは reserved
  */
 export interface CableDelivery {
@@ -536,6 +543,11 @@ export interface NetworkTransport extends TransportInfo {
   delivery: Delivery | null;
   /** その TS のリモコン番号 (TS 情報記述子)。載せていなければ null */
   remoteControlKeyId: number | null;
+  /**
+   * 部分受信の局 (ワンセグ) の service_id (部分受信記述子 0xFB)。地上波の NIT[actual] が自分の TS に載せる。
+   * 載せていなければ空
+   */
+  partialReception: number[];
 }
 
 /** BCD の桁を左から `digits` 桁ぶん読んで、10 進の整数にする */
@@ -646,10 +658,14 @@ function parseNitSection(section: Uint8Array): NitSection | null {
     const services: Service[] = [];
     let delivery: Delivery | null = null;
     let remote: number | null = null;
+    const partialReception: number[] = [];
     for (const [tag, descriptor] of descriptors(body)) {
       if (tag === DESC_TS_INFORMATION && descriptor.length > 0) {
         remote ??= descriptor[0]!;
         remoteControlKeyId ??= remote;
+      } else if (tag === DESC_PARTIAL_RECEPTION) {
+        for (let i = 0; i + 2 <= descriptor.length; i += 2)
+          partialReception.push(u16(descriptor, i));
       } else if (tag === DESC_SERVICE_LIST) {
         for (let i = 0; i + 3 <= descriptor.length; i += 3) {
           services.push({
@@ -672,6 +688,7 @@ function parseNitSection(section: Uint8Array): NitSection | null {
       services,
       delivery,
       remoteControlKeyId: remote,
+      partialReception,
     });
   }
 
@@ -689,7 +706,7 @@ function parseNitSection(section: Uint8Array): NitSection | null {
 }
 
 /**
- * NIT からネットワーク ID とリモコン番号、他の TS の顔ぶれを読む。**セクション 1 つぶん。**
+ * NIT からネットワーク ID とリモコン番号、TS の一覧を読む。**セクション 1 つぶん。**
  * スキャンで「どのネットワークか」を知るにはこれで足りる。ネットワークの全部の TS が要るなら `NitReader`
  */
 function parseNit(section: Uint8Array): NetworkInfo | null {
@@ -922,6 +939,11 @@ export interface FoundService extends Service {
   networkId: number;
   transportStreamId: number;
   remoteControlKeyId: number | null;
+  /**
+   * 部分受信の局 (ワンセグ) か。NIT の自分の TS に部分受信記述子 (0xFB) があり、そこに載っていれば true。
+   * 記述子の無いネットワーク (BS・CS と、確かめていないケーブル) と NIT を読まなかったときは false
+   */
+  partialReception: boolean;
 }
 
 /**
@@ -934,7 +956,7 @@ export interface FoundService extends Service {
  * **ケーブル (`requireNit: false`) は SDT[actual] だけで揃ったとみなす。** 1 つのネットワークが
  * 地上波・BS の再送信と自主放送の TS をまとめて流していて、NIT は CATV のネットワークのもの
  * (局の元の放送とは別)。どの放送の局かは SDT の original_network_id で分かる。
- * NIT が先に来ていれば、その TS のリモコン番号だけを使う。
+ * NIT が先に来ていれば、その TS のリモコン番号と部分受信の局だけを使う。
  * PAT に局が 1 つも無い TS (データだけの TS) も揃ったとみなし、局は返さない (`empty`)
  */
 export class ServiceReader {
@@ -982,11 +1004,17 @@ export class ServiceReader {
     return this.complete;
   }
 
-  /** 録るに値するサービスだけ。リモコン番号は NIT のものを配る */
+  /** 録画の対象になる種類の局だけ (`SERVICE_TYPES`)。リモコン番号と部分受信の局は NIT から付ける */
   services(): FoundService[] {
     const transport = this.transport;
     if (transport === null) return [];
     const { transportStreamId, originalNetworkId } = transport;
+    const own = this.network?.transportStreams.find(
+      (ts) =>
+        ts.transportStreamId === transportStreamId &&
+        ts.originalNetworkId === originalNetworkId,
+    );
+    const partial = new Set(own?.partialReception ?? []);
     const found = (
       networkId: number,
       remoteControlKeyId: number | null,
@@ -998,16 +1026,12 @@ export class ServiceReader {
           networkId,
           transportStreamId,
           remoteControlKeyId,
+          partialReception: partial.has(service.serviceId),
         }));
     if (this.requireNit) {
       if (this.network === null) return [];
       return found(this.network.networkId, this.network.remoteControlKeyId);
     }
-    const own = this.network?.transportStreams.find(
-      (ts) =>
-        ts.transportStreamId === transportStreamId &&
-        ts.originalNetworkId === originalNetworkId,
-    );
     return found(originalNetworkId, own?.remoteControlKeyId ?? null);
   }
 }

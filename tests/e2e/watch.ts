@@ -6,7 +6,7 @@ import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, fakeDataBroadcast, recordOne } from "./helpers";
 
 /**
- * 録画を観る画面のテスト (22-watch・22-watch-clips・22-watch-layout・23-watch-data・23-watch-data-receive) の道具
+ * 録画を観る画面のテスト (22-watch・22-watch-clips・22-watch-layout・23-watch-data・23-watch-data-receive・39-watch-adapt-relay・39-watch-resume) の道具
  */
 
 /** 使い回す録画を返す関数。初めて呼んだときに録る */
@@ -66,7 +66,7 @@ export async function putClip(
 }
 
 /**
- * **「このブラウザでは再生できませんでした」の幕を畳む** (画像で字幕を確かめるテストだけ)。
+ * **「このブラウザでは再生できませんでした」の幕を消す** (画像で字幕を確かめるテストだけ)。
  * 偽の録画は中身が無く、ブラウザは再生に転んで幕 (`watch-status`。映像の箱を暗く覆う) を出す。
  * データ放送の小窓に寄せた映像の箱もその下にあるので、塗った字幕が暗く写る。本物の録画では出ない
  */
