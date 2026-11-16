@@ -1489,6 +1489,7 @@ denpa の `ServiceFilter` とブラウザの `PesDemuxer` もカウンタを見�
 エージェントの API (`AGENT_PORT`、25252) は **HTTPS だけ**で、**組んだ denpa しか通しません**
 (`agent/Denpa.Agent/AgentTls.cs`)。`/denpa/stream` は復号済みの TS をそのまま返し、`/denpa/card` はカード ID を返すので、
 届いた人を誰でも通すわけにはいきません。平文の HTTP は残していません (切り替える設定もありません)。
+（denpa-dt295-patches を適用した denpa は、DT295 エージェントに限り平文の `http://` も受け付けます。認証・TLS は行われません）
 前のバージョン (平文の HTTP) から上げるときの注意は [config.md](config.md#エージェントとの通信を-tls-にした-前のバージョンから上げるとき) にあります。
 
 - **お互いを証明書で確かめます。** エージェントは自分の鍵と自己署名の証明書を持ち、denpa にもクライアント証明書を求めます。

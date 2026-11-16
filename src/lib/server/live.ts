@@ -112,6 +112,7 @@ import {
   tsFileHead,
 } from "./chase";
 import { config } from "./config";
+import { tunerPresetOrigin, transcodingFromPresetsHtml } from "./tuner-preset";
 import { scrambledLiveNotice } from "./contracts";
 import { AutoStartWatch, DataBroadcast } from "./databroadcast";
 import { orm } from "./db";
@@ -320,16 +321,19 @@ export function encodeArgs(
 ): string[] {
   if (silent) return silentArgs(rung);
   const uhd = transport === "tlv";
-  const copy =
-    (tunerCopy && codec === "h264") || copiesVideo(transport, video, codec);
+  // チューナーが作った H.264 は HEVC とタグが違う (`hvc1` を付けると mp4 muxer が失敗する)
+  const tunerH264 = tunerCopy && codec === "h264";
+  const copy = tunerH264 || copiesVideo(transport, video, codec);
   const picture =
     codec === "audio"
       ? null
-      : copy
-        ? HEVC_COPY
-        : video === "hevc"
-          ? uhdVideoArgs(codec, hw, rung, half)
-          : videoArgs(codec, hw, true, rung, null, half);
+      : tunerH264
+        ? H264_COPY
+        : copy
+          ? HEVC_COPY
+          : video === "hevc"
+            ? uhdVideoArgs(codec, hw, rung, half)
+            : videoArgs(codec, hw, true, rung, null, half);
   // 4K の局の fMP4 には番組の番号が無い (局は 1 つだけ)
   const from = uhd ? "0" : programSpec(program);
   return [
@@ -339,6 +343,11 @@ export function encodeArgs(
     // 数字の進み具合だけ止める。`-loglevel` は下げられない (上の説明)
     "-nostats",
     // `-fflags nobuffer` は付けない。解析の間に読んだ I フレームを捨てて次の GOP を待つ (上の説明)
+    // 壊れたパケットで ffmpeg が落ちないようにする (旧 dt295 ブランチの CS 対策を復帰)
+    "-err_detect",
+    "ignore_err",
+    "-fflags",
+    "+discardcorrupt",
     // 1 局に絞ってあるが、字幕まで見つけさせるぶん要る (上の説明)。映像を写すときは多く読む (`HEVC_COPY_PROBE`)
     "-probesize",
     copy ? HEVC_COPY_PROBE : "100000",
@@ -457,7 +466,8 @@ export function copiesVideo(
 
 /**
  * **チューナーが既に H.264 を作っているか** (`config.liveCopy` のときだけ写す)。
- * エージェントの /presets の「適用中」を見て、passthrough 以外なら true。
+ * エージェントの /presets の「適用中」を見て、passthrough と「(不明)」以外なら true。
+ * 「適用中」は GR/BS の設定なので、CS は呼び側でコピーさせない (`Session.runEncode`)。
  * 短く待って、少しの間は覚えておく (選局のたびに待つと映像が出るのが遅れる)。
  */
 const PRESET_TTL = 30_000;
@@ -469,16 +479,17 @@ export async function tunerTranscoding(): Promise<boolean> {
     return presetSeen.transcoding;
   }
   let transcoding = false;
-  try {
-    const res = await fetch(`${config.agentUrl}/presets`, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(1500),
-    });
-    const html = await res.text();
-    const active = /適用中: <b>([^<]*)<\/b>/.exec(html)?.[1] ?? null;
-    transcoding = active !== null && active !== "passthrough";
-  } catch {
-    transcoding = false;
+  const origin = tunerPresetOrigin();
+  if (origin !== null) {
+    try {
+      const res = await fetch(`${origin}/presets`, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(1500),
+      });
+      transcoding = transcodingFromPresetsHtml(await res.text());
+    } catch {
+      transcoding = false;
+    }
   }
   presetSeen = { at: now, transcoding };
   return transcoding;
@@ -493,6 +504,17 @@ const HEVC_COPY: { input: string[]; filter: string; encoder: string[] } = {
   input: [],
   filter: "",
   encoder: ["-c:v", "copy", "-tag:v", "hvc1"],
+};
+
+/**
+ * **チューナーが作った H.264 をそのまま写す** (`config.liveCopy`)。
+ * `HEVC_COPY` と違って `-tag:v hvc1` を付けない — H.264 (avc1) に hvc1 を付けると
+ * ffmpeg の mp4 muxer がヘッダを書けず失敗する (実測 2026-11-17)。
+ */
+const H264_COPY: { input: string[]; filter: string; encoder: string[] } = {
+  input: [],
+  filter: "",
+  encoder: ["-c:v", "copy"],
 };
 
 /**
@@ -1812,7 +1834,6 @@ class Session {
    * 映像のコーデックは PMT を読んでから決まるので、ffmpeg を起こすたびに決め直す (`runEncode`)
    */
   private copied = false;
-  private copyExpected = false;
 
   /** 4K の局の放送の HEVC を、エンコードせずに詰め替えて配るか (`runMmt`)。4K の局の `hevc` はこれだけを指す */
   get passthrough(): boolean {
@@ -2297,17 +2318,18 @@ class Session {
         this.busy = false;
         this.noMedia = null;
         let tunerCopy = false;
+        // 「適用中」は GR/BS の設定。CS は別プロファイル (多くは passthrough) なので写さない
         if (
           config.liveCopy &&
           this.codec === "h264" &&
-          this.source === undefined
+          this.source === undefined &&
+          (this.channelType === "GR" || this.channelType === "BS")
         ) {
           tunerCopy = await tunerTranscoding();
         }
         if (tunerCopy) hw = null;
         this.copied =
           tunerCopy || copiesVideo(this.transport, video, this.codec);
-        this.copyExpected = tunerCopy;
         this.software = hw === null && !this.copied;
         // 遅れと速さは ffmpeg ごとに数え直す (前の ffmpeg の遅れと、起こし直した直後の速さを合わせない)
         this.lag.reset();

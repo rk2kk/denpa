@@ -97,7 +97,7 @@ export function liveCodecs(opts: {
   onselect: (choice: LiveChoice) => void;
   /** チューナー側の画質 (DT295 のオンボード変換)。選局のときにだけ効く */
   preset?: string;
-  presets?: { id: string; label: string }[];
+  presets?: readonly { id: string; label: string }[];
   onpreset?: (preset: string) => void;
 }): SettingChoice {
   const broadcast = opts.broadcast ?? "mpeg2";

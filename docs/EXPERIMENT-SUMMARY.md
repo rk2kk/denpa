@@ -1,6 +1,6 @@
 # PIX-DT295 + denpa 実験総括
 
-最終更新: 2026-11-05
+最終更新: 2026-11-17
 
 ## 1. 目的
 
@@ -105,7 +105,7 @@ passthrough 後も denpa で CS が視聴できない問題が発生。原因:
 | ------------------ | ---------------------------------------- |
 | Raspberry Pi 5     | 稼働中                                   |
 | tuner-agent        | dt295-agent:local (0.3.2-dt295)          |
-| denpa              | denpa-fork:prod (v2.31.0 + DT295 パッチ) |
+| denpa              | 上流 v2.51.0 + DT295 パッチ (denpa-dt295-patches) |
 | pix-ts-legacy      | v0.1.4 (upstream merge 済み)             |
 | CS プロファイル    | passthrough (MPEG-2)                     |
 | GR/BS プロファイル | 720p8m (H.264, 7,644 kbps)               |
@@ -117,3 +117,12 @@ passthrough 後も denpa で CS が視聴できない問題が発生。原因:
 2. GR/BS は H.264 トランスコード + コピー経路で低負荷・高画質
 3. BonDriver の開発は現実的ではないため、Pi + denpa 構成を継続
 4. tuner ファームウェアの CS バグは PIXELA がサポート終了のため修正不可
+
+## 6. v2.51 パッチ (denpa-dt295-patches) での変更
+
+- 対象: 上流 denpa v2.51.0 に `patches/0001-dt295-customizations.patch` を適用する方式 (fork を直接追従しない)
+- H.264 コピー経路は `-tag:v hvc1` を外した専用の引数を使う。HEVC のタグを付けると ffmpeg の mp4 muxer が失敗する (実測 2026-11-17)
+- コピーは GR/BS だけに限定した。`/presets` の「適用中」は GR/BS の設定を返すため、CS で誤判定して MPEG-2 を写さないようにするため
+- `-err_detect ignore_err` / `-fflags +discardcorrupt` を旧ブランチから復帰した (§3.1 の途切れは解消しないが、デコードエラーで落ちないため残す)
+- 「適用中」が `(不明)` のときはコピーしない。環境変数の URL はパースしてから使う (`#pair=` やカンマを送らない)
+- 平文 http はこのパッチを適用した denpa だけが受け付ける (上流エージェントは TLS 必須のまま)

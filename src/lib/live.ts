@@ -72,7 +72,6 @@ export function codecsFor(
 }
 
 /**
-/**
  * **4K の局の放送の HEVC と AAC を詰め替えた fMP4** (`server/live.ts` の 4K の経路。`mp4/mmt.ts`)。
  * Main 10 Profile・Level 5.1 (2160p60)。入れ物の中の名前は `hvc1` (Safari は `hev1` を受け取らない。VPS・SPS・PPS は `hvcC` にだけ置く。`mp4/mmt.ts`)
  */
@@ -97,15 +96,15 @@ export function mseType(
  * チューナー側の画質プリセット (DT295 のオンボード変換)。
  * `passthrough` は変換しない = 放送の MPEG-2 そのまま。値は選局のときにだけ効く。
  */
-export type LiveTunerPreset = string;
-
-export const LIVE_TUNER_PRESETS: { id: LiveTunerPreset; label: string }[] = [
+export const LIVE_TUNER_PRESETS = [
   { id: "passthrough", label: "MPEG-2 パススルー" },
   { id: "720p8m", label: "H.264 720p 8Mbps" },
   { id: "720p4m", label: "H.264 720p 4Mbps" },
   { id: "480p15", label: "H.264 480p 1.5Mbps" },
   { id: "240p03", label: "H.264 240p 300kbps" },
-];
+] as const;
+
+export type LiveTunerPreset = (typeof LIVE_TUNER_PRESETS)[number]["id"];
 
 /**
  * 選べる字幕 1 つぶん。**取り決めなので、ここに置く**。組み立てるのは

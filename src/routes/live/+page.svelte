@@ -319,14 +319,20 @@
   }
 
   async function selectTunerPreset(name: string) {
-    tunerPresetId = name;
     try {
       const res = await fetch(resolve("api/tuner-preset"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ preset: name }),
       });
-      if (!res.ok) await loadTunerPreset();
+      if (!res.ok) {
+        await loadTunerPreset();
+        return;
+      }
+      // 切り替えが成功したときだけ表示とコーデックを合わせる (失敗したら元に戻す)
+      tunerPresetId = name;
+      if (name === "passthrough") player.setChoice("raw");
+      else if (player.choice === "raw") player.setChoice("h264");
     } catch {
       await loadTunerPreset();
     }
@@ -908,8 +914,6 @@
                 presets: LIVE_TUNER_PRESETS,
                 onpreset: (id) => {
                   void selectTunerPreset(id);
-                  if (id === "passthrough") player.setChoice("raw");
-                  else if (player.choice === "raw") player.setChoice("h264");
                 },
               })}
               audio={liveAudio(AUDIO, player)}

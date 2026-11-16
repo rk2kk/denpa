@@ -1,6 +1,9 @@
 import { json } from "@sveltejs/kit";
 
-import { config } from "#lib/server/config.js";
+import {
+  activePresetFromHtml,
+  tunerPresetOrigin,
+} from "#lib/server/tuner-preset.js";
 
 /**
  * チューナー (DT295 エージェント) の画質プリセットを読み書きする。
@@ -12,13 +15,14 @@ import { config } from "#lib/server/config.js";
 const PRESET = /^[a-z0-9]{1,16}$/;
 
 export async function GET() {
+  const origin = tunerPresetOrigin();
+  if (origin === null) return json({ active: null });
   try {
-    const res = await fetch(`${config.agentUrl}/presets`, {
+    const res = await fetch(`${origin}/presets`, {
       redirect: "manual",
+      signal: AbortSignal.timeout(1500),
     });
-    const html = await res.text();
-    const active = /適用中: <b>([^<]*)<\/b>/.exec(html)?.[1] ?? null;
-    return json({ active });
+    return json({ active: activePresetFromHtml(await res.text()) });
   } catch {
     return json({ active: null });
   }
@@ -32,10 +36,17 @@ export async function POST({ request }: { request: Request }) {
   if (!PRESET.test(preset)) {
     return json({ message: "preset が不正です" }, { status: 400 });
   }
+  const origin = tunerPresetOrigin();
+  if (origin === null) {
+    return json({ message: "チューナーに繋がりません" }, { status: 502 });
+  }
   try {
     const res = await fetch(
-      `${config.agentUrl}/presets/select?name=${encodeURIComponent(preset)}`,
-      { redirect: "manual" },
+      `${origin}/presets/select?name=${encodeURIComponent(preset)}`,
+      {
+        redirect: "manual",
+        signal: AbortSignal.timeout(1500),
+      },
     );
     if (res.status >= 400) {
       return json({ message: "切り替えに失敗しました" }, { status: 502 });

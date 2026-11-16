@@ -384,6 +384,20 @@ describe("チューナーの H.264 をそのまま写す", () => {
     expect(args[args.indexOf("-c:a") + 1]).toBe("aac");
   });
 
+  /** H.264 に hvc1 を付けると mp4 muxer がヘッダを書けない (実測 2026-11-17) */
+  test("H.264 には hvc1 のタグを付けない", () => {
+    const args = passthrough();
+    expect(args).not.toContain("-tag:v");
+    expect(args).not.toContain("hvc1");
+  });
+
+  /** 旧 dt295 ブランチの CS 対策を復帰した */
+  test("壊れたパケットは捨てる", () => {
+    const joined = passthrough().join(" ");
+    expect(joined).toContain("-err_detect ignore_err");
+    expect(joined).toContain("-fflags +discardcorrupt");
+  });
+
   /** フィルタを掛けると ffmpeg がデコードを始めるので、写せない */
   test("インタレ解除もコマ数の上限も掛けない", () => {
     const args = passthrough();
@@ -674,6 +688,7 @@ describe("音声だけのエンコード方式 (外から使う API の ?audio=o
       "pipe:3",
       "ts",
       "mpeg2",
+      false,
       true,
     );
     expect(args).not.toContain("pipe:0");
