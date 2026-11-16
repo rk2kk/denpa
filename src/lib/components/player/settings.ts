@@ -129,7 +129,7 @@ export function liveCodecs(opts: {
       ...(opts.onpreset
         ? (opts.presets ?? []).map((p) => ({
             key: `tuner:${p.id}`,
-            label: `チューナー: ${p.label}`,
+            label: p.label,
             active: p.id === opts.preset,
           }))
         : []),
