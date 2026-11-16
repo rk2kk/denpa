@@ -100,11 +100,11 @@ export function mseType(
 export type LiveTunerPreset = string;
 
 export const LIVE_TUNER_PRESETS: { id: LiveTunerPreset; label: string }[] = [
-  { id: "passthrough", label: "パススルー (MPEG-2)" },
-  { id: "720p8m", label: "720p 8Mbps" },
-  { id: "720p4m", label: "720p 4Mbps" },
-  { id: "480p15", label: "480p 1.5Mbps" },
-  { id: "240p03", label: "240p 300kbps" },
+  { id: "passthrough", label: "MPEG-2 パススルー" },
+  { id: "720p8m", label: "H.264 720p 8Mbps" },
+  { id: "720p4m", label: "H.264 720p 4Mbps" },
+  { id: "480p15", label: "H.264 480p 1.5Mbps" },
+  { id: "240p03", label: "H.264 240p 300kbps" },
 ];
 
 /**
