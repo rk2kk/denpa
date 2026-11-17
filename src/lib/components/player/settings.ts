@@ -95,10 +95,6 @@ export function liveCodecs(opts: {
   broadcast?: BroadcastCodec;
   unavailable: LiveCodec[];
   onselect: (choice: LiveChoice) => void;
-  /** チューナー側の画質 (DT295 のオンボード変換)。選局のときにだけ効く */
-  preset?: string;
-  presets?: readonly { id: string; label: string }[];
-  onpreset?: (preset: string) => void;
 }): SettingChoice {
   const broadcast = opts.broadcast ?? "mpeg2";
   const codecs = LIVE_CODECS.filter((c) => c.id === opts.shown);
@@ -126,21 +122,38 @@ export function liveCodecs(opts: {
         label: formatLabel("raw", broadcast),
         active: opts.choice === "raw",
       },
-      ...(opts.onpreset
-        ? (opts.presets ?? []).map((p) => ({
-            key: `tuner:${p.id}`,
-            label: p.label,
-            active: p.id === opts.preset,
-          }))
-        : []),
     ],
     pick: (key) => {
-      if (typeof key === "string" && key.startsWith("tuner:")) {
-        opts.onpreset?.(key.slice("tuner:".length));
-      } else if (key === MPEG2) opts.onselect("raw");
+      if (key === MPEG2) opts.onselect("raw");
       else if (key === AUTO) opts.onselect("auto");
       else opts.onselect(key as LiveChoice);
     },
+  };
+}
+
+/**
+ * チューナー側の画質 (DT295 / レコーダーのオンボード変換)。再生画面では
+ * 「コーデック」とは別の行として並べ、押すとプリセット一覧の階層に入る。
+ * 選んだ値は選局のときにだけ効く。
+ */
+export function liveTunerPreset(opts: {
+  icon: IconShape;
+  preset: string;
+  presets: readonly { id: string; label: string }[];
+  onpreset: (preset: string) => void;
+}): SettingChoice {
+  const active = opts.presets.find((p) => p.id === opts.preset);
+  return {
+    id: "tuner-preset",
+    label: "チューナー画質",
+    icon: opts.icon,
+    value: active?.label ?? opts.preset,
+    options: opts.presets.map((p) => ({
+      key: p.id,
+      label: p.label,
+      active: p.id === opts.preset,
+    })),
+    pick: (key) => opts.onpreset(String(key)),
   };
 }
 

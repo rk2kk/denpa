@@ -55,6 +55,7 @@
   import {
     liveAudio,
     liveCodecs,
+    liveTunerPreset,
     liveSubtitle,
     muteRow,
     speedRow,
@@ -910,6 +911,9 @@
                 broadcast: player.broadcast,
                 unavailable: player.unavailable,
                 onselect: (next) => player.setChoice(next),
+              })}
+              preset={liveTunerPreset({
+                icon: CODEC,
                 preset: tunerPresetId,
                 presets: LIVE_TUNER_PRESETS,
                 onpreset: (id) => {

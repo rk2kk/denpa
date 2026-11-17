@@ -54,6 +54,8 @@
     fold?: SettingRow[];
     /** コーデック (`settings.ts` の `liveCodecs` / `recordingCodecs`)。選べないときは省く */
     codec?: SettingChoice | undefined;
+    /** チューナー側の画質 (liveTunerPreset)。コーデックとは別の行に並べる */
+    preset?: SettingChoice | undefined;
     /** 音声 (`settings.ts` の `audioTracks`)。選べるものが 2 つ以上あるときだけ */
     audio?: SettingChoice | undefined;
     /** CM スキップ (観る画面で、CM の入った録画だけ) */
@@ -93,6 +95,7 @@
     fullscreen,
     stage,
     codec,
+    preset,
     audio,
     cm,
     data,
@@ -223,7 +226,7 @@
     },
   ]);
   const choices = $derived(
-    [subtitle, audio, codec].filter((item) => item !== undefined),
+    [subtitle, audio, codec, preset].filter((item) => item !== undefined),
   );
 </script>
 
